@@ -948,15 +948,8 @@ func rewriteHostPort(hostPort, newHost string) string {
 }
 
 // isHostGateway returns true if the given host matches the run's host gateway address.
-//
-// Matches are:
-//   - The literal HostGateway value (synthetic "moat-host" or the legacy
-//     IP form "127.0.0.1" for pre-synthetic-hostname daemons).
-//   - Loopback aliases ("localhost", "127.0.0.1", "::1") whenever HostGateway
-//     is either the synthetic hostname or the legacy loopback IP. In both
-//     configurations HostGatewayIP is 127.0.0.1, so a container CONNECT to
-//     "localhost:8080" or "127.0.0.1:8080" would otherwise slip past the
-//     host-service check and be dialed as-is, bypassing the per-port allowlist.
+// Also matches loopback aliases when the gateway routes to loopback, preventing
+// containers from bypassing policy by connecting to "localhost" or "::1" directly.
 func isHostGateway(rc *RunContextData, host string) bool {
 	if rc == nil || rc.HostGateway == "" {
 		return false
@@ -964,12 +957,29 @@ func isHostGateway(rc *RunContextData, host string) bool {
 	if host == rc.HostGateway {
 		return true
 	}
-	// Synthetic hostname or legacy loopback IP — both route to 127.0.0.1 on
-	// the host side, so loopback aliases must be caught here.
-	if rc.HostGateway == "moat-host" || rc.HostGateway == "127.0.0.1" {
+	if gatewayRoutesToLoopback(rc) {
 		return host == "localhost" || host == "127.0.0.1" || host == "::1"
 	}
 	return false
+}
+
+// gatewayRoutesToLoopback reports whether the host gateway ultimately routes
+// to a loopback address. Checks HostGatewayIP first (the resolved forwarding
+// address), falling back to HostGateway itself (which may be a loopback IP
+// directly, or a synthetic hostname that implies loopback forwarding).
+func gatewayRoutesToLoopback(rc *RunContextData) bool {
+	if rc.HostGatewayIP != "" {
+		ip := net.ParseIP(rc.HostGatewayIP)
+		return ip != nil && ip.IsLoopback()
+	}
+	ip := net.ParseIP(rc.HostGateway)
+	if ip != nil {
+		return ip.IsLoopback()
+	}
+	// Non-IP gateway (synthetic hostname) without HostGatewayIP set — assume
+	// loopback since synthetic hostnames are injected into container /etc/hosts
+	// pointing at the host, which is loopback from the proxy's perspective.
+	return true
 }
 
 // isAllowedHostPort returns true if the given port is in the run's allowed host ports list.
@@ -1320,7 +1330,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Rewrite synthetic host-gateway hostname to actual IP for forwarding.
-	// The container uses "moat-host" (which only exists in its /etc/hosts),
+	// The container uses a synthetic hostname (only in its /etc/hosts),
 	// but the proxy runs on the host where that name doesn't resolve.
 	outURL := r.URL.String()
 	if rc := getRunContext(r); rc != nil && rc.HostGatewayIP != "" && isHostGateway(rc, host) {
