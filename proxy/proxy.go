@@ -41,6 +41,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -297,6 +298,7 @@ type RunContextData struct {
 	CredStore            CredentialStore
 	KeepEngines          map[string]*keeplib.Engine
 	HostGateway          string
+	HostGatewayIP        string // actual IP to forward allowed host-gateway requests to
 	AllowedHostPorts     []int
 }
 
@@ -889,9 +891,65 @@ func (p *Proxy) getResponseTransformersForRequest(r *http.Request, host string) 
 	return p.getResponseTransformers(host)
 }
 
+// redactURLUserinfo removes userinfo (user:password@) from a URL-ish string
+// before logging. The proxy URL carries a per-run auth token in the userinfo
+// component (http://moat:TOKEN@host:port/...) and logging it verbatim would
+// expose the token in debug output. Returns the input unchanged if there is
+// no '@' before the first '/'.
+func redactURLUserinfo(s string) string {
+	schemeEnd := strings.Index(s, "://")
+	if schemeEnd < 0 {
+		return s
+	}
+	rest := s[schemeEnd+3:]
+	slash := strings.IndexByte(rest, '/')
+	authority := rest
+	if slash >= 0 {
+		authority = rest[:slash]
+	}
+	at := strings.IndexByte(authority, '@')
+	if at < 0 {
+		return s
+	}
+	return s[:schemeEnd+3] + "***@" + rest[at+1:]
+}
+
+// rewriteURLHost replaces the host in rawURL with newHost, preserving scheme,
+// port, path, query, and fragment. Falls back to the original string on parse
+// failure. Uses url.Parse rather than strings.Replace so bracketed IPv6 hosts
+// like "http://[::1]:8080/path" rewrite to a valid URL (e.g. "http://127.0.0.1:8080/path"
+// rather than "http://[127.0.0.1]:8080/path"), and so path or query text that
+// happens to match the host literal is not corrupted.
+func rewriteURLHost(rawURL, newHost string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return rawURL
+	}
+	if port := u.Port(); port != "" {
+		u.Host = net.JoinHostPort(newHost, port)
+	} else if strings.Contains(newHost, ":") {
+		// Bracket bare IPv6 hosts; url.URL.Host expects "[::1]", not "::1".
+		u.Host = "[" + newHost + "]"
+	} else {
+		u.Host = newHost
+	}
+	return u.String()
+}
+
+// rewriteHostPort replaces the host portion of a "host:port" address with
+// newHost, emitting bracketed form for IPv6 when necessary. Falls back to the
+// original string on parse failure.
+func rewriteHostPort(hostPort, newHost string) string {
+	_, port, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		return hostPort
+	}
+	return net.JoinHostPort(newHost, port)
+}
+
 // isHostGateway returns true if the given host matches the run's host gateway address.
-// On Linux (gateway "127.0.0.1"), also matches "localhost" and "::1" to prevent
-// bypass via alternate loopback address forms.
+// Also matches loopback aliases when the gateway routes to loopback, preventing
+// containers from bypassing policy by connecting to "localhost" or "::1" directly.
 func isHostGateway(rc *RunContextData, host string) bool {
 	if rc == nil || rc.HostGateway == "" {
 		return false
@@ -899,14 +957,29 @@ func isHostGateway(rc *RunContextData, host string) bool {
 	if host == rc.HostGateway {
 		return true
 	}
-	// On Linux, the gateway is 127.0.0.1. Match common loopback aliases so
-	// containers can't bypass blocking by using "localhost" or "::1". We don't
-	// match the full 127.0.0.0/8 range because containers practically never
-	// use addresses like 127.0.0.2; the firewall already restricts loopback.
-	if rc.HostGateway == "127.0.0.1" {
-		return host == "localhost" || host == "::1"
+	if gatewayRoutesToLoopback(rc) {
+		return host == "localhost" || host == "127.0.0.1" || host == "::1"
 	}
 	return false
+}
+
+// gatewayRoutesToLoopback reports whether the host gateway ultimately routes
+// to a loopback address. Checks HostGatewayIP first (the resolved forwarding
+// address), falling back to HostGateway itself (which may be a loopback IP
+// directly, or a synthetic hostname that implies loopback forwarding).
+func gatewayRoutesToLoopback(rc *RunContextData) bool {
+	if rc.HostGatewayIP != "" {
+		ip := net.ParseIP(rc.HostGatewayIP)
+		return ip != nil && ip.IsLoopback()
+	}
+	ip := net.ParseIP(rc.HostGateway)
+	if ip != nil {
+		return ip.IsLoopback()
+	}
+	// Non-IP gateway (synthetic hostname) without HostGatewayIP set — assume
+	// loopback since synthetic hostnames are injected into container /etc/hosts
+	// pointing at the host, which is loopback from the proxy's perspective.
+	return true
 }
 
 // isAllowedHostPort returns true if the given port is in the run's allowed host ports list.
@@ -1256,8 +1329,16 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Rewrite synthetic host-gateway hostname to actual IP for forwarding.
+	// The container uses a synthetic hostname (only in its /etc/hosts),
+	// but the proxy runs on the host where that name doesn't resolve.
+	outURL := r.URL.String()
+	if rc := getRunContext(r); rc != nil && rc.HostGatewayIP != "" && isHostGateway(rc, host) {
+		outURL = rewriteURLHost(outURL, rc.HostGatewayIP)
+	}
+
 	// Create outgoing request
-	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), r.Body)
+	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, outURL, r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -1314,7 +1395,17 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	p.logRequest(r, r.Method, r.URL.String(), statusCode, duration, err, originalReqHeaders, respHeaders, reqBody, respBody, injectedHeaders)
 
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		// Redact proxy userinfo from logged URLs so the per-run auth token
+		// never lands in debug logs verbatim.
+		slog.Warn("proxy forward failed",
+			"subsystem", "proxy",
+			"method", r.Method,
+			"in_url", redactURLUserinfo(r.URL.String()),
+			"out_url", redactURLUserinfo(outURL),
+			"error", err.Error())
+		// Don't echo the upstream error verbatim to the container — it can
+		// leak internal hostnames/IPs and is rarely useful to the agent.
+		http.Error(w, "moat proxy: upstream request failed", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
@@ -1383,10 +1474,24 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	p.handleConnectTunnel(w, r)
 }
 
+// connectTunnelDialTimeout bounds how long the proxy waits to connect to the
+// upstream on behalf of a CONNECT request. An unreachable HostGatewayIP (e.g.
+// daemon-version-skew sends an empty IP and the fallback resolves nowhere)
+// would otherwise cause the container to stall indefinitely.
+const connectTunnelDialTimeout = 10 * time.Second
+
 func (p *Proxy) handleConnectTunnel(w http.ResponseWriter, r *http.Request) {
-	targetConn, err := net.Dial("tcp", r.Host)
+	// Rewrite synthetic host-gateway hostname to actual IP for dialing.
+	dialAddr := r.Host
+	if rc := getRunContext(r); rc != nil && rc.HostGatewayIP != "" {
+		host, _, _ := net.SplitHostPort(r.Host)
+		if isHostGateway(rc, host) {
+			dialAddr = rewriteHostPort(r.Host, rc.HostGatewayIP)
+		}
+	}
+	targetConn, err := net.DialTimeout("tcp", dialAddr, connectTunnelDialTimeout)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		http.Error(w, "moat proxy: dial upstream failed", http.StatusBadGateway)
 		return
 	}
 
@@ -1499,7 +1604,12 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		originalReqHeaders := req.Header.Clone()
 
 		req.URL.Scheme = "https"
-		req.URL.Host = r.Host
+		// Rewrite synthetic host-gateway hostname to actual IP for forwarding.
+		connectHost := r.Host
+		if rc := getRunContext(r); rc != nil && rc.HostGatewayIP != "" && isHostGateway(rc, host) {
+			connectHost = rewriteHostPort(r.Host, rc.HostGatewayIP)
+		}
+		req.URL.Host = connectHost
 		req.RequestURI = ""
 
 		// Check request-level rules (method + path) for the inner HTTP request.
