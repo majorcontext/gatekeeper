@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/majorcontext/gatekeeper"
 
@@ -99,7 +100,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer func() {
-		if err := otelShutdown(ctx); err != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := otelShutdown(shutdownCtx); err != nil {
 			fmt.Fprintf(os.Stderr, "error shutting down otel: %v\n", err)
 		}
 	}()

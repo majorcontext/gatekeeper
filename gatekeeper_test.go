@@ -1091,3 +1091,25 @@ func TestOTelSpanEventsViaHTTPRequest(t *testing.T) {
 		t.Error("expected request.complete span event from RequestLogger callback")
 	}
 }
+
+func TestResolveAWSSigV4Signer_PartialCredentials(t *testing.T) {
+	_, err := resolveAWSSigV4Signer(SourceConfig{
+		Type:        "aws-sigv4",
+		Region:      "us-east-1",
+		Service:     "bedrock",
+		AccessKeyID: "AKIA_ONLY",
+	})
+	if err == nil {
+		t.Fatal("expected error when only access_key_id is set")
+	}
+
+	_, err = resolveAWSSigV4Signer(SourceConfig{
+		Type:           "aws-sigv4",
+		Region:         "us-east-1",
+		Service:        "bedrock",
+		SecretAccessKey: "secret_only",
+	})
+	if err == nil {
+		t.Fatal("expected error when only secret_access_key is set")
+	}
+}

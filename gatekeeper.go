@@ -336,7 +336,10 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 }
 
 func resolveAWSSigV4Signer(cfg SourceConfig) (*requestsigner.AWSSigV4Signer, error) {
-	if cfg.AccessKeyID != "" && cfg.SecretAccessKey != "" {
+	if (cfg.AccessKeyID != "") != (cfg.SecretAccessKey != "") {
+		return nil, fmt.Errorf("aws-sigv4: access_key_id and secret_access_key must both be set or both omitted")
+	}
+	if cfg.AccessKeyID != "" {
 		return requestsigner.NewAWSSigV4SignerWithStaticCredentials(
 			cfg.AccessKeyID, cfg.SecretAccessKey, cfg.Region, cfg.Service,
 		)
