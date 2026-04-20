@@ -70,13 +70,6 @@ func TestResolveSourceAWSMissingSecret(t *testing.T) {
 	}
 }
 
-func TestResolveSourceAWSSigV4NotASource(t *testing.T) {
-	_, err := ResolveSource(SourceConfig{Type: "aws-sigv4", Region: "us-east-1", Service: "bedrock"})
-	if err == nil {
-		t.Fatal("expected error for aws-sigv4 through ResolveSource")
-	}
-}
-
 func TestResolveSourceExtraneousFields(t *testing.T) {
 	tests := []struct {
 		name string

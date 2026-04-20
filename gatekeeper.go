@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/majorcontext/gatekeeper/proxy"
-	"github.com/majorcontext/gatekeeper/requestsigner"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel/attribute"
@@ -296,15 +295,6 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 			return fmt.Errorf("credential %q: host is required", cred.Grant)
 		}
 
-		if cred.Source.Type == "aws-sigv4" {
-			signer, err := resolveAWSSigV4Signer(cred.Source)
-			if err != nil {
-				return fmt.Errorf("credential for %s: %w", cred.Host, err)
-			}
-			s.proxy.SetRequestSigner(cred.Host, signer.SignRequest)
-			continue
-		}
-
 		src, err := ResolveSource(cred.Source)
 		if err != nil {
 			return fmt.Errorf("credential for %s: %w", cred.Host, err)
@@ -333,18 +323,6 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 		s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
 	}
 	return nil
-}
-
-func resolveAWSSigV4Signer(cfg SourceConfig) (*requestsigner.AWSSigV4Signer, error) {
-	if (cfg.AccessKeyID != "") != (cfg.SecretAccessKey != "") {
-		return nil, fmt.Errorf("aws-sigv4: access_key_id and secret_access_key must both be set or both omitted")
-	}
-	if cfg.AccessKeyID != "" {
-		return requestsigner.NewAWSSigV4SignerWithStaticCredentials(
-			cfg.AccessKeyID, cfg.SecretAccessKey, cfg.Region, cfg.Service,
-		)
-	}
-	return requestsigner.NewAWSSigV4Signer(cfg.Region, cfg.Service)
 }
 
 // ensureAuthScheme ensures a credential value has an auth scheme prefix

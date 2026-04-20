@@ -286,9 +286,6 @@ func MatchesHostPattern(pattern HostPattern, host string, port int) bool {
 	return matchesPattern(pattern, host, port)
 }
 
-// RequestSigner signs an outbound HTTP request in place (e.g., AWS SigV4).
-type RequestSigner func(ctx context.Context, req *http.Request) error
-
 // RunContextData holds per-run credential data resolved by ContextResolver.
 type RunContextData struct {
 	RunID                string
@@ -297,7 +294,6 @@ type RunContextData struct {
 	RemoveHeaders        map[string][]string
 	TokenSubstitutions   map[string]*tokenSubstitution
 	ResponseTransformers map[string][]ResponseTransformer
-	RequestSigners       map[string]RequestSigner
 	MCPServers           []MCPServerConfig
 	Policy               string
 	AllowedHosts         []hostPattern
@@ -351,7 +347,6 @@ type Proxy struct {
 	mcpServers           []MCPServerConfig
 	removeHeaders        map[string][]string           // host -> []headerName
 	tokenSubstitutions   map[string]*tokenSubstitution // host -> substitution
-	requestSigners       map[string]RequestSigner      // host -> per-request signer (e.g., SigV4)
 	relays               map[string]string             // name -> target URL for relay endpoints
 	contextResolver      ContextResolver               // optional per-run credential resolver
 	policyLogger         PolicyLogger                  // optional policy decision logger
@@ -366,7 +361,6 @@ func NewProxy() *Proxy {
 		responseTransformers: make(map[string][]ResponseTransformer),
 		removeHeaders:        make(map[string][]string),
 		tokenSubstitutions:   make(map[string]*tokenSubstitution),
-		requestSigners:       make(map[string]RequestSigner),
 		policy:               "permissive", // default to permissive
 	}
 }
@@ -535,48 +529,6 @@ func (p *Proxy) SetTokenSubstitution(host, placeholder, realToken string) {
 		placeholder: placeholder,
 		realToken:   realToken,
 	}
-}
-
-// SetRequestSigner registers a per-request signer for a host.
-// The signer is called after all other header mutations (credential injection,
-// extra headers, remove headers, token substitution) so that the signature
-// covers the final canonical request.
-func (p *Proxy) SetRequestSigner(host string, signer RequestSigner) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.requestSigners[host] = signer
-}
-
-// getRequestSigner returns the request signer for a host.
-func (p *Proxy) getRequestSigner(host string) RequestSigner {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if s, ok := p.requestSigners[host]; ok {
-		return s
-	}
-	h, _, _ := net.SplitHostPort(host)
-	if h != "" {
-		return p.requestSigners[h]
-	}
-	return nil
-}
-
-// getRequestSignerForRequest returns the request signer for a host,
-// checking RunContextData first, then falling back to the proxy's own map.
-func (p *Proxy) getRequestSignerForRequest(r *http.Request, host string) RequestSigner {
-	if rc := getRunContext(r); rc != nil {
-		if s, ok := rc.RequestSigners[host]; ok {
-			return s
-		}
-		h, _, _ := net.SplitHostPort(host)
-		if h != "" {
-			if s, ok := rc.RequestSigners[h]; ok {
-				return s
-			}
-		}
-		return nil
-	}
-	return p.getRequestSigner(host)
 }
 
 // getTokenSubstitution returns the token substitution for a host.
@@ -1434,19 +1386,6 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		p.applyTokenSubstitution(outReq, sub)
 	}
 
-	// Apply per-request signing (e.g., AWS SigV4) after all other header mutations
-	// so the signature covers the final canonical request.
-	if signer := p.getRequestSignerForRequest(r, host); signer != nil {
-		if signErr := signer(r.Context(), outReq); signErr != nil {
-			slog.Warn("request signing failed",
-				"subsystem", "proxy",
-				"host", host,
-				"error", signErr.Error())
-			http.Error(w, "moat proxy: request signing failed", http.StatusBadGateway)
-			return
-		}
-	}
-
 	// Forward request
 	resp, err := http.DefaultTransport.RoundTrip(outReq)
 	duration := time.Since(start)
@@ -1779,27 +1718,6 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		logURL := req.URL.String()
 		if sub := p.getTokenSubstitutionForRequest(r, host); sub != nil {
 			p.applyTokenSubstitution(req, sub)
-		}
-
-		// Apply per-request signing (e.g., AWS SigV4) after all other header mutations.
-		if signer := p.getRequestSignerForRequest(r, host); signer != nil {
-			if signErr := signer(r.Context(), req); signErr != nil {
-				slog.Warn("request signing failed",
-					"subsystem", "proxy",
-					"host", host,
-					"error", signErr.Error())
-				errBody := "moat proxy: request signing failed\n"
-				signErrResp := &http.Response{
-					StatusCode:    http.StatusBadGateway,
-					ProtoMajor:    1,
-					ProtoMinor:    1,
-					Header:        make(http.Header),
-					ContentLength: int64(len(errBody)),
-					Body:          io.NopCloser(strings.NewReader(errBody)),
-				}
-				_ = signErrResp.Write(tlsClientConn)
-				continue
-			}
 		}
 
 		start := time.Now()

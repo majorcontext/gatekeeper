@@ -29,9 +29,6 @@ proxy/              Core TLS-intercepting proxy engine
   otel.go            OpenTelemetry handler wrapper, metrics instruments, span helpers
   server.go          Proxy server lifecycle (start/stop/listen)
 
-requestsigner/      AWS SigV4 request signing
-  signer.go           AWSSigV4Signer implementation
-
 gatekeeper.go       Standalone server wiring (config → proxy + credential sources)
 config.go           YAML config parsing (proxy, TLS, credentials, network, log)
 config_credential.go  Credential source resolution (env, static, AWS Secrets Manager)

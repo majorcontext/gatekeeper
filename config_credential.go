@@ -34,8 +34,6 @@ func ResolveSource(cfg SourceConfig) (credentialsource.CredentialSource, error) 
 			return nil, fmt.Errorf("aws-secretsmanager source only uses 'secret' and 'region'; found extraneous fields")
 		}
 		return credentialsource.NewAWSSecretsManagerSource(cfg.Secret, cfg.Region)
-	case "aws-sigv4":
-		return nil, fmt.Errorf("aws-sigv4 is a request signer, not a credential source; it is handled separately by loadCredentials")
 	default:
 		return nil, fmt.Errorf("unknown credential source type: %q", cfg.Type)
 	}
