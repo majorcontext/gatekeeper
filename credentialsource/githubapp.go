@@ -99,7 +99,11 @@ func (s *GitHubAppSource) Fetch(ctx context.Context) (string, error) {
 	}
 
 	if resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, body)
+		msg := string(body)
+		if len(msg) > 200 {
+			msg = msg[:200]
+		}
+		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, msg)
 	}
 
 	var result struct {

@@ -353,10 +353,12 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 				wait = refreshInterval(src.TTL())
 			}
 
+			timer := time.NewTimer(wait)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return
-			case <-time.After(wait):
+			case <-timer.C:
 			}
 
 			fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
