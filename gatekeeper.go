@@ -11,12 +11,14 @@ package gatekeeper
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -96,14 +98,15 @@ func (m *multiHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (m *multiHandler) Handle(ctx context.Context, record slog.Record) error {
+	var errs []error
 	for _, h := range m.handlers {
 		if h.Enabled(ctx, record.Level) {
 			if err := h.Handle(ctx, record); err != nil {
-				return err
+				errs = append(errs, err)
 			}
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (m *multiHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
@@ -219,7 +222,7 @@ func New(ctx context.Context, cfg *Config) (*Server, error) {
 			span := trace.SpanFromContext(data.Ctx)
 			if span.SpanContext().IsValid() {
 				spanAttrs := []attribute.KeyValue{
-					attribute.Float64("duration_ms", float64(data.Duration.Milliseconds())),
+					attribute.Float64("duration_ms", data.Duration.Seconds()*1000),
 					attribute.Bool("credential_injected", data.AuthInjected),
 				}
 				if data.RunID != "" {
@@ -229,6 +232,7 @@ func New(ctx context.Context, cfg *Config) (*Server, error) {
 				for name := range data.InjectedHeaders {
 					headerNames = append(headerNames, name)
 				}
+				slices.Sort(headerNames)
 				if len(headerNames) > 0 {
 					spanAttrs = append(spanAttrs, attribute.StringSlice("injected_headers", headerNames))
 				}

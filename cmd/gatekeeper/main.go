@@ -25,6 +25,18 @@ import (
 )
 
 func initOTel(ctx context.Context) (shutdown func(context.Context) error, err error) {
+	var shutdowns []func(context.Context) error
+	cleanup := func() {
+		for _, fn := range shutdowns {
+			fn(context.Background())
+		}
+	}
+	defer func() {
+		if err != nil {
+			cleanup()
+		}
+	}()
+
 	res, err := resource.New(ctx,
 		resource.WithAttributes(semconv.ServiceName("gatekeeper")),
 		resource.WithFromEnv(),
@@ -42,6 +54,7 @@ func initOTel(ctx context.Context) (shutdown func(context.Context) error, err er
 		sdktrace.WithResource(res),
 	)
 	otel.SetTracerProvider(tp)
+	shutdowns = append(shutdowns, tp.Shutdown)
 
 	metricExp, err := otlpmetrichttp.New(ctx)
 	if err != nil {
@@ -52,6 +65,7 @@ func initOTel(ctx context.Context) (shutdown func(context.Context) error, err er
 		sdkmetric.WithResource(res),
 	)
 	otel.SetMeterProvider(mp)
+	shutdowns = append(shutdowns, mp.Shutdown)
 
 	logExp, err := otlploghttp.New(ctx)
 	if err != nil {
@@ -62,6 +76,7 @@ func initOTel(ctx context.Context) (shutdown func(context.Context) error, err er
 		sdklog.WithResource(res),
 	)
 	global.SetLoggerProvider(lp)
+	shutdowns = append(shutdowns, lp.Shutdown)
 
 	shutdown = func(ctx context.Context) error {
 		return errors.Join(

@@ -86,6 +86,7 @@ type statusRecorder struct {
 	http.ResponseWriter
 	statusCode int
 	written    bool
+	hijacked   bool
 }
 
 func (sr *statusRecorder) WriteHeader(code int) {
@@ -109,6 +110,7 @@ func (sr *statusRecorder) Write(b []byte) (int, error) {
 // to take over the connection.
 func (sr *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if hj, ok := sr.ResponseWriter.(http.Hijacker); ok {
+		sr.hijacked = true
 		return hj.Hijack()
 	}
 	return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
@@ -170,22 +172,28 @@ func OTelHandler(next http.Handler) http.Handler {
 
 		duration := time.Since(start).Seconds()
 
-		span.SetAttributes(
-			attribute.Int("http.response.status_code", sr.statusCode),
-		)
-
-		if sr.statusCode >= 400 {
-			span.SetStatus(codes.Error, http.StatusText(sr.statusCode))
-		} else {
-			span.SetStatus(codes.Ok, "")
+		// After Hijack(), the status code is meaningless — the proxy
+		// wrote directly to the raw connection, bypassing ResponseWriter.
+		if !sr.hijacked {
+			span.SetAttributes(
+				attribute.Int("http.response.status_code", sr.statusCode),
+			)
+			if sr.statusCode >= 400 {
+				span.SetStatus(codes.Error, http.StatusText(sr.statusCode))
+			} else {
+				span.SetStatus(codes.Ok, "")
+			}
 		}
 
-		attrs := metric.WithAttributes(
+		metricAttrs := []attribute.KeyValue{
 			attribute.String("http.request.method", r.Method),
 			attribute.String("server.address", serverAddr),
 			attribute.String("proxy.request.type", rt),
-			attribute.Int("http.response.status_code", sr.statusCode),
-		)
+		}
+		if !sr.hijacked {
+			metricAttrs = append(metricAttrs, attribute.Int("http.response.status_code", sr.statusCode))
+		}
+		attrs := metric.WithAttributes(metricAttrs...)
 		requestDuration.Record(ctx, duration, attrs)
 		requestCount.Add(ctx, 1, attrs)
 	})
