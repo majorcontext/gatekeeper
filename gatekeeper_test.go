@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -929,6 +930,87 @@ func TestOTelSpanEventsViaHTTPRequest(t *testing.T) {
 	}
 	if !foundComplete {
 		t.Error("expected request.complete span event from RequestLogger callback")
+	}
+}
+
+func TestRefreshInterval(t *testing.T) {
+	tests := []struct {
+		ttl  time.Duration
+		want time.Duration
+	}{
+		{60 * time.Minute, 45 * time.Minute},
+		{40 * time.Second, 30 * time.Second},
+		{20 * time.Second, 30 * time.Second},
+		{0, 30 * time.Second},
+	}
+	for _, tt := range tests {
+		got := refreshInterval(tt.ttl)
+		if got != tt.want {
+			t.Errorf("refreshInterval(%v) = %v, want %v", tt.ttl, got, tt.want)
+		}
+	}
+}
+
+type mockRefreshSource struct {
+	mu       sync.Mutex
+	calls    int
+	token    string
+	ttl      time.Duration
+	fetchErr error
+}
+
+func (m *mockRefreshSource) Fetch(_ context.Context) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	if m.fetchErr != nil {
+		return "", m.fetchErr
+	}
+	return fmt.Sprintf("%s_%d", m.token, m.calls), nil
+}
+
+func (m *mockRefreshSource) Type() string { return "mock-refresh" }
+
+func (m *mockRefreshSource) TTL() time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ttl
+}
+
+func (m *mockRefreshSource) fetchCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
+}
+
+func TestStartCredentialRefresh_CancelStopsGoroutine(t *testing.T) {
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+	}
+	srv, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mock := &mockRefreshSource{
+		token: "ghs_test",
+		ttl:   1 * time.Hour,
+	}
+
+	cred := CredentialConfig{
+		Host:  "api.github.com",
+		Grant: "github",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	srv.startCredentialRefresh(ctx, mock, cred)
+
+	// Cancel immediately — goroutine should exit without fetching.
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+
+	if count := mock.fetchCount(); count != 0 {
+		t.Errorf("fetch called %d times after immediate cancel, want 0", count)
 	}
 }
 
