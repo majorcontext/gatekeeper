@@ -15,12 +15,18 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/majorcontext/gatekeeper/proxy"
+	"github.com/majorcontext/gatekeeper/requestsigner"
+
+	"go.opentelemetry.io/contrib/bridges/otelslog"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // defaultProxyHost is the default bind address when none is configured.
@@ -67,8 +73,54 @@ func configureLogging(cfg LogConfig) (func(), error) {
 	} else {
 		handler = slog.NewTextHandler(w, opts)
 	}
+	handler = newMultiHandler(handler, otelslog.NewHandler("gatekeeper"))
 	slog.SetDefault(slog.New(handler))
 	return cleanup, nil
+}
+
+// multiHandler fans out log records to multiple slog handlers.
+type multiHandler struct {
+	handlers []slog.Handler
+}
+
+func newMultiHandler(handlers ...slog.Handler) *multiHandler {
+	return &multiHandler{handlers: handlers}
+}
+
+func (m *multiHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	for _, h := range m.handlers {
+		if h.Enabled(ctx, level) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *multiHandler) Handle(ctx context.Context, record slog.Record) error {
+	for _, h := range m.handlers {
+		if h.Enabled(ctx, record.Level) {
+			if err := h.Handle(ctx, record); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (m *multiHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	handlers := make([]slog.Handler, len(m.handlers))
+	for i, h := range m.handlers {
+		handlers[i] = h.WithAttrs(attrs)
+	}
+	return &multiHandler{handlers: handlers}
+}
+
+func (m *multiHandler) WithGroup(name string) slog.Handler {
+	handlers := make([]slog.Handler, len(m.handlers))
+	for i, h := range m.handlers {
+		handlers[i] = h.WithGroup(name)
+	}
+	return &multiHandler{handlers: handlers}
 }
 
 // healthHandler wraps an HTTP handler to add a /healthz endpoint on the proxy port.
@@ -163,6 +215,63 @@ func New(ctx context.Context, cfg *Config) (*Server, error) {
 			args[i] = a
 		}
 		slog.Info("request", args...)
+
+		if data.Ctx != nil {
+			span := trace.SpanFromContext(data.Ctx)
+			if span.SpanContext().IsValid() {
+				spanAttrs := []attribute.KeyValue{
+					attribute.Float64("duration_ms", float64(data.Duration.Milliseconds())),
+					attribute.Bool("credential_injected", data.AuthInjected),
+				}
+				if data.RunID != "" {
+					spanAttrs = append(spanAttrs, attribute.String("run_id", data.RunID))
+				}
+				var headerNames []string
+				for name := range data.InjectedHeaders {
+					headerNames = append(headerNames, name)
+				}
+				if len(headerNames) > 0 {
+					spanAttrs = append(spanAttrs, attribute.StringSlice("injected_headers", headerNames))
+				}
+				span.AddEvent("request.complete", trace.WithAttributes(spanAttrs...))
+				if data.Err != nil {
+					span.RecordError(data.Err)
+				}
+
+				if data.AuthInjected {
+					host := data.URL
+					if u, parseErr := url.Parse(data.URL); parseErr == nil {
+						host = u.Hostname()
+					}
+					for name := range data.InjectedHeaders {
+						proxy.RecordCredentialInjection(data.Ctx, host, name)
+					}
+				}
+			}
+		}
+	})
+
+	p.SetPolicyLogger(func(data proxy.PolicyLogData) {
+		slog.Warn("policy denial",
+			"run_id", data.RunID,
+			"scope", data.Scope,
+			"operation", data.Operation,
+			"rule", data.Rule,
+			"message", data.Message,
+		)
+
+		if data.Ctx != nil {
+			span := trace.SpanFromContext(data.Ctx)
+			if span.SpanContext().IsValid() {
+				span.AddEvent("policy.denial", trace.WithAttributes(
+					attribute.String("scope", data.Scope),
+					attribute.String("operation", data.Operation),
+					attribute.String("rule", data.Rule),
+					attribute.String("message", data.Message),
+				))
+				proxy.RecordPolicyDenial(data.Ctx, data.Scope, data.Rule)
+			}
+		}
 	})
 
 	// Optional defense-in-depth: require a static token for proxy access.
@@ -185,6 +294,15 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 	for _, cred := range cfg.Credentials {
 		if cred.Host == "" {
 			return fmt.Errorf("credential %q: host is required", cred.Grant)
+		}
+
+		if cred.Source.Type == "aws-sigv4" {
+			signer, err := resolveAWSSigV4Signer(cred.Source)
+			if err != nil {
+				return fmt.Errorf("credential for %s: %w", cred.Host, err)
+			}
+			s.proxy.SetRequestSigner(cred.Host, signer.SignRequest)
+			continue
 		}
 
 		src, err := ResolveSource(cred.Source)
@@ -215,6 +333,15 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 		s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
 	}
 	return nil
+}
+
+func resolveAWSSigV4Signer(cfg SourceConfig) (*requestsigner.AWSSigV4Signer, error) {
+	if cfg.AccessKeyID != "" && cfg.SecretAccessKey != "" {
+		return requestsigner.NewAWSSigV4SignerWithStaticCredentials(
+			cfg.AccessKeyID, cfg.SecretAccessKey, cfg.Region, cfg.Service,
+		)
+	}
+	return requestsigner.NewAWSSigV4Signer(cfg.Region, cfg.Service)
 }
 
 // ensureAuthScheme ensures a credential value has an auth scheme prefix
@@ -302,7 +429,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Start proxy HTTP server with health check wrapper.
 	s.proxyServer = &http.Server{
-		Handler:           &healthHandler{next: s.proxy},
+		Handler:           proxy.OTelHandler(&healthHandler{next: s.proxy}),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		// WriteTimeout is intentionally omitted for the proxy server.
