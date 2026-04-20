@@ -239,8 +239,7 @@ func TestAuthToken(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -280,8 +279,7 @@ func TestDefaultProxyHost(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -341,8 +339,7 @@ func TestTLSCALoading(t *testing.T) {
 	caCertPool.AppendCertsFromPEM(ca.CertPEM())
 	srv.proxy.SetUpstreamCAs(caCertPool)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -501,8 +498,7 @@ func TestHTTPSCredentialInjection(t *testing.T) {
 	// test CA.
 	srv.proxy.SetUpstreamCAs(caCertPool)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -585,8 +581,7 @@ func TestHTTPCredentialInjection(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -650,8 +645,7 @@ func TestHTTPSCustomHeaderInjection(t *testing.T) {
 
 	srv.proxy.SetUpstreamCAs(caCertPool)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -702,8 +696,7 @@ func TestStrictNetworkPolicy(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -774,8 +767,7 @@ func TestMultipleCredentialsSameHost(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -824,8 +816,7 @@ func TestAuthSchemeAutoDetectionThroughProxy(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -890,8 +881,7 @@ func TestAWSSigV4SigningThroughProxy(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -974,8 +964,7 @@ func TestAWSSigV4SigningHTTPS(t *testing.T) {
 	}
 	srv.proxy.SetUpstreamCAs(caCertPool)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 

@@ -110,7 +110,7 @@ func TestOTelHandler_CreatesSpanForHTTPRequest(t *testing.T) {
 		if s.Name == "proxy.http" {
 			found = true
 			// Check attributes.
-			attrs := make(map[string]interface{})
+			attrs := make(map[string]any)
 			for _, a := range s.Attributes {
 				attrs[string(a.Key)] = a.Value.AsInterface()
 			}
