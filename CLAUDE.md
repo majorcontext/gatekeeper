@@ -76,7 +76,7 @@ OTel integration uses a callback-based architecture — the proxy core (`proxy/p
 Key env vars for deployment:
 - `OTEL_EXPORTER_OTLP_ENDPOINT` — Collector endpoint (e.g., `https://host.betterstackdata.com`)
 - `OTEL_EXPORTER_OTLP_HEADERS` — Auth headers (e.g., `Authorization=Bearer <token>`)
-- `OTEL_RESOURCE_ATTRIBUTES` — Resource tags (e.g., `deployment.environment.name=production`)
+- `OTEL_RESOURCE_ATTRIBUTES` — Resource tags (e.g., `environment=production`)
 
 ## Development Commands
 
