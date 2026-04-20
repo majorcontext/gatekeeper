@@ -26,6 +26,7 @@ import (
 func initOTel(ctx context.Context) (shutdown func(context.Context) error, err error) {
 	res, err := resource.New(ctx,
 		resource.WithAttributes(semconv.ServiceName("gatekeeper")),
+		resource.WithFromEnv(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating resource: %w", err)
