@@ -24,6 +24,10 @@ import (
 	"time"
 
 	"github.com/majorcontext/gatekeeper/proxy"
+
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // startTLSBackend creates an HTTPS backend server using the provided CA.
@@ -843,6 +847,168 @@ func TestAuthSchemeAutoDetectionThroughProxy(t *testing.T) {
 	}
 }
 
+func TestAWSSigV4SigningThroughProxy(t *testing.T) {
+	// End-to-end: gatekeeper with aws-sigv4 source signs requests.
+	// We use the HTTP (non-CONNECT) path and verify the backend
+	// receives SigV4 headers.
+
+	var (
+		gotAuth    string
+		gotAmzDate string
+		mu         sync.Mutex
+	)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotAuth = r.Header.Get("Authorization")
+		gotAmzDate = r.Header.Get("X-Amz-Date")
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		Credentials: []CredentialConfig{
+			{
+				Host: backendURL.Hostname(),
+				Source: SourceConfig{
+					Type:           "aws-sigv4",
+					Region:         "us-east-1",
+					Service:        "bedrock",
+					AccessKeyID:    "AKIAIOSFODNN7EXAMPLE",
+					SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+				},
+			},
+		},
+		Network: NetworkConfig{Policy: "permissive"},
+	}
+
+	srv, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	proxyURL, _ := url.Parse("http://" + srv.ProxyAddr())
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+	}
+
+	resp, err := client.Get(backend.URL + "/model/invoke")
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	resp.Body.Close()
+
+	mu.Lock()
+	auth := gotAuth
+	amzDate := gotAmzDate
+	mu.Unlock()
+
+	if auth == "" {
+		t.Fatal("backend got empty Authorization header")
+	}
+	if !strings.Contains(auth, "AWS4-HMAC-SHA256") {
+		t.Errorf("Authorization doesn't contain SigV4 prefix: %s", auth)
+	}
+	if !strings.Contains(auth, "bedrock") {
+		t.Errorf("Authorization doesn't contain service name: %s", auth)
+	}
+	if amzDate == "" {
+		t.Error("backend got empty X-Amz-Date header")
+	}
+}
+
+func TestAWSSigV4SigningHTTPS(t *testing.T) {
+	// End-to-end: SigV4 signing through the CONNECT/TLS interception path.
+
+	caDir := t.TempDir()
+	ca, err := proxy.NewCA(caDir)
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+
+	var (
+		gotAuth    string
+		gotAmzDate string
+		mu         sync.Mutex
+	)
+	_, backendPort, caCertPool := startTLSBackend(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotAuth = r.Header.Get("Authorization")
+		gotAmzDate = r.Header.Get("X-Amz-Date")
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		TLS: TLSConfig{
+			CACert: filepath.Join(caDir, "ca.crt"),
+			CAKey:  filepath.Join(caDir, "ca.key"),
+		},
+		Credentials: []CredentialConfig{
+			{
+				Host: "127.0.0.1",
+				Source: SourceConfig{
+					Type:           "aws-sigv4",
+					Region:         "us-east-1",
+					Service:        "bedrock",
+					AccessKeyID:    "AKIAIOSFODNN7EXAMPLE",
+					SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+				},
+			},
+		},
+		Network: NetworkConfig{Policy: "permissive"},
+	}
+
+	srv, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.proxy.SetUpstreamCAs(caCertPool)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	proxyURL, _ := url.Parse("http://" + srv.ProxyAddr())
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: caCertPool, MinVersion: tls.VersionTLS12},
+		},
+	}
+
+	resp, err := client.Get("https://127.0.0.1:" + backendPort + "/model/invoke")
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	resp.Body.Close()
+
+	mu.Lock()
+	auth := gotAuth
+	amzDate := gotAmzDate
+	mu.Unlock()
+
+	if auth == "" {
+		t.Fatal("backend got empty Authorization header")
+	}
+	if !strings.Contains(auth, "AWS4-HMAC-SHA256") {
+		t.Errorf("Authorization doesn't contain SigV4 prefix: %s", auth)
+	}
+	if amzDate == "" {
+		t.Error("backend got empty X-Amz-Date header")
+	}
+}
+
 func TestEnsureAuthScheme(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -880,5 +1046,59 @@ func TestEnsureAuthScheme(t *testing.T) {
 				t.Errorf("ensureAuthScheme(%q, %q) = %q, want %q", tt.val, tt.prefix, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestOTelSpanEventsViaHTTPRequest(t *testing.T) {
+	spanExporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExporter))
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() { tp.Shutdown(context.Background()) })
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+	}
+	srv, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	handler := proxy.OTelHandler(&healthHandler{next: srv.proxy})
+	proxyServer := httptest.NewServer(handler)
+	defer proxyServer.Close()
+
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+	}
+
+	resp, err := client.Get(backend.URL)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	tp.ForceFlush(context.Background())
+
+	spans := spanExporter.GetSpans()
+	if len(spans) == 0 {
+		t.Fatal("expected at least one span")
+	}
+
+	foundComplete := false
+	for _, s := range spans {
+		for _, e := range s.Events {
+			if e.Name == "request.complete" {
+				foundComplete = true
+			}
+		}
+	}
+	if !foundComplete {
+		t.Error("expected request.complete span event from RequestLogger callback")
 	}
 }
