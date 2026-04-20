@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/majorcontext/gatekeeper/credentialsource"
 	"github.com/majorcontext/gatekeeper/proxy"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
@@ -325,8 +326,80 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 		}
 
 		s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
+		if rs, ok := src.(credentialsource.RefreshingSource); ok {
+			s.startCredentialRefresh(ctx, rs, cred)
+		}
 	}
 	return nil
+}
+
+// startCredentialRefresh starts a background goroutine that periodically
+// re-fetches a credential from a RefreshingSource and hot-swaps it on the proxy.
+func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsource.RefreshingSource, cred CredentialConfig) {
+	header := cred.Header
+	if header == "" {
+		header = "Authorization"
+	}
+
+	go func() {
+		backoff := time.Duration(0)
+		const maxBackoff = 60 * time.Second
+
+		for {
+			var wait time.Duration
+			if backoff > 0 {
+				wait = backoff
+			} else {
+				wait = refreshInterval(src.TTL())
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+
+			fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			val, err := src.Fetch(fetchCtx)
+			cancel()
+
+			if err != nil {
+				if backoff == 0 {
+					backoff = time.Second
+				} else {
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+				}
+				slog.Warn("credential refresh failed, retrying",
+					"host", cred.Host,
+					"grant", cred.Grant,
+					"backoff", backoff.String(),
+					"error", err)
+				continue
+			}
+
+			backoff = 0
+			if strings.EqualFold(header, "Authorization") {
+				val = ensureAuthScheme(val, cred.Prefix)
+			}
+			s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
+			slog.Debug("credential refreshed",
+				"host", cred.Host,
+				"grant", cred.Grant,
+				"ttl", src.TTL().String())
+		}
+	}()
+}
+
+// refreshInterval returns 75% of TTL, floored at 30 seconds.
+func refreshInterval(ttl time.Duration) time.Duration {
+	interval := ttl * 3 / 4
+	if interval < 30*time.Second {
+		interval = 30 * time.Second
+	}
+	return interval
 }
 
 // ensureAuthScheme ensures a credential value has an auth scheme prefix
