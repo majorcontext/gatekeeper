@@ -2058,3 +2058,371 @@ func TestProxy_HostGatewayLocalhostBypassCONNECT(t *testing.T) {
 		t.Errorf("expected 407 (localhost CONNECT should match 127.0.0.1 gateway), got %d", resp.StatusCode)
 	}
 }
+
+// TestProxy_HostGatewayMoatHost verifies that when HostGateway is "moat-host"
+// (the synthetic hostname used to separate proxy access from host service access),
+// requests to "moat-host" are blocked by the host-gateway check.
+func TestProxy_HostGatewayMoatHost(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	backendURL := mustParseURL(backend.URL)
+	backendPort, _ := strconv.Atoi(backendURL.Port())
+
+	p := NewProxy()
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		if token == "moat_host_run" {
+			return &RunContextData{
+				Policy:      "permissive",
+				HostGateway: "moat-host",
+			}, true
+		}
+		return nil, false
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	proxyURL := mustParseURL(proxyServer.URL)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+
+	// Request to moat-host:<port> should be blocked
+	req, _ := http.NewRequest("GET", fmt.Sprintf("http://moat-host:%d/", backendPort), nil)
+	req.Header.Set("Proxy-Authorization", "Bearer moat_host_run")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Errorf("expected 407 (blocked), got %d", resp.StatusCode)
+	}
+	if resp.Header.Get("X-Moat-Blocked") != "host-service" {
+		t.Errorf("expected X-Moat-Blocked=host-service, got %q", resp.Header.Get("X-Moat-Blocked"))
+	}
+}
+
+// TestProxy_HostGatewayMoatHostAllowedPort verifies that requests to "moat-host"
+// on an explicitly allowed port are permitted.
+func TestProxy_HostGatewayMoatHostAllowedPort(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	backendURL := mustParseURL(backend.URL)
+	backendPort, _ := strconv.Atoi(backendURL.Port())
+
+	p := NewProxy()
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		if token == "moat_host_allowed" {
+			return &RunContextData{
+				Policy:           "permissive",
+				HostGateway:      "moat-host",
+				HostGatewayIP:    backendURL.Hostname(), // actual IP so proxy can forward
+				AllowedHostPorts: []int{backendPort},
+			}, true
+		}
+		return nil, false
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	proxyURL := mustParseURL(proxyServer.URL)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+
+	req, _ := http.NewRequest("GET", fmt.Sprintf("http://moat-host:%d/", backendPort), nil)
+	req.Header.Set("Proxy-Authorization", "Bearer moat_host_allowed")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// The proxy should rewrite "moat-host" to the actual IP (HostGatewayIP)
+	// and forward the request to the backend successfully.
+	if resp.StatusCode == http.StatusProxyAuthRequired {
+		t.Errorf("expected request to be allowed (port %d in AllowedHostPorts), got 407", backendPort)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// TestIsHostGatewayAliases verifies that loopback aliases (localhost, ::1,
+// 127.0.0.1) are treated as host-gateway when HostGateway is either the
+// synthetic hostname or the legacy 127.0.0.1 form. A container that issues
+// "CONNECT localhost:8080" must not slip past the host-service block by
+// using a loopback alias instead of the canonical synthetic hostname.
+func TestIsHostGatewayAliases(t *testing.T) {
+	cases := []struct {
+		name    string
+		gateway string
+		host    string
+		want    bool
+	}{
+		{"synthetic matches self", "moat-host", "moat-host", true},
+		{"synthetic matches localhost", "moat-host", "localhost", true},
+		{"synthetic matches 127.0.0.1", "moat-host", "127.0.0.1", true},
+		{"synthetic matches ::1", "moat-host", "::1", true},
+		{"synthetic rejects unrelated", "moat-host", "api.example.com", false},
+		{"legacy 127 matches localhost", "127.0.0.1", "localhost", true},
+		{"legacy 127 matches ::1", "127.0.0.1", "::1", true},
+		{"legacy 127 matches 127.0.0.1", "127.0.0.1", "127.0.0.1", true},
+		{"empty gateway never matches", "", "localhost", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rc := &RunContextData{HostGateway: tc.gateway}
+			if got := isHostGateway(rc, tc.host); got != tc.want {
+				t.Errorf("isHostGateway(gw=%q, host=%q) = %v, want %v",
+					tc.gateway, tc.host, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRedactURLUserinfo verifies that the proxy's per-run auth token in URL
+// userinfo is masked before it reaches debug logs.
+func TestRedactURLUserinfo(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"http://moat:secrettoken@host:1234/path", "http://***@host:1234/path"},
+		{"https://user:pw@example.com/", "https://***@example.com/"},
+		{"http://example.com/path", "http://example.com/path"},
+		{"", ""},
+		{"not-a-url", "not-a-url"},
+		// Userinfo only inside the authority; an @ in a path must be left alone.
+		{"http://example.com/a@b", "http://example.com/a@b"},
+	}
+	for _, tc := range cases {
+		if got := redactURLUserinfo(tc.in); got != tc.want {
+			t.Errorf("redactURLUserinfo(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestRewriteURLHost verifies that URL host rewriting preserves port, path,
+// query, and fragment and emits a valid URL for IPv6 loopback aliases. The
+// naive strings.Replace approach used prior to this helper produced
+// "http://[127.0.0.1]:8080/path" — an IPv4 address inside IPv6 brackets,
+// which is an invalid URL.
+func TestRewriteURLHost(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		newHost string
+		want    string
+	}{
+		{"ipv6 loopback with port", "http://[::1]:8080/path", "127.0.0.1", "http://127.0.0.1:8080/path"},
+		{"ipv6 loopback no port", "http://[::1]/path", "127.0.0.1", "http://127.0.0.1/path"},
+		{"synthetic hostname with port", "http://moat-host:8080/api", "127.0.0.1", "http://127.0.0.1:8080/api"},
+		{"preserves query and fragment", "http://moat-host:8080/x?q=moat-host#moat-host", "127.0.0.1", "http://127.0.0.1:8080/x?q=moat-host#moat-host"},
+		{"preserves https scheme", "https://moat-host/path", "127.0.0.1", "https://127.0.0.1/path"},
+		{"ipv6 target host brackets correctly", "http://moat-host:8080/x", "::1", "http://[::1]:8080/x"},
+		{"ipv6 target host no port brackets correctly", "http://moat-host/x", "::1", "http://[::1]/x"},
+		{"malformed URL returns input", "not a url", "127.0.0.1", "not a url"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rewriteURLHost(tc.in, tc.newHost); got != tc.want {
+				t.Errorf("rewriteURLHost(%q, %q) = %q, want %q", tc.in, tc.newHost, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestProxy_HostGatewayMoatHostBypassAliases verifies that when HostGateway is
+// "moat-host", requests to loopback aliases (localhost, 127.0.0.1, ::1) are
+// blocked as host-gateway traffic. This prevents containers from bypassing the
+// host-service firewall by addressing the host via a loopback alias instead of
+// the synthetic "moat-host" hostname.
+func TestProxy_HostGatewayMoatHostBypassAliases(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	backendURL := mustParseURL(backend.URL)
+	backendPort, _ := strconv.Atoi(backendURL.Port())
+
+	p := NewProxy()
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		if token == "moat_host_bypass" {
+			return &RunContextData{
+				Policy:      "permissive",
+				HostGateway: "moat-host",
+			}, true
+		}
+		return nil, false
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	proxyURL := mustParseURL(proxyServer.URL)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+
+	// Each loopback alias should be blocked when gateway is "moat-host".
+	aliases := []string{"localhost", "127.0.0.1", "::1"}
+	for _, alias := range aliases {
+		t.Run(alias, func(t *testing.T) {
+			// Build the target URL. For IPv6 literals, wrap in brackets.
+			host := alias
+			if strings.Contains(alias, ":") {
+				host = "[" + alias + "]"
+			}
+			targetURL := fmt.Sprintf("http://%s:%d/", host, backendPort)
+
+			req, _ := http.NewRequest("GET", targetURL, nil)
+			req.Header.Set("Proxy-Authorization", "Bearer moat_host_bypass")
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("request to %s failed: %v", alias, err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusProxyAuthRequired {
+				t.Errorf("expected 407 (blocked), got %d for alias %q", resp.StatusCode, alias)
+			}
+			if resp.Header.Get("X-Moat-Blocked") != "host-service" {
+				t.Errorf("expected X-Moat-Blocked=host-service for alias %q, got %q",
+					alias, resp.Header.Get("X-Moat-Blocked"))
+			}
+		})
+	}
+}
+
+// TestProxy_HostGatewayMoatHostBypassAliasesCONNECT verifies that CONNECT
+// requests to loopback aliases are also blocked when HostGateway is "moat-host".
+func TestProxy_HostGatewayMoatHostBypassAliasesCONNECT(t *testing.T) {
+	p := NewProxy()
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		if token == "moat_host_bypass" {
+			return &RunContextData{
+				Policy:      "permissive",
+				HostGateway: "moat-host",
+			}, true
+		}
+		return nil, false
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	proxyURL := mustParseURL(proxyServer.URL)
+
+	// Test CONNECT for each loopback alias.
+	aliases := []struct {
+		name string
+		host string // host:port for CONNECT line
+	}{
+		{"localhost", "localhost:443"},
+		{"127.0.0.1", "127.0.0.1:443"},
+		{"::1", "[::1]:443"},
+	}
+	for _, tc := range aliases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := net.Dial("tcp", proxyURL.Host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+
+			fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\n", tc.host)
+			fmt.Fprintf(conn, "Host: %s\r\n", tc.host)
+			fmt.Fprintf(conn, "Proxy-Authorization: Bearer moat_host_bypass\r\n")
+			fmt.Fprintf(conn, "\r\n")
+
+			resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusProxyAuthRequired {
+				t.Errorf("expected 407 for CONNECT to %s, got %d", tc.host, resp.StatusCode)
+			}
+			if resp.Header.Get("X-Moat-Blocked") != "host-service" {
+				t.Errorf("expected X-Moat-Blocked=host-service for %s, got %q",
+					tc.host, resp.Header.Get("X-Moat-Blocked"))
+			}
+		})
+	}
+}
+
+// TestProxy_HostGatewayMoatHostAllowedPortBypassAlias verifies that when a port
+// is in AllowedHostPorts and HostGateway is "moat-host", a request through a
+// loopback alias (e.g., localhost) is still permitted — the port allowlist
+// applies to all host-gateway aliases, not just the canonical hostname.
+func TestProxy_HostGatewayMoatHostAllowedPortBypassAlias(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	backendURL := mustParseURL(backend.URL)
+	backendPort, _ := strconv.Atoi(backendURL.Port())
+
+	p := NewProxy()
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		if token == "allowed_alias" {
+			return &RunContextData{
+				Policy:           "permissive",
+				HostGateway:      "moat-host",
+				HostGatewayIP:    backendURL.Hostname(),
+				AllowedHostPorts: []int{backendPort},
+			}, true
+		}
+		return nil, false
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	proxyURL := mustParseURL(proxyServer.URL)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+
+	// Request via "localhost" alias — should be allowed because port is in AllowedHostPorts.
+	targetURL := fmt.Sprintf("http://localhost:%d/", backendPort)
+	req, _ := http.NewRequest("GET", targetURL, nil)
+	req.Header.Set("Proxy-Authorization", "Bearer allowed_alias")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 (allowed via AllowedHostPorts), got %d", resp.StatusCode)
+	}
+}
+
+// TestRewriteHostPort verifies that host:port rewriting handles bracketed
+// IPv6 inputs correctly and emits bracketed form when the target is IPv6.
+func TestRewriteHostPort(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		newHost string
+		want    string
+	}{
+		{"ipv6 loopback to ipv4", "[::1]:8080", "127.0.0.1", "127.0.0.1:8080"},
+		{"synthetic hostname to ipv4", "moat-host:8080", "127.0.0.1", "127.0.0.1:8080"},
+		{"ipv4 to ipv6 adds brackets", "moat-host:8080", "::1", "[::1]:8080"},
+		{"missing port returns input unchanged", "moat-host", "127.0.0.1", "moat-host"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rewriteHostPort(tc.in, tc.newHost); got != tc.want {
+				t.Errorf("rewriteHostPort(%q, %q) = %q, want %q", tc.in, tc.newHost, got, tc.want)
+			}
+		})
+	}
+}
