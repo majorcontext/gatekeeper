@@ -24,6 +24,10 @@ import (
 	"time"
 
 	"github.com/majorcontext/gatekeeper/proxy"
+
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // startTLSBackend creates an HTTPS backend server using the provided CA.
@@ -235,8 +239,7 @@ func TestAuthToken(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -276,8 +279,7 @@ func TestDefaultProxyHost(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -337,8 +339,7 @@ func TestTLSCALoading(t *testing.T) {
 	caCertPool.AppendCertsFromPEM(ca.CertPEM())
 	srv.proxy.SetUpstreamCAs(caCertPool)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -497,8 +498,7 @@ func TestHTTPSCredentialInjection(t *testing.T) {
 	// test CA.
 	srv.proxy.SetUpstreamCAs(caCertPool)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -581,8 +581,7 @@ func TestHTTPCredentialInjection(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -646,8 +645,7 @@ func TestHTTPSCustomHeaderInjection(t *testing.T) {
 
 	srv.proxy.SetUpstreamCAs(caCertPool)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -698,8 +696,7 @@ func TestStrictNetworkPolicy(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -770,8 +767,7 @@ func TestMultipleCredentialsSameHost(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -820,8 +816,7 @@ func TestAuthSchemeAutoDetectionThroughProxy(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = srv.Start(ctx) }()
 	waitForProxy(t, srv, 2*time.Second)
 
@@ -882,3 +877,58 @@ func TestEnsureAuthScheme(t *testing.T) {
 		})
 	}
 }
+
+func TestOTelSpanEventsViaHTTPRequest(t *testing.T) {
+	spanExporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExporter))
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() { tp.Shutdown(context.Background()) })
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+	}
+	srv, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	handler := proxy.OTelHandler(&healthHandler{next: srv.proxy})
+	proxyServer := httptest.NewServer(handler)
+	defer proxyServer.Close()
+
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+	}
+
+	resp, err := client.Get(backend.URL)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	tp.ForceFlush(context.Background())
+
+	spans := spanExporter.GetSpans()
+	if len(spans) == 0 {
+		t.Fatal("expected at least one span")
+	}
+
+	foundComplete := false
+	for _, s := range spans {
+		for _, e := range s.Events {
+			if e.Name == "request.complete" {
+				foundComplete = true
+			}
+		}
+	}
+	if !foundComplete {
+		t.Error("expected request.complete span event from RequestLogger callback")
+	}
+}
+

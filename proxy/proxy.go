@@ -106,6 +106,7 @@ type RequestLogData struct {
 	AuthInjected    bool            // True if any credential header was injected for this host
 	InjectedHeaders map[string]bool // Lower-cased header names that were injected
 	RunID           string          // Run ID from per-run context (daemon mode)
+	Ctx             context.Context // Request context (for OTel span extraction, may be nil)
 }
 
 // RequestLogger is called for each proxied request.
@@ -118,6 +119,7 @@ type PolicyLogData struct {
 	Operation string
 	Rule      string
 	Message   string
+	Ctx       context.Context // Request context (for OTel span extraction, may be nil)
 }
 
 // PolicyLogger is called when a policy denial occurs.
@@ -214,10 +216,12 @@ func (p *Proxy) logRequest(ctxReq *http.Request, method, url string, statusCode 
 		return
 	}
 	var runID string
+	var reqCtx context.Context
 	if ctxReq != nil {
 		if rc := getRunContext(ctxReq); rc != nil {
 			runID = rc.RunID
 		}
+		reqCtx = ctxReq.Context()
 	}
 	p.logger(RequestLogData{
 		Method:          method,
@@ -232,6 +236,7 @@ func (p *Proxy) logRequest(ctxReq *http.Request, method, url string, statusCode 
 		AuthInjected:    len(injectedHeaders) > 0,
 		InjectedHeaders: injectedHeaders,
 		RunID:           runID,
+		Ctx:             reqCtx,
 	})
 }
 
@@ -394,10 +399,12 @@ func (p *Proxy) logPolicy(ctxReq *http.Request, scope, operation, rule, message 
 		return
 	}
 	var runID string
+	var reqCtx context.Context
 	if ctxReq != nil {
 		if rc := getRunContext(ctxReq); rc != nil {
 			runID = rc.RunID
 		}
+		reqCtx = ctxReq.Context()
 	}
 	p.policyLogger(PolicyLogData{
 		RunID:     runID,
@@ -405,6 +412,7 @@ func (p *Proxy) logPolicy(ctxReq *http.Request, scope, operation, rule, message 
 		Operation: operation,
 		Rule:      rule,
 		Message:   message,
+		Ctx:       reqCtx,
 	})
 }
 
