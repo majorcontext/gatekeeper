@@ -14,6 +14,7 @@ Key capabilities:
 - **Network policy** — Allow/deny traffic by host pattern
 - **LLM policy** — Evaluate Anthropic API responses against Keep policy rules
 - **Host gateway** — Route synthetic container hostnames to the actual host IP
+- **OpenTelemetry** — Distributed traces, request metrics, and slog-to-OTel logs bridge; configured entirely via standard `OTEL_*` environment variables
 
 ## Architecture
 
@@ -25,7 +26,11 @@ proxy/              Core TLS-intercepting proxy engine
   mcp.go             MCP relay handler (SSE streaming, tool credential injection)
   llmpolicy.go       LLM response policy evaluation via Keep
   relay.go           HTTP relay for non-CONNECT requests
+  otel.go            OpenTelemetry handler wrapper, metrics instruments, span helpers
   server.go          Proxy server lifecycle (start/stop/listen)
+
+requestsigner/      AWS SigV4 request signing
+  signer.go           AWSSigV4Signer implementation
 
 gatekeeper.go       Standalone server wiring (config → proxy + credential sources)
 config.go           YAML config parsing (proxy, TLS, credentials, network, log)
@@ -61,6 +66,20 @@ examples/           Sample config, CA generation script, and test harness
 ### Host Gateway
 
 The `HostGateway` field in `RunContextData` maps a synthetic hostname (used inside containers) to the host machine's IP. When `HostGatewayIP` resolves to a loopback address, the proxy also matches `localhost`/`127.0.0.1`/`::1` as equivalent — so credentials configured for the gateway hostname also apply to direct loopback connections.
+
+### OpenTelemetry Instrumentation
+
+OTel integration uses a callback-based architecture — the proxy core (`proxy/proxy.go`) has no OTel imports. Instrumentation is layered on externally:
+
+- **`proxy.OTelHandler`** wraps the proxy as HTTP middleware, creating root spans and recording request duration/count metrics. Its `statusRecorder` implements `http.Hijacker` so CONNECT requests still work after hijack.
+- **Request/policy loggers** (set in `gatekeeper.go`) attach span events and record credential injection/policy denial metrics via exported functions `proxy.RecordCredentialInjection` and `proxy.RecordPolicyDenial`.
+- **slog bridge** — `gatekeeper.go` uses a `multiHandler` to fan out log records to both the configured slog handler and `otelslog.NewHandler`, correlating logs with trace context.
+- **Provider setup** — `cmd/gatekeeper/main.go` creates OTLP HTTP exporters for traces, metrics, and logs, registering them as global providers. All configuration is via standard `OTEL_*` env vars (no YAML knobs).
+
+Key env vars for deployment:
+- `OTEL_EXPORTER_OTLP_ENDPOINT` — Collector endpoint (e.g., `https://host.betterstackdata.com`)
+- `OTEL_EXPORTER_OTLP_HEADERS` — Auth headers (e.g., `Authorization=Bearer <token>`)
+- `OTEL_RESOURCE_ATTRIBUTES` — Resource tags (e.g., `deployment.environment.name=production`)
 
 ## Development Commands
 

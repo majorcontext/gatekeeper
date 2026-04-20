@@ -167,3 +167,49 @@ func TestLoadConfig_NotFound(t *testing.T) {
 		t.Fatal("expected error for missing file")
 	}
 }
+
+func TestParseConfig_AWSSigV4(t *testing.T) {
+	yaml := `
+proxy:
+  port: 8080
+credentials:
+  - host: bedrock-runtime.us-east-1.amazonaws.com
+    source:
+      type: aws-sigv4
+      region: us-east-1
+      service: bedrock
+  - host: s3.us-west-2.amazonaws.com
+    source:
+      type: aws-sigv4
+      region: us-west-2
+      service: s3
+      access_key_id: AKIAEXAMPLE
+      secret_access_key: wJalrXUtnFEMI
+`
+	cfg, err := ParseConfig([]byte(yaml))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+
+	if len(cfg.Credentials) != 2 {
+		t.Fatalf("len(Credentials) = %d, want 2", len(cfg.Credentials))
+	}
+	cred := cfg.Credentials[0]
+	if cred.Source.Type != "aws-sigv4" {
+		t.Errorf("Source.Type = %q, want aws-sigv4", cred.Source.Type)
+	}
+	if cred.Source.Region != "us-east-1" {
+		t.Errorf("Source.Region = %q, want us-east-1", cred.Source.Region)
+	}
+	if cred.Source.Service != "bedrock" {
+		t.Errorf("Source.Service = %q, want bedrock", cred.Source.Service)
+	}
+
+	cred2 := cfg.Credentials[1]
+	if cred2.Source.AccessKeyID != "AKIAEXAMPLE" {
+		t.Errorf("Source.AccessKeyID = %q, want AKIAEXAMPLE", cred2.Source.AccessKeyID)
+	}
+	if cred2.Source.SecretAccessKey != "wJalrXUtnFEMI" {
+		t.Errorf("Source.SecretAccessKey = %q, want wJalrXUtnFEMI", cred2.Source.SecretAccessKey)
+	}
+}

@@ -48,11 +48,14 @@ type CredentialConfig struct {
 
 // SourceConfig describes where to read a credential value from.
 type SourceConfig struct {
-	Type   string `yaml:"type"`             // "env", "static", "aws-secretsmanager"
-	Var    string `yaml:"var,omitempty"`    // for env source
-	Value  string `yaml:"value,omitempty"`  // for static source
-	Secret string `yaml:"secret,omitempty"` // for aws-secretsmanager
-	Region string `yaml:"region,omitempty"` // for aws-secretsmanager
+	Type           string `yaml:"type"`               // "env", "static", "aws-secretsmanager", "aws-sigv4"
+	Var            string `yaml:"var,omitempty"`       // for env source
+	Value          string `yaml:"value,omitempty"`     // for static source
+	Secret         string `yaml:"secret,omitempty"`    // for aws-secretsmanager
+	Region         string `yaml:"region,omitempty"`    // for aws-secretsmanager, aws-sigv4
+	Service        string `yaml:"service,omitempty"`   // for aws-sigv4 (e.g., "bedrock", "s3")
+	AccessKeyID    string `yaml:"access_key_id,omitempty"`    // for aws-sigv4 (optional; uses default chain if omitted)
+	SecretAccessKey string `yaml:"secret_access_key,omitempty"` // for aws-sigv4 (optional; uses default chain if omitted)
 }
 
 // NetworkConfig configures network policy.
