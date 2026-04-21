@@ -2073,7 +2073,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		// Capture response
 		var respBody []byte
 		var respHeaders http.Header
-		var statusCode int
+		statusCode := http.StatusBadGateway
 		var responseSize int64 = -1
 		if resp != nil {
 			respHeaders = resp.Header.Clone()
