@@ -1106,7 +1106,7 @@ func (p *Proxy) handleDirectMCPRelay(w http.ResponseWriter, r *http.Request) {
 
 	rc, found := p.contextResolver(token)
 	if !found {
-		http.Error(w, "Invalid proxy token", http.StatusProxyAuthRequired)
+		writeProxyAuthRequired(w, "Invalid proxy token")
 		return
 	}
 
@@ -1184,18 +1184,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.contextResolver != nil {
 		token, ok := extractProxyToken(r)
 		if !ok {
-			http.Error(w, "Proxy authentication required", http.StatusProxyAuthRequired)
+			writeProxyAuthRequired(w, "Proxy authentication required")
 			return
 		}
 		rc, found := p.contextResolver(token)
 		if !found {
-			http.Error(w, "Invalid proxy token", http.StatusProxyAuthRequired)
+			writeProxyAuthRequired(w, "Invalid proxy token")
 			return
 		}
 		ctx := context.WithValue(r.Context(), runContextKey, rc)
 		r = r.WithContext(ctx)
 	} else if p.authToken != "" && !p.checkAuth(r) {
-		http.Error(w, "Proxy authentication required", http.StatusProxyAuthRequired)
+		writeProxyAuthRequired(w, "Proxy authentication required")
 		return
 	}
 
@@ -1288,6 +1288,14 @@ func (p *Proxy) checkNetworkPolicy(host string, port int) bool {
 
 	// Strict policy requires host to match allowedHosts
 	return matchHost(p.allowedHosts, host, port)
+}
+
+// writeProxyAuthRequired writes a 407 with a Proxy-Authenticate challenge.
+// Without the challenge header, clients like git's libcurl treat 407 as fatal
+// and never retry with credentials.
+func writeProxyAuthRequired(w http.ResponseWriter, msg string) {
+	w.Header().Set("Proxy-Authenticate", `Basic realm="gatekeeper"`)
+	http.Error(w, msg, http.StatusProxyAuthRequired)
 }
 
 // writeBlockedResponse writes a 407 response when a request is blocked by network policy.
