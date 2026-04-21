@@ -13,6 +13,7 @@ Gatekeeper is pre-1.0. The configuration schema and credential source interface 
 
 ### Changed
 
+- **Delegated auth when `actor_token_from` is configured** — when any credential uses `actor_token_from`, the proxy skips its static `auth_token` check, delegating caller authentication to the STS; enables per-user proxy passwords where each user's API key is forwarded as the actor token and validated server-side ([#13](https://github.com/majorcontext/gatekeeper/pull/13))
 - **`TokenExchangeSource.Exchange` signature** — changed from variadic `Exchange(ctx, subject, opts ...ExchangeOptions)` to explicit `Exchange(ctx, subject, actorToken string)` for consistency with `Resolve`; `ExchangeOptions` type removed ([#13](https://github.com/majorcontext/gatekeeper/pull/13))
 - **`TokenExchangeSource.Resolve` signature** — added `actorToken string` parameter; callers must pass `""` when no actor token is needed ([#13](https://github.com/majorcontext/gatekeeper/pull/13))
 

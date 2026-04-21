@@ -191,6 +191,40 @@ func TestProxy_AuthTokenInvalidToken(t *testing.T) {
 	}
 }
 
+func TestProxy_DelegateAuthSkipsStaticCheck(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("backend response"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	p.SetAuthToken("static-token")
+	p.SetDelegateAuth(true)
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	// With delegateAuth, a different password should pass the static check.
+	proxyURL := mustParseURL(proxyServer.URL)
+	proxyURL.User = url.UserPassword("alice", "per-user-api-key")
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+
+	resp, err := client.Get(backend.URL)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d; delegateAuth should skip static authToken check", resp.StatusCode, http.StatusOK)
+	}
+}
+
 func TestProxy_NetworkPolicyPermissive(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("backend response"))
