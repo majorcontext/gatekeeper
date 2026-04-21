@@ -109,6 +109,9 @@ func TestProxy_AuthTokenRequired(t *testing.T) {
 	if resp.StatusCode != http.StatusProxyAuthRequired {
 		t.Errorf("status = %d, want %d (Proxy Auth Required)", resp.StatusCode, http.StatusProxyAuthRequired)
 	}
+	if got := resp.Header.Get("Proxy-Authenticate"); got != `Basic realm="gatekeeper"` {
+		t.Errorf("Proxy-Authenticate = %q, want %q", got, `Basic realm="gatekeeper"`)
+	}
 }
 
 func TestProxy_AuthTokenValidBasicAuth(t *testing.T) {
@@ -179,6 +182,9 @@ func TestProxy_AuthTokenInvalidToken(t *testing.T) {
 
 	if resp.StatusCode != http.StatusProxyAuthRequired {
 		t.Errorf("status = %d, want %d (Proxy Auth Required)", resp.StatusCode, http.StatusProxyAuthRequired)
+	}
+	if got := resp.Header.Get("Proxy-Authenticate"); got != `Basic realm="gatekeeper"` {
+		t.Errorf("Proxy-Authenticate = %q, want %q", got, `Basic realm="gatekeeper"`)
 	}
 }
 
@@ -983,6 +989,9 @@ func TestProxy_PerContextRejectsInvalidToken(t *testing.T) {
 	if resp.StatusCode != http.StatusProxyAuthRequired {
 		t.Errorf("expected 407, got %d", resp.StatusCode)
 	}
+	if got := resp.Header.Get("Proxy-Authenticate"); got != `Basic realm="gatekeeper"` {
+		t.Errorf("Proxy-Authenticate = %q, want %q", got, `Basic realm="gatekeeper"`)
+	}
 }
 
 // TestProxy_PerContextRejectsMissingToken verifies that a request without a
@@ -1008,6 +1017,9 @@ func TestProxy_PerContextRejectsMissingToken(t *testing.T) {
 
 	if resp.StatusCode != http.StatusProxyAuthRequired {
 		t.Errorf("expected 407, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Proxy-Authenticate"); got != `Basic realm="gatekeeper"` {
+		t.Errorf("Proxy-Authenticate = %q, want %q", got, `Basic realm="gatekeeper"`)
 	}
 }
 
