@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -32,8 +33,12 @@ func findCredByGrant(creds map[string][]credentialHeader, grant string) string {
 // No client-level Timeout — MCP uses SSE streaming which is long-lived.
 var mcpRelayClient = &http.Client{
 	Transport: &http.Transport{
-		Proxy:                 nil, // Disable proxy - connect directly to MCP server
-		TLSHandshakeTimeout:  10 * time.Second,
+		Proxy: nil,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 		IdleConnTimeout:       90 * time.Second,
 	},

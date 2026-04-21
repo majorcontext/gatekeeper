@@ -92,6 +92,11 @@ type PathRulesChecker func(host string, port int) bool
 // sane timeout defaults. No client-level Timeout is set because the proxy may
 // handle streaming responses.
 var httpTransport = &http.Transport{
+	Proxy: nil,
+	DialContext: (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
 	TLSHandshakeTimeout:   10 * time.Second,
 	ResponseHeaderTimeout: 30 * time.Second,
 	IdleConnTimeout:       90 * time.Second,
@@ -1584,6 +1589,11 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 	defer tlsClientConn.Close()
 
 	transport := &http.Transport{
+		Proxy: nil,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			RootCAs:    p.upstreamCAs, // nil means system roots
