@@ -140,6 +140,10 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken string) 
 		}
 		s.mu.Unlock()
 
+		// WithoutCancel strips both cancellation and deadline from the parent.
+		// This is intentional: a short deadline from one caller shouldn't cancel
+		// the STS call for all singleflight waiters. The 30s http.Client timeout
+		// still bounds the call.
 		result, err := s.Exchange(context.WithoutCancel(ctx), subjectToken)
 		if err != nil {
 			return nil, err

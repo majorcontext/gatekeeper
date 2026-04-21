@@ -510,7 +510,8 @@ func (p *Proxy) SetCredentialWithGrant(host, headerName, headerValue, grant stri
 
 // SetCredentialResolver registers a dynamic credential resolver for a host.
 // Unlike static credentials, resolvers are called per-request and may make
-// external calls (e.g., RFC 8693 token exchange).
+// external calls (e.g., RFC 8693 token exchange). Only one resolver per host
+// is supported; calling again for the same host replaces the previous resolver.
 func (p *Proxy) SetCredentialResolver(host string, resolver CredentialResolver) {
 	if !isValidHost(host) {
 		slog.Debug("ignoring invalid host for credential resolver",
@@ -520,6 +521,11 @@ func (p *Proxy) SetCredentialResolver(host string, resolver CredentialResolver) 
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if _, exists := p.credentialResolvers[host]; exists {
+		slog.Debug("replacing existing credential resolver",
+			"subsystem", "proxy",
+			"host", host)
+	}
 	p.credentialResolvers[host] = resolver
 }
 

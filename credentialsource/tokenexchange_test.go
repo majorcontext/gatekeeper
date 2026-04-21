@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -268,5 +270,47 @@ func TestTokenExchange_ContextCancelled(t *testing.T) {
 	_, err := src.Exchange(ctx, "usr_abc")
 	if err == nil {
 		t.Fatal("expected error for cancelled context")
+	}
+}
+
+func TestTokenExchange_ConcurrentCacheMiss(t *testing.T) {
+	var callCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount.Add(1)
+		time.Sleep(10 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "deduped-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	src := NewTokenExchangeSource(TokenExchangeConfig{
+		Endpoint:     srv.URL,
+		ClientID:     "k",
+		ClientSecret: "s",
+	})
+
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			token, err := src.Resolve(context.Background(), "usr_x")
+			if err != nil {
+				t.Errorf("Resolve: %v", err)
+				return
+			}
+			if token != "deduped-token" {
+				t.Errorf("token = %q, want %q", token, "deduped-token")
+			}
+		}()
+	}
+	wg.Wait()
+
+	if n := callCount.Load(); n != 1 {
+		t.Errorf("STS calls = %d, want 1 (singleflight should deduplicate)", n)
 	}
 }
