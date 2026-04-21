@@ -11,10 +11,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
-	"math/big"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -51,7 +52,7 @@ func NewGitHubAppSource(appID, installationID string, privateKeyPEM []byte) (*Gi
 		appID:          appID,
 		installationID: installationID,
 		key:            key,
-		client:         http.DefaultClient,
+		client:         &http.Client{},
 		apiBaseURL:     gitHubAPIBaseURL,
 	}, nil
 }
@@ -64,8 +65,11 @@ func (s *GitHubAppSource) Fetch(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("building JWT: %w", err)
 	}
 
-	url := s.apiBaseURL + "/app/installations/" + s.installationID + "/access_tokens"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	endpoint, err := url.JoinPath(s.apiBaseURL, "app", "installations", s.installationID, "access_tokens")
+	if err != nil {
+		return "", fmt.Errorf("building URL: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {
 		return "", fmt.Errorf("creating request: %w", err)
 	}

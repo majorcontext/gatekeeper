@@ -154,8 +154,8 @@ func TestGitHubAppSource_FetchAndTTL(t *testing.T) {
 		if r.Header.Get("Accept") != "application/vnd.github+json" {
 			t.Errorf("Accept = %s, want application/vnd.github+json", r.Header.Get("Accept"))
 		}
-		w.WriteHeader(http.StatusCreated)
 		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]string{
 			"token":      "ghs_testtoken",
 			"expires_at": expiresAt.Format(time.RFC3339),

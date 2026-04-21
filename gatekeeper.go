@@ -141,6 +141,13 @@ func (h *healthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.next.ServeHTTP(w, r)
 }
 
+// pendingRefresh captures a RefreshingSource and its credential config so the
+// refresh goroutine can be started later in Start().
+type pendingRefresh struct {
+	src  credentialsource.RefreshingSource
+	cred CredentialConfig
+}
+
 // Server is the Gate Keeper server. It manages a TLS-intercepting proxy
 // with statically configured credentials.
 type Server struct {
@@ -151,6 +158,9 @@ type Server struct {
 	proxyLn     net.Listener
 	proxyServer *http.Server
 	logCleanup  func() // closes log file if output is a file path
+
+	pendingRefreshes []pendingRefresh
+	refreshCancel    context.CancelFunc
 
 	mu      sync.Mutex
 	started bool
@@ -327,7 +337,7 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 
 		s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
 		if rs, ok := src.(credentialsource.RefreshingSource); ok {
-			s.startCredentialRefresh(ctx, rs, cred)
+			s.pendingRefreshes = append(s.pendingRefreshes, pendingRefresh{src: rs, cred: cred})
 		}
 	}
 	return nil
@@ -387,10 +397,11 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 				val = ensureAuthScheme(val, cred.Prefix)
 			}
 			s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
+			ttl := src.TTL()
 			slog.Debug("credential refreshed",
 				"host", cred.Host,
 				"grant", cred.Grant,
-				"ttl", src.TTL().String())
+				"ttl", ttl.String())
 		}
 	}()
 }
@@ -498,6 +509,14 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	go func() { _ = s.proxyServer.Serve(ln) }()
 
+	// Start background refresh goroutines for any RefreshingSource credentials.
+	refreshCtx, refreshCancel := context.WithCancel(context.Background())
+	s.refreshCancel = refreshCancel
+	for _, pr := range s.pendingRefreshes {
+		s.startCredentialRefresh(refreshCtx, pr.src, pr.cred)
+	}
+	s.pendingRefreshes = nil
+
 	// Block until context canceled, then shut down.
 	<-ctx.Done()
 
@@ -506,8 +525,11 @@ func (s *Server) Start(ctx context.Context) error {
 	return s.Stop(shutdownCtx)
 }
 
-// Stop gracefully shuts down the proxy server.
+// Stop gracefully shuts down the proxy server and all background refresh goroutines.
 func (s *Server) Stop(ctx context.Context) error {
+	if s.refreshCancel != nil {
+		s.refreshCancel()
+	}
 	if s.logCleanup != nil {
 		defer s.logCleanup()
 	}
