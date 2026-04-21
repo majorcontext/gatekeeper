@@ -528,6 +528,347 @@ func TestProxy_NetworkPolicyLogging(t *testing.T) {
 	}
 }
 
+func TestProxy_CanonicalLogLine_SuccessfulRequest(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "7")
+		w.Write([]byte("ok body"))
+	}))
+	defer backend.Close()
+
+	backendURL := mustParseURL(backend.URL)
+	host := backendURL.Hostname()
+
+	p := NewProxy()
+	p.SetCredentialWithGrant(host, "Authorization", "Bearer test-token", "myservice")
+
+	var logged RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		logged = data
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+		},
+	}
+
+	req, _ := http.NewRequest("GET", backend.URL+"/api/v1/test", nil)
+	req.Header.Set("Authorization", "placeholder")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if logged.Method != "GET" {
+		t.Errorf("Method = %q, want GET", logged.Method)
+	}
+	if logged.Host != host {
+		t.Errorf("Host = %q, want %q", logged.Host, host)
+	}
+	if logged.Path != "/api/v1/test" {
+		t.Errorf("Path = %q, want /api/v1/test", logged.Path)
+	}
+	if logged.RequestType != "http" {
+		t.Errorf("RequestType = %q, want http", logged.RequestType)
+	}
+	if logged.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want %d", logged.StatusCode, http.StatusOK)
+	}
+	if logged.Duration <= 0 {
+		t.Error("Duration should be positive")
+	}
+	if !logged.AuthInjected {
+		t.Error("AuthInjected should be true")
+	}
+	if !logged.InjectedHeaders["authorization"] {
+		t.Errorf("InjectedHeaders = %v, want authorization key", logged.InjectedHeaders)
+	}
+	if len(logged.Grants) != 1 || logged.Grants[0] != "myservice" {
+		t.Errorf("Grants = %v, want [myservice]", logged.Grants)
+	}
+	if logged.Denied {
+		t.Error("Denied should be false for allowed request")
+	}
+	if logged.Err != nil {
+		t.Errorf("Err = %v, want nil", logged.Err)
+	}
+	if logged.ResponseSize != 7 {
+		t.Errorf("ResponseSize = %d, want 7", logged.ResponseSize)
+	}
+}
+
+func TestProxy_CanonicalLogLine_PolicyDenied(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("should not reach"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	p.SetNetworkPolicy("strict", []string{}, nil)
+
+	var logged RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		logged = data
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	backendURL := mustParseURL(backend.URL)
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+		},
+	}
+
+	resp, err := client.Get(backend.URL)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if logged.Method != "GET" {
+		t.Errorf("Method = %q, want GET", logged.Method)
+	}
+	if logged.Host != backendURL.Hostname() {
+		t.Errorf("Host = %q, want %q", logged.Host, backendURL.Hostname())
+	}
+	if logged.RequestType != "http" {
+		t.Errorf("RequestType = %q, want http", logged.RequestType)
+	}
+	if logged.StatusCode != http.StatusProxyAuthRequired {
+		t.Errorf("StatusCode = %d, want %d", logged.StatusCode, http.StatusProxyAuthRequired)
+	}
+	if !logged.Denied {
+		t.Error("Denied should be true for blocked request")
+	}
+	if logged.DenyReason == "" {
+		t.Error("DenyReason should be set for blocked request")
+	}
+	if !strings.Contains(logged.DenyReason, backendURL.Hostname()) {
+		t.Errorf("DenyReason = %q, should contain host %q", logged.DenyReason, backendURL.Hostname())
+	}
+	if logged.AuthInjected {
+		t.Error("AuthInjected should be false for blocked request")
+	}
+	if logged.ResponseSize != -1 {
+		t.Errorf("ResponseSize = %d, want -1 (no response)", logged.ResponseSize)
+	}
+}
+
+func TestProxy_CanonicalLogLine_UpstreamError(t *testing.T) {
+	p := NewProxy()
+
+	var logged RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		logged = data
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+		},
+	}
+
+	// Point at a port nothing is listening on.
+	resp, err := client.Get("http://127.0.0.1:1/nope")
+	if err != nil {
+		t.Fatalf("request through proxy: %v", err)
+	}
+	resp.Body.Close()
+
+	if logged.Method != "GET" {
+		t.Errorf("Method = %q, want GET", logged.Method)
+	}
+	if logged.Host != "127.0.0.1" {
+		t.Errorf("Host = %q, want 127.0.0.1", logged.Host)
+	}
+	if logged.Path != "/nope" {
+		t.Errorf("Path = %q, want /nope", logged.Path)
+	}
+	if logged.RequestType != "http" {
+		t.Errorf("RequestType = %q, want http", logged.RequestType)
+	}
+	if logged.Err == nil {
+		t.Error("Err should be set for upstream failure")
+	}
+	if logged.ResponseSize != -1 {
+		t.Errorf("ResponseSize = %d, want -1 (no response)", logged.ResponseSize)
+	}
+}
+
+func TestProxy_CanonicalLogLine_MultipleGrants(t *testing.T) {
+	var receivedAuth, receivedAPIKey string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		receivedAPIKey = r.Header.Get("x-api-key")
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	backendURL := mustParseURL(backend.URL)
+	host := backendURL.Hostname()
+
+	p := NewProxy()
+	p.SetCredentialWithGrant(host, "Authorization", "Bearer token1", "github")
+	p.SetCredentialWithGrant(host, "x-api-key", "sk-ant-key", "anthropic")
+
+	var logged RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		logged = data
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+		},
+	}
+
+	resp, err := client.Get(backend.URL + "/multi")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if receivedAuth != "Bearer token1" {
+		t.Errorf("Authorization = %q, want Bearer token1", receivedAuth)
+	}
+	if receivedAPIKey != "sk-ant-key" {
+		t.Errorf("x-api-key = %q, want sk-ant-key", receivedAPIKey)
+	}
+
+	if !logged.AuthInjected {
+		t.Error("AuthInjected should be true")
+	}
+	if len(logged.Grants) != 2 {
+		t.Errorf("Grants = %v, want 2 entries", logged.Grants)
+	}
+
+	grantSet := make(map[string]bool)
+	for _, g := range logged.Grants {
+		grantSet[g] = true
+	}
+	if !grantSet["github"] || !grantSet["anthropic"] {
+		t.Errorf("Grants = %v, want github and anthropic", logged.Grants)
+	}
+
+	if !logged.InjectedHeaders["authorization"] || !logged.InjectedHeaders["x-api-key"] {
+		t.Errorf("InjectedHeaders = %v, want authorization and x-api-key", logged.InjectedHeaders)
+	}
+}
+
+func TestProxy_CanonicalLogLine_ConnectBlocked(t *testing.T) {
+	p := NewProxy()
+	p.SetNetworkPolicy("strict", []string{}, nil)
+
+	var logged RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		logged = data
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	// Issue a CONNECT through the proxy to a blocked host.
+	conn, err := net.Dial("tcp", proxyServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	_, _ = fmt.Fprintf(conn, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if logged.Method != "CONNECT" {
+		t.Errorf("Method = %q, want CONNECT", logged.Method)
+	}
+	if logged.Host != "example.com" {
+		t.Errorf("Host = %q, want example.com", logged.Host)
+	}
+	if logged.RequestType != "connect" {
+		t.Errorf("RequestType = %q, want connect", logged.RequestType)
+	}
+	if logged.StatusCode != http.StatusProxyAuthRequired {
+		t.Errorf("StatusCode = %d, want %d", logged.StatusCode, http.StatusProxyAuthRequired)
+	}
+	if !logged.Denied {
+		t.Error("Denied should be true")
+	}
+	if logged.DenyReason == "" {
+		t.Error("DenyReason should be set")
+	}
+	if !strings.Contains(logged.DenyReason, "example.com") {
+		t.Errorf("DenyReason = %q, should mention example.com", logged.DenyReason)
+	}
+	if logged.RequestSize != -1 {
+		t.Errorf("RequestSize = %d, want -1", logged.RequestSize)
+	}
+	if logged.ResponseSize != -1 {
+		t.Errorf("ResponseSize = %d, want -1", logged.ResponseSize)
+	}
+}
+
+func TestProxy_CanonicalLogLine_NoCredentials(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+
+	var logged RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		logged = data
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+		},
+	}
+
+	resp, err := client.Get(backend.URL + "/plain")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if logged.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want 200", logged.StatusCode)
+	}
+	if logged.AuthInjected {
+		t.Error("AuthInjected should be false when no credentials configured")
+	}
+	if len(logged.Grants) != 0 {
+		t.Errorf("Grants = %v, want empty", logged.Grants)
+	}
+	if len(logged.InjectedHeaders) > 0 {
+		t.Errorf("InjectedHeaders = %v, want empty", logged.InjectedHeaders)
+	}
+	if logged.Denied {
+		t.Error("Denied should be false")
+	}
+}
+
 func mustParseURL(s string) *url.URL {
 	u, err := url.Parse(s)
 	if err != nil {
