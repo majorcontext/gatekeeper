@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 const tokenExchangeGrantType = "urn:ietf:params:oauth:grant-type:token-exchange"
@@ -43,6 +45,7 @@ type TokenExchangeSource struct {
 
 	mu    sync.Mutex
 	cache map[string]cachedToken
+	sf    singleflight.Group
 }
 
 type cachedToken struct {
@@ -115,8 +118,11 @@ func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken string)
 	return &result, nil
 }
 
+const defaultTokenTTL = 5 * time.Minute
+
 // Resolve returns a credential for the given subject, using the cache when
-// possible. This is the method called by the CredentialResolver function.
+// possible. Concurrent requests for the same subject are coalesced into a
+// single STS call via singleflight.
 func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken string) (string, error) {
 	s.mu.Lock()
 	if cached, ok := s.cache[subjectToken]; ok && time.Now().Before(cached.expiresAt) {
@@ -126,17 +132,35 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken string) 
 	}
 	s.mu.Unlock()
 
-	result, err := s.Exchange(ctx, subjectToken)
+	v, err, _ := s.sf.Do(subjectToken, func() (any, error) {
+		result, err := s.Exchange(ctx, subjectToken)
+		if err != nil {
+			return nil, err
+		}
+
+		ttl := time.Duration(result.ExpiresIn) * time.Second
+		if ttl <= 0 {
+			ttl = defaultTokenTTL
+		}
+
+		s.mu.Lock()
+		now := time.Now()
+		for k, v := range s.cache {
+			if now.After(v.expiresAt) {
+				delete(s.cache, k)
+			}
+		}
+		s.cache[subjectToken] = cachedToken{
+			accessToken: result.AccessToken,
+			expiresAt:   now.Add(ttl),
+		}
+		s.mu.Unlock()
+
+		return result.AccessToken, nil
+	})
 	if err != nil {
 		return "", err
 	}
 
-	s.mu.Lock()
-	s.cache[subjectToken] = cachedToken{
-		accessToken: result.AccessToken,
-		expiresAt:   time.Now().Add(time.Duration(result.ExpiresIn) * time.Second),
-	}
-	s.mu.Unlock()
-
-	return result.AccessToken, nil
+	return v.(string), nil
 }

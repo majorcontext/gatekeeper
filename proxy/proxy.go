@@ -325,8 +325,9 @@ type RunContextData struct {
 type ContextResolver func(token string) (*RunContextData, bool)
 
 // CredentialResolver resolves credentials dynamically per-request. Unlike
-// static credentials (pre-resolved at startup), resolvers inspect the
-// request and may make external calls (e.g., RFC 8693 token exchange).
+// static credentials (pre-resolved at startup), resolvers may inspect and
+// modify the request (e.g., strip a subject identity header) and may make
+// external calls (e.g., RFC 8693 token exchange).
 // Returns nil with no error when the resolver has no credentials to offer.
 type CredentialResolver func(ctx context.Context, req *http.Request, host string) ([]credentialHeader, error)
 
@@ -1688,11 +1689,6 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			return
 		}
 
-		// Capture request body and headers
-		var reqBody []byte
-		reqBody, req.Body = captureBody(req.Body, req.Header.Get("Content-Type"))
-		originalReqHeaders := req.Header.Clone()
-
 		req.URL.Scheme = "https"
 		// Rewrite synthetic host-gateway hostname to actual IP for forwarding.
 		connectHost := r.Host
@@ -1794,6 +1790,13 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			_ = errResp.Write(tlsClientConn)
 			continue
 		}
+
+		// Capture request body and headers after credential resolution
+		// so that resolver side effects (e.g., subject header stripping)
+		// are reflected and sensitive headers are not logged.
+		var reqBody []byte
+		reqBody, req.Body = captureBody(req.Body, req.Header.Get("Content-Type"))
+		originalReqHeaders := req.Header.Clone()
 
 		injectedHeaders := injectCredentials(req, creds, host, req.Method, req.URL.Path)
 
