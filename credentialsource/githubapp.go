@@ -7,9 +7,11 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"math/big"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,26 +42,9 @@ func NewGitHubAppSource(appID, installationID string, privateKeyPEM []byte) (*Gi
 		return nil, fmt.Errorf("failed to decode PEM block from private key")
 	}
 
-	var key *rsa.PrivateKey
-	var err error
-	switch block.Type {
-	case "RSA PRIVATE KEY":
-		key, err = x509.ParsePKCS1PrivateKey(block.Bytes)
-	case "PRIVATE KEY":
-		parsed, parseErr := x509.ParsePKCS8PrivateKey(block.Bytes)
-		if parseErr != nil {
-			return nil, fmt.Errorf("parsing PKCS8 private key: %w", parseErr)
-		}
-		var ok bool
-		key, ok = parsed.(*rsa.PrivateKey)
-		if !ok {
-			return nil, fmt.Errorf("PKCS8 key is not RSA")
-		}
-	default:
-		return nil, fmt.Errorf("unsupported PEM block type %q, want RSA PRIVATE KEY or PRIVATE KEY", block.Type)
-	}
+	key, err := parseRSAPrivateKey(block)
 	if err != nil {
-		return nil, fmt.Errorf("parsing RSA private key: %w", err)
+		return nil, err
 	}
 
 	return &GitHubAppSource{
@@ -167,4 +152,65 @@ func (s *GitHubAppSource) buildJWT() (string, error) {
 	}
 
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+// parseRSAPrivateKey extracts an RSA private key from a PEM block.
+// It tries the standard PKCS1/PKCS8 parsers first. If the key has
+// inconsistent CRT parameters (p*q != n), it falls back to raw ASN.1
+// parsing and builds a key from just N, E, D — matching the lenient
+// behavior of OpenSSL-based runtimes (Node, Ruby, Python).
+func parseRSAPrivateKey(block *pem.Block) (*rsa.PrivateKey, error) {
+	switch block.Type {
+	case "RSA PRIVATE KEY":
+		key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+		if err == nil {
+			return key, nil
+		}
+		return parsePKCS1Lenient(block.Bytes)
+	case "PRIVATE KEY":
+		parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parsing PKCS8 private key: %w", err)
+		}
+		key, ok := parsed.(*rsa.PrivateKey)
+		if !ok {
+			return nil, fmt.Errorf("PKCS8 key is not RSA")
+		}
+		return key, nil
+	default:
+		return nil, fmt.Errorf("unsupported PEM block type %q, want RSA PRIVATE KEY or PRIVATE KEY", block.Type)
+	}
+}
+
+// pkcs1RawKey mirrors the ASN.1 structure of an RSA private key (RFC 8017 A.1.2).
+type pkcs1RawKey struct {
+	Version int
+	N       *big.Int
+	E       int
+	D       *big.Int
+	P       *big.Int
+	Q       *big.Int
+	Dp      *big.Int
+	Dq      *big.Int
+	Qinv    *big.Int
+}
+
+// parsePKCS1Lenient parses a PKCS#1 DER block into an rsa.PrivateKey using
+// only N, E, and D, ignoring invalid CRT parameters.
+func parsePKCS1Lenient(der []byte) (*rsa.PrivateKey, error) {
+	var raw pkcs1RawKey
+	if _, err := asn1.Unmarshal(der, &raw); err != nil {
+		return nil, fmt.Errorf("parsing RSA private key ASN.1: %w", err)
+	}
+	if raw.N == nil || raw.D == nil || raw.E == 0 {
+		return nil, fmt.Errorf("RSA private key missing required fields")
+	}
+	key := &rsa.PrivateKey{
+		PublicKey: rsa.PublicKey{
+			N: raw.N,
+			E: raw.E,
+		},
+		D: raw.D,
+	}
+	return key, nil
 }

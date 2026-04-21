@@ -9,9 +9,11 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -287,6 +289,62 @@ func TestGitHubAppSource_MissingExpiresAt(t *testing.T) {
 	_, err := src.Fetch(context.Background())
 	if err == nil {
 		t.Fatal("expected error for missing expires_at field")
+	}
+}
+
+func TestGitHubAppSource_LenientPKCS1Key(t *testing.T) {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	der := x509.MarshalPKCS1PrivateKey(key)
+
+	// Corrupt the CRT parameter q (prime2) so p*q != n, simulating keys
+	// that work in OpenSSL-based runtimes but fail Go's strict validation.
+	var raw struct {
+		Version int
+		N       *big.Int
+		E       int
+		D       *big.Int
+		P       *big.Int
+		Q       *big.Int
+		Dp      *big.Int
+		Dq      *big.Int
+		Qinv    *big.Int
+	}
+	if _, err := asn1.Unmarshal(der, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw.Q = new(big.Int).Add(raw.Q, big.NewInt(2))
+	corruptDER, err := asn1.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: corruptDER})
+
+	// Standard Go parser would reject this key; lenient parser should accept it.
+	src, err := NewGitHubAppSource("1", "2", keyPEM)
+	if err != nil {
+		t.Fatalf("NewGitHubAppSource with corrupt CRT params: %v", err)
+	}
+	if src.Type() != "github-app" {
+		t.Errorf("Type() = %q, want github-app", src.Type())
+	}
+
+	// Verify the key can still sign — the original N, E, D are intact.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{
+			"token":      "ghs_lenient",
+			"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		})
+	}))
+	defer srv.Close()
+	src.apiBaseURL = srv.URL
+
+	token, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch with lenient key: %v", err)
+	}
+	if token != "ghs_lenient" {
+		t.Errorf("token = %q, want ghs_lenient", token)
 	}
 }
 
