@@ -150,3 +150,6 @@ go test -race ./...      # test
 go vet ./...             # lint
 ```
 
+## License
+
+MIT — see [LICENSE](LICENSE).
