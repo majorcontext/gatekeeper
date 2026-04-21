@@ -417,3 +417,72 @@ func TestTokenExchange_CachePerActorToken(t *testing.T) {
 		t.Errorf("STS calls = %d, want 2 (same actor should be cached)", n)
 	}
 }
+
+func TestTokenExchange_CachePerSubjectWithSameActor(t *testing.T) {
+	var callCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount.Add(1)
+		r.ParseForm()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "token_for_" + r.FormValue("subject_token"),
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	src := NewTokenExchangeSource(TokenExchangeConfig{
+		Endpoint:     srv.URL,
+		ClientID:     "gk",
+		ClientSecret: "secret",
+	})
+
+	token1, _ := src.Resolve(context.Background(), "alice", "shared_key")
+	token2, _ := src.Resolve(context.Background(), "bob", "shared_key")
+	token3, _ := src.Resolve(context.Background(), "alice", "shared_key")
+
+	if token1 != "token_for_alice" {
+		t.Errorf("token1 = %q, want token_for_alice", token1)
+	}
+	if token2 != "token_for_bob" {
+		t.Errorf("token2 = %q, want token_for_bob", token2)
+	}
+	if token3 != token1 {
+		t.Errorf("token3 = %q, want same as token1 (cached)", token3)
+	}
+	if n := callCount.Load(); n != 2 {
+		t.Errorf("STS calls = %d, want 2 (same subject+actor should be cached)", n)
+	}
+}
+
+func TestTokenExchange_CustomActorTokenType(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "exchanged",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	src := NewTokenExchangeSource(TokenExchangeConfig{
+		Endpoint:       srv.URL,
+		ClientID:       "gk",
+		ClientSecret:   "secret",
+		ActorTokenType: "urn:ietf:params:oauth:token-type:jwt",
+	})
+
+	_, err := src.Exchange(context.Background(), "alice", "jwt_token_here")
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+
+	if !strings.Contains(gotBody, "actor_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Ajwt") {
+		t.Errorf("expected custom actor_token_type, got: %s", gotBody)
+	}
+}

@@ -246,6 +246,18 @@ func TestNewTokenExchangeResolver_ActorTokenRequiredButMissing(t *testing.T) {
 	}
 }
 
+func TestExtractProxyAuthCredentials_PasswordWithColons(t *testing.T) {
+	r, _ := http.NewRequest("CONNECT", "http://example.com:443", nil)
+	r.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("alice:pass:with:colons")))
+	gotUser, gotPassword := extractProxyAuthCredentials(r)
+	if gotUser != "alice" {
+		t.Errorf("username = %q, want %q", gotUser, "alice")
+	}
+	if gotPassword != "pass:with:colons" {
+		t.Errorf("password = %q, want %q", gotPassword, "pass:with:colons")
+	}
+}
+
 func TestExtractProxyAuthCredentials_NilRequest(t *testing.T) {
 	gotUser, gotPassword := extractProxyAuthCredentials(nil)
 	if gotUser != "" {
