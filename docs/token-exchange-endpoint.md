@@ -4,7 +4,7 @@
 
 Gatekeeper is a credential-injecting TLS proxy. It can be configured with a `token-exchange` credential source that dynamically resolves per-user OAuth tokens by calling an external Security Token Service (STS) endpoint using the [RFC 8693 OAuth 2.0 Token Exchange](https://datatracker.ietf.org/doc/html/rfc8693) protocol.
 
-Multiple callers with different user identities route requests through a single shared gatekeeper instance. When a request arrives with a subject identity header (e.g., `X-Gatekeeper-Subject: usr_alice`), gatekeeper calls your STS endpoint to exchange that subject token for an access token scoped to the target API. The exchanged token is injected into the upstream request; the subject header is stripped before forwarding.
+Multiple callers with different user identities route requests through a single shared gatekeeper instance. When a request arrives with a subject identity — either via a custom header or extracted from the proxy authentication username — gatekeeper calls your STS endpoint to exchange that subject token for an access token scoped to the target API. The exchanged token is injected into the upstream request.
 
 Your job is to implement the STS endpoint that gatekeeper calls.
 
@@ -27,7 +27,7 @@ Authorization: Basic base64(client_id:client_secret)
 | Parameter            | Value                                                              | Always present |
 |----------------------|--------------------------------------------------------------------|----------------|
 | `grant_type`         | `urn:ietf:params:oauth:grant-type:token-exchange`                  | Yes            |
-| `subject_token`      | The value from the subject identity header (e.g., `usr_alice`)     | Yes            |
+| `subject_token`      | The subject identity (e.g., `usr_alice` or `alice@example.com`)    | Yes            |
 | `subject_token_type` | A token type URI (default: `urn:ietf:params:oauth:token-type:access_token`) | Yes  |
 | `resource`           | Target resource URI (e.g., `https://api.github.com`)               | Only if configured |
 
@@ -84,7 +84,7 @@ Use standard OAuth error responses for debugging clarity:
 Gatekeeper caches tokens per `(subject_token, endpoint)` pair:
 
 - If `expires_in` is provided, the token is cached until expiry. No refresh is attempted — when the cache entry expires, the next request triggers a new exchange.
-- If `expires_in` is `0` or omitted, the token is **not cached** and every request triggers a new exchange.
+- If `expires_in` is `0` or omitted, a default TTL of 5 minutes is applied.
 - There is no proactive refresh or sliding window. Expired entries are replaced on the next request.
 
 For high-throughput scenarios, set `expires_in` to a reasonable TTL (e.g., 3600 for one hour) to avoid per-request STS calls.
@@ -94,19 +94,38 @@ For high-throughput scenarios, set `expires_in` to a reasonable TTL (e.g., 3600 
 The gatekeeper YAML config for a token-exchange credential looks like:
 
 ```yaml
+# Mode 1: Subject from a custom request header
 credentials:
   - host: api.github.com
     grant: github
-    prefix: Bearer           # Auth scheme prefix for the injected header (optional)
+    prefix: Bearer
     source:
       type: token-exchange
       endpoint: https://sts.example.com/token
       client_id: gk-client
-      client_secret_env: STS_CLIENT_SECRET   # or client_secret for inline (not recommended)
-      subject_header: X-Gatekeeper-Subject
-      subject_token_type: urn:ietf:params:oauth:token-type:access_token  # optional, this is the default
-      resource: https://api.github.com       # optional, sent as the resource parameter
+      client_secret_env: STS_CLIENT_SECRET
+      subject_header: X-Gatekeeper-Subject    # extract subject from this request header
+      resource: https://api.github.com
+
+# Mode 2: Subject from proxy authentication username
+credentials:
+  - host: api.github.com
+    grant: github
+    prefix: Bearer
+    source:
+      type: token-exchange
+      endpoint: https://sts.example.com/token
+      client_id: gk-client
+      client_secret_env: STS_CLIENT_SECRET
+      subject_from: proxy-auth                # extract subject from Proxy-Authorization username
+      resource: https://api.github.com
 ```
+
+**`subject_header`** — The subject identity is read from the named HTTP header on each request. Gatekeeper strips the header before forwarding upstream. Use this when callers can set custom headers.
+
+**`subject_from: proxy-auth`** — The subject identity is extracted from the username in the client's proxy authentication credentials (`HTTP_PROXY=http://alice%40example.com:<token>@proxy:port`). The `@` in email addresses is percent-encoded as `%40` in the URL. No request headers are modified. Use this when callers cannot set custom headers (e.g., tools that only configure `HTTP_PROXY`).
+
+The two options are mutually exclusive — set one or the other, not both.
 
 ## Implementation Checklist
 
@@ -123,7 +142,7 @@ credentials:
 
 ## Testing
 
-You can test your endpoint against gatekeeper's token exchange client directly. The end-to-end integration test in `gatekeeper_test.go` (`TestHTTPSTokenExchangeEndToEnd`) demonstrates the complete flow with a mock STS — use it as a reference for the exact wire format.
+You can test your endpoint against gatekeeper's token exchange client directly. The end-to-end integration test in `gatekeeper_test.go` (`TestHTTPSTokenExchangeEndToEnd`) demonstrates the complete flow with a mock STS — use it as a reference for the exact wire format. For the proxy-auth subject mode, see `TestHTTPSTokenExchangeProxyAuthSubject`.
 
 Manual test with curl:
 
