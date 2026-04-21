@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -821,6 +823,64 @@ func TestProxy_CanonicalLogLine_ConnectBlocked(t *testing.T) {
 	}
 	if logged.ResponseSize != -1 {
 		t.Errorf("ResponseSize = %d, want -1", logged.ResponseSize)
+	}
+}
+
+func TestProxy_CanonicalLogLine_ConnectTransportError(t *testing.T) {
+	ca, err := generateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewProxy()
+	p.SetCA(ca)
+
+	var logged RequestLogData
+	var logOnce sync.Once
+	p.SetLogger(func(data RequestLogData) {
+		logOnce.Do(func() { logged = data })
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	// Configure client to trust our test CA.
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(ca.certPEM)
+
+	proxyURL := mustParseURL(proxyServer.URL)
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{
+				RootCAs: caCertPool,
+			},
+		},
+	}
+
+	// CONNECT to a port nothing listens on — the proxy intercepts TLS,
+	// then transport.RoundTrip fails upstream. The proxy writes a 502
+	// back over the intercepted TLS connection.
+	resp, err := client.Get("https://127.0.0.1:1/nope")
+	if err != nil {
+		t.Fatalf("request through proxy: %v", err)
+	}
+	resp.Body.Close()
+
+	if logged.Method != "GET" {
+		t.Errorf("Method = %q, want GET", logged.Method)
+	}
+	if logged.Host != "127.0.0.1" {
+		t.Errorf("Host = %q, want 127.0.0.1", logged.Host)
+	}
+	if logged.RequestType != "connect" {
+		t.Errorf("RequestType = %q, want connect", logged.RequestType)
+	}
+	if logged.StatusCode != http.StatusBadGateway {
+		t.Errorf("StatusCode = %d, want %d", logged.StatusCode, http.StatusBadGateway)
+	}
+	if logged.Err == nil {
+		t.Error("Err should be set for transport failure")
 	}
 }
 

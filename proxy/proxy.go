@@ -1932,6 +1932,17 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			}
 			errResp.Header.Set("Content-Type", "text/plain")
 			_ = errResp.Write(tlsClientConn)
+			p.logRequest(r, RequestLogData{
+				Method:       req.Method,
+				URL:          req.URL.String(),
+				Host:         host,
+				Path:         req.URL.Path,
+				RequestType:  "connect",
+				StatusCode:   http.StatusBadGateway,
+				RequestSize:  req.ContentLength,
+				ResponseSize: -1,
+				Err:          credErr,
+			})
 			continue
 		}
 
