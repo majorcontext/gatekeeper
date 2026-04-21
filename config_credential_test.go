@@ -90,6 +90,9 @@ func TestResolveSourceExtraneousFields(t *testing.T) {
 		{"aws with var", SourceConfig{Type: "aws-secretsmanager", Secret: "s", Var: "extra"}},
 		{"aws with value", SourceConfig{Type: "aws-secretsmanager", Secret: "s", Value: "extra"}},
 		{"aws with app_id", SourceConfig{Type: "aws-secretsmanager", Secret: "s", AppID: "extra"}},
+		{"env with subject_from", SourceConfig{Type: "env", Var: "X", SubjectFrom: "proxy-auth"}},
+		{"static with subject_from", SourceConfig{Type: "static", Value: "v", SubjectFrom: "proxy-auth"}},
+		{"aws with subject_from", SourceConfig{Type: "aws-secretsmanager", Secret: "s", SubjectFrom: "proxy-auth"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -209,6 +212,7 @@ func TestResolveSourceGitHubAppExtraneousFields(t *testing.T) {
 		{"with value", SourceConfig{Type: "github-app", AppID: "1", InstallationID: "2", PrivateKeyEnv: "X", Value: "extra"}},
 		{"with secret", SourceConfig{Type: "github-app", AppID: "1", InstallationID: "2", PrivateKeyEnv: "X", Secret: "extra"}},
 		{"with region", SourceConfig{Type: "github-app", AppID: "1", InstallationID: "2", PrivateKeyEnv: "X", Region: "extra"}},
+		{"with subject_from", SourceConfig{Type: "github-app", AppID: "1", InstallationID: "2", PrivateKeyEnv: "X", SubjectFrom: "proxy-auth"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
