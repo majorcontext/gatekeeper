@@ -312,6 +312,19 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 			return fmt.Errorf("credential %q: host is required", cred.Grant)
 		}
 
+		if cred.Format != "" && !strings.EqualFold(cred.Format, "basic") {
+			return fmt.Errorf("credential for %s: unknown format %q (valid values: \"basic\")", cred.Host, cred.Format)
+		}
+
+		header := cred.Header
+		if header == "" {
+			header = "Authorization"
+		}
+
+		if cred.Format != "" && !strings.EqualFold(header, "Authorization") {
+			return fmt.Errorf("credential for %s: format %q is only supported with the Authorization header", cred.Host, cred.Format)
+		}
+
 		src, err := ResolveSource(cred.Source)
 		if err != nil {
 			return fmt.Errorf("credential for %s: %w", cred.Host, err)
@@ -322,11 +335,6 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 		cancel()
 		if err != nil {
 			return fmt.Errorf("credential for %s: fetch failed: %w", cred.Host, err)
-		}
-
-		header := cred.Header
-		if header == "" {
-			header = "Authorization"
 		}
 
 		// For Authorization headers, ensure the value includes an auth
