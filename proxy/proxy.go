@@ -1798,6 +1798,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			return
 		}
 
+		reqStart := time.Now()
 		req.URL.Scheme = "https"
 		// Rewrite synthetic host-gateway hostname to actual IP for forwarding.
 		connectHost := r.Host
@@ -1817,6 +1818,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				Path:         req.URL.Path,
 				RequestType:  "connect",
 				StatusCode:   http.StatusProxyAuthRequired,
+				Duration:     time.Since(reqStart),
 				RequestSize:  -1,
 				ResponseSize: -1,
 				Denied:       true,
@@ -1859,6 +1861,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 						Path:         req.URL.Path,
 						RequestType:  "connect",
 						StatusCode:   http.StatusForbidden,
+						Duration:     time.Since(reqStart),
 						RequestSize:  req.ContentLength,
 						ResponseSize: -1,
 						Denied:       true,
@@ -1886,6 +1889,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 						Path:         req.URL.Path,
 						RequestType:  "connect",
 						StatusCode:   http.StatusForbidden,
+						Duration:     time.Since(reqStart),
 						RequestSize:  req.ContentLength,
 						ResponseSize: -1,
 						Denied:       true,
@@ -1939,6 +1943,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				Path:         req.URL.Path,
 				RequestType:  "connect",
 				StatusCode:   http.StatusBadGateway,
+				Duration:     time.Since(reqStart),
 				RequestSize:  req.ContentLength,
 				ResponseSize: -1,
 				Err:          credErr,
