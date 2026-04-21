@@ -44,8 +44,13 @@ type TokenExchangeSource struct {
 	client           *http.Client
 
 	mu    sync.Mutex
-	cache map[string]cachedToken
+	cache map[tokenCacheKey]cachedToken
 	sf    singleflight.Group
+}
+
+type tokenCacheKey struct {
+	subject string
+	actor   string
 }
 
 type cachedToken struct {
@@ -66,7 +71,7 @@ func NewTokenExchangeSource(cfg TokenExchangeConfig) *TokenExchangeSource {
 		resource:         cfg.Resource,
 		subjectTokenType: subjectTokenType,
 		client:           &http.Client{Timeout: 30 * time.Second},
-		cache:            make(map[string]cachedToken),
+		cache:            make(map[tokenCacheKey]cachedToken),
 	}
 }
 
@@ -135,22 +140,20 @@ const defaultTokenTTL = 5 * time.Minute
 // forwarded to the STS as the RFC 8693 actor_token parameter and included
 // in the cache key.
 func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorToken string) (string, error) {
-	cacheKey := subjectToken
-	if actorToken != "" {
-		cacheKey = fmt.Sprintf("%d:%s:%s", len(subjectToken), subjectToken, actorToken)
-	}
+	ck := tokenCacheKey{subject: subjectToken, actor: actorToken}
+	sfKey := subjectToken + "\n" + actorToken
 
 	s.mu.Lock()
-	if cached, ok := s.cache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
+	if cached, ok := s.cache[ck]; ok && time.Now().Before(cached.expiresAt) {
 		token := cached.accessToken
 		s.mu.Unlock()
 		return token, nil
 	}
 	s.mu.Unlock()
 
-	v, err, _ := s.sf.Do(cacheKey, func() (any, error) {
+	v, err, _ := s.sf.Do(sfKey, func() (any, error) {
 		s.mu.Lock()
-		if cached, ok := s.cache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
+		if cached, ok := s.cache[ck]; ok && time.Now().Before(cached.expiresAt) {
 			s.mu.Unlock()
 			return cached.accessToken, nil
 		}
@@ -181,7 +184,7 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorTo
 				delete(s.cache, k)
 			}
 		}
-		s.cache[cacheKey] = cachedToken{
+		s.cache[ck] = cachedToken{
 			accessToken: result.AccessToken,
 			expiresAt:   now.Add(ttl),
 		}

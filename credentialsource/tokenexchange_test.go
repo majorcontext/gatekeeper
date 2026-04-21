@@ -380,9 +380,9 @@ func TestTokenExchange_ActorTokenNotSentWhenEmpty(t *testing.T) {
 }
 
 func TestTokenExchange_CachePerActorToken(t *testing.T) {
-	var callCount int
+	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		r.ParseForm()
 		actor := r.FormValue("actor_token")
 		w.Header().Set("Content-Type", "application/json")
@@ -413,7 +413,7 @@ func TestTokenExchange_CachePerActorToken(t *testing.T) {
 	if token3 != token1 {
 		t.Errorf("token3 = %q, want same as token1 (cached)", token3)
 	}
-	if callCount != 2 {
-		t.Errorf("STS calls = %d, want 2 (same actor should be cached)", callCount)
+	if n := callCount.Load(); n != 2 {
+		t.Errorf("STS calls = %d, want 2 (same actor should be cached)", n)
 	}
 }
