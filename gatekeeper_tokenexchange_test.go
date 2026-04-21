@@ -2,6 +2,7 @@ package gatekeeper
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -73,5 +74,41 @@ func TestNewTokenExchangeResolver_NoSubjectHeader(t *testing.T) {
 	}
 	if len(creds) != 0 {
 		t.Errorf("got %d creds, want 0 (no subject header means skip)", len(creds))
+	}
+}
+
+func TestExtractProxyAuthUsername(t *testing.T) {
+	tests := []struct {
+		name string
+		auth string
+		want string
+	}{
+		{"basic with email", "Basic " + base64.StdEncoding.EncodeToString([]byte("alice@example.com:token123")), "alice@example.com"},
+		{"basic with simple user", "Basic " + base64.StdEncoding.EncodeToString([]byte("bob:secret")), "bob"},
+		{"basic with empty username", "Basic " + base64.StdEncoding.EncodeToString([]byte(":token")), ""},
+		{"bearer token", "Bearer some-token", ""},
+		{"no auth header", "", ""},
+		{"invalid base64", "Basic !!!invalid!!!", ""},
+		{"basic no colon", "Basic " + base64.StdEncoding.EncodeToString([]byte("nocolon")), ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _ := http.NewRequest("CONNECT", "http://example.com:443", nil)
+			if tt.auth != "" {
+				r.Header.Set("Proxy-Authorization", tt.auth)
+			}
+			got := extractProxyAuthUsername(r)
+			if got != tt.want {
+				t.Errorf("extractProxyAuthUsername() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractProxyAuthUsername_NilRequest(t *testing.T) {
+	got := extractProxyAuthUsername(nil)
+	if got != "" {
+		t.Errorf("extractProxyAuthUsername(nil) = %q, want empty", got)
 	}
 }
