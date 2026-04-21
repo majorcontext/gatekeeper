@@ -63,6 +63,15 @@ type SourceConfig struct {
 	InstallationID string `yaml:"installation_id,omitempty"`  // for github-app source
 	PrivateKeyPath string `yaml:"private_key_path,omitempty"` // for github-app source
 	PrivateKeyEnv  string `yaml:"private_key_env,omitempty"`  // for github-app source
+
+	// token-exchange (RFC 8693) fields
+	Endpoint         string `yaml:"endpoint,omitempty"`
+	ClientID         string `yaml:"client_id,omitempty"`
+	ClientSecret     string `yaml:"client_secret,omitempty"`
+	ClientSecretEnv  string `yaml:"client_secret_env,omitempty"`
+	SubjectHeader    string `yaml:"subject_header,omitempty"`
+	SubjectTokenType string `yaml:"subject_token_type,omitempty"`
+	Resource         string `yaml:"resource,omitempty"`
 }
 
 // NetworkConfig configures network policy.

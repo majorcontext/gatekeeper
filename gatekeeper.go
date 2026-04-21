@@ -325,9 +325,14 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 			return fmt.Errorf("credential for %s: format %q is only supported with the Authorization header", cred.Host, cred.Format)
 		}
 
-		src, err := ResolveSource(cred.Source)
+		src, resolver, err := ResolveCredentialSource(cred)
 		if err != nil {
 			return fmt.Errorf("credential for %s: %w", cred.Host, err)
+		}
+
+		if resolver != nil {
+			s.proxy.SetCredentialResolver(cred.Host, resolver)
+			continue
 		}
 
 		fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)

@@ -219,3 +219,114 @@ func TestResolveSourceGitHubAppExtraneousFields(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveSourceTokenExchangeMissingEndpoint(t *testing.T) {
+	_, _, err := ResolveCredentialSource(CredentialConfig{
+		Host: "api.github.com",
+		Source: SourceConfig{
+			Type:            "token-exchange",
+			ClientID:        "gk",
+			ClientSecretEnv: "SECRET",
+			SubjectHeader:   "X-Subject",
+			Resource:        "https://api.github.com",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for missing endpoint")
+	}
+}
+
+func TestResolveSourceTokenExchangeMissingClientID(t *testing.T) {
+	_, _, err := ResolveCredentialSource(CredentialConfig{
+		Host: "api.github.com",
+		Source: SourceConfig{
+			Type:            "token-exchange",
+			Endpoint:        "https://sts.example.com/token",
+			ClientSecretEnv: "SECRET",
+			SubjectHeader:   "X-Subject",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for missing client_id")
+	}
+}
+
+func TestResolveSourceTokenExchangeMissingSubjectHeader(t *testing.T) {
+	_, _, err := ResolveCredentialSource(CredentialConfig{
+		Host: "api.github.com",
+		Source: SourceConfig{
+			Type:            "token-exchange",
+			Endpoint:        "https://sts.example.com/token",
+			ClientID:        "gk",
+			ClientSecretEnv: "SECRET",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for missing subject_header")
+	}
+}
+
+func TestResolveSourceTokenExchangeNoSecret(t *testing.T) {
+	_, _, err := ResolveCredentialSource(CredentialConfig{
+		Host: "api.github.com",
+		Source: SourceConfig{
+			Type:          "token-exchange",
+			Endpoint:      "https://sts.example.com/token",
+			ClientID:      "gk",
+			SubjectHeader: "X-Subject",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error when neither client_secret nor client_secret_env is set")
+	}
+}
+
+func TestResolveSourceTokenExchangeValid(t *testing.T) {
+	t.Setenv("TEST_TE_SECRET", "my-secret")
+	_, resolver, err := ResolveCredentialSource(CredentialConfig{
+		Host: "api.github.com",
+		Source: SourceConfig{
+			Type:            "token-exchange",
+			Endpoint:        "https://sts.example.com/token",
+			ClientID:        "gk",
+			ClientSecretEnv: "TEST_TE_SECRET",
+			SubjectHeader:   "X-Gatekeeper-Subject",
+			Resource:        "https://api.github.com",
+		},
+		Grant: "github",
+	})
+	if err != nil {
+		t.Fatalf("ResolveCredentialSource: %v", err)
+	}
+	if resolver == nil {
+		t.Fatal("expected non-nil resolver for token-exchange type")
+	}
+}
+
+func TestResolveSourceTokenExchangeExtraneousFields(t *testing.T) {
+	t.Setenv("TEST_TE_SECRET2", "s")
+	tests := []struct {
+		name string
+		cfg  SourceConfig
+	}{
+		{"with var", SourceConfig{Type: "token-exchange", Endpoint: "http://x", ClientID: "gk", ClientSecretEnv: "TEST_TE_SECRET2", SubjectHeader: "X-S", Var: "extra"}},
+		{"with value", SourceConfig{Type: "token-exchange", Endpoint: "http://x", ClientID: "gk", ClientSecretEnv: "TEST_TE_SECRET2", SubjectHeader: "X-S", Value: "extra"}},
+		{"with secret", SourceConfig{Type: "token-exchange", Endpoint: "http://x", ClientID: "gk", ClientSecretEnv: "TEST_TE_SECRET2", SubjectHeader: "X-S", Secret: "extra"}},
+		{"with region", SourceConfig{Type: "token-exchange", Endpoint: "http://x", ClientID: "gk", ClientSecretEnv: "TEST_TE_SECRET2", SubjectHeader: "X-S", Region: "extra"}},
+		{"with app_id", SourceConfig{Type: "token-exchange", Endpoint: "http://x", ClientID: "gk", ClientSecretEnv: "TEST_TE_SECRET2", SubjectHeader: "X-S", AppID: "extra"}},
+		{"with installation_id", SourceConfig{Type: "token-exchange", Endpoint: "http://x", ClientID: "gk", ClientSecretEnv: "TEST_TE_SECRET2", SubjectHeader: "X-S", InstallationID: "extra"}},
+		{"with private_key_path", SourceConfig{Type: "token-exchange", Endpoint: "http://x", ClientID: "gk", ClientSecretEnv: "TEST_TE_SECRET2", SubjectHeader: "X-S", PrivateKeyPath: "extra"}},
+		{"with private_key_env", SourceConfig{Type: "token-exchange", Endpoint: "http://x", ClientID: "gk", ClientSecretEnv: "TEST_TE_SECRET2", SubjectHeader: "X-S", PrivateKeyEnv: "extra"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := ResolveCredentialSource(CredentialConfig{
+				Host:   "api.github.com",
+				Source: tt.cfg,
+			})
+			if err == nil {
+				t.Fatal("expected error for extraneous fields")
+			}
+		})
+	}
+}
