@@ -324,6 +324,19 @@ type RunContextData struct {
 // ContextResolver resolves a proxy auth token to per-run context data.
 type ContextResolver func(token string) (*RunContextData, bool)
 
+// CredentialResolver resolves credentials dynamically per-request. Unlike
+// static credentials (pre-resolved at startup), resolvers may inspect and
+// modify the request (e.g., strip a subject identity header) and may make
+// external calls (e.g., RFC 8693 token exchange).
+//
+// proxyReq is the original proxy-level request (CONNECT for intercepted
+// connections, or the same as innerReq for plain HTTP/relay). It carries
+// Proxy-Authorization and other proxy-hop headers. innerReq is the
+// application-level request the resolver may inspect and modify.
+//
+// Returns nil with no error when the resolver has no credentials to offer.
+type CredentialResolver func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error)
+
 // Proxy is an HTTP proxy that injects credentials into outgoing requests.
 //
 // # Security Model
@@ -346,6 +359,7 @@ type ContextResolver func(token string) (*RunContextData, bool)
 // to all interfaces with a cryptographically secure token for authentication.
 type Proxy struct {
 	credentials          map[string][]credentialHeader    // host -> credential headers
+	credentialResolvers  map[string]CredentialResolver    // host -> dynamic resolver
 	extraHeaders         map[string][]extraHeader         // host -> additional headers to inject
 	responseTransformers map[string][]ResponseTransformer // host -> response transformers
 	mu                   sync.RWMutex
@@ -371,6 +385,7 @@ type Proxy struct {
 func NewProxy() *Proxy {
 	return &Proxy{
 		credentials:          make(map[string][]credentialHeader),
+		credentialResolvers:  make(map[string]CredentialResolver),
 		extraHeaders:         make(map[string][]extraHeader),
 		responseTransformers: make(map[string][]ResponseTransformer),
 		removeHeaders:        make(map[string][]string),
@@ -497,6 +512,27 @@ func (p *Proxy) SetCredentialWithGrant(host, headerName, headerValue, grant stri
 		}
 	}
 	p.credentials[host] = append(p.credentials[host], entry)
+}
+
+// SetCredentialResolver registers a dynamic credential resolver for a host.
+// Unlike static credentials, resolvers are called per-request and may make
+// external calls (e.g., RFC 8693 token exchange). Only one resolver per host
+// is supported; calling again for the same host replaces the previous resolver.
+func (p *Proxy) SetCredentialResolver(host string, resolver CredentialResolver) {
+	if !isValidHost(host) {
+		slog.Debug("ignoring invalid host for credential resolver",
+			"subsystem", "proxy",
+			"host", host)
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, exists := p.credentialResolvers[host]; exists {
+		slog.Debug("replacing existing credential resolver",
+			"subsystem", "proxy",
+			"host", host)
+	}
+	p.credentialResolvers[host] = resolver
 }
 
 // AddExtraHeader adds an additional header to inject for a host.
@@ -699,6 +735,21 @@ func (p *Proxy) getCredentials(host string) []credentialHeader {
 	return out
 }
 
+// getCredentialResolver returns the dynamic resolver for a host, with
+// host:port fallback matching the same logic as getCredentials.
+func (p *Proxy) getCredentialResolver(host string) CredentialResolver {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if r, ok := p.credentialResolvers[host]; ok {
+		return r
+	}
+	h, _, _ := net.SplitHostPort(host)
+	if h != "" {
+		return p.credentialResolvers[h]
+	}
+	return nil
+}
+
 // injectCredentials replaces credential headers in the request. For each
 // credential, if the client already sent that header (e.g., a placeholder),
 // the proxy replaces it with the real value. When no placeholder matches,
@@ -828,25 +879,35 @@ func getRunContext(r *http.Request) *RunContextData {
 	return nil
 }
 
-// getCredentialsForRequest returns all credentials for a host, checking
-// RunContextData first, then falling back to the proxy's own map.
-func (p *Proxy) getCredentialsForRequest(r *http.Request, host string) []credentialHeader {
-	if rc := getRunContext(r); rc != nil {
+// getCredentialsForRequest returns all credentials for a host. When
+// RunContextData is present, only its credentials are used (the caller
+// owns the full credential set for that run). Otherwise, the proxy's
+// static map is checked, then dynamic credential resolvers.
+//
+// ctxReq carries the RunContextData (the CONNECT request for intercepted
+// connections, or the same request for plain HTTP). innerReq is the actual
+// request the resolver may inspect (e.g., for subject headers).
+func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+	if rc := getRunContext(ctxReq); rc != nil {
 		if creds := rc.Credentials[host]; len(creds) > 0 {
-			return creds
+			return creds, nil
 		}
 		h, _, _ := net.SplitHostPort(host)
 		if h != "" {
 			if creds := rc.Credentials[h]; len(creds) > 0 {
-				return creds
+				return creds, nil
 			}
 		}
-		return nil
+		return nil, nil
 	}
 	if creds := p.getCredentials(host); len(creds) > 0 {
-		return creds
+		return creds, nil
 	}
-	return nil
+	resolver := p.getCredentialResolver(host)
+	if resolver == nil {
+		return nil, nil
+	}
+	return resolver(innerReq.Context(), ctxReq, innerReq, host)
 }
 
 // getExtraHeadersForRequest returns extra headers for a host, checking
@@ -1324,7 +1385,13 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Extract host and infer port from scheme
 	host := r.URL.Hostname()
-	creds := p.getCredentialsForRequest(r, host)
+	creds, err := p.getCredentialsForRequest(r, r, host)
+	if err != nil {
+		slog.Warn("dynamic credential resolution failed",
+			"subsystem", "proxy", "host", host, "error", err)
+		http.Error(w, "credential resolution failed", http.StatusBadGateway)
+		return
+	}
 
 	// Capture request body and headers before forwarding
 	var reqBody []byte
@@ -1561,8 +1628,6 @@ func (p *Proxy) handleConnectTunnel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Request, host string) {
-	creds := p.getCredentialsForRequest(r, host)
-
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "hijacking not supported", http.StatusInternalServerError)
@@ -1635,11 +1700,6 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			}
 			return
 		}
-
-		// Capture request body and headers
-		var reqBody []byte
-		reqBody, req.Body = captureBody(req.Body, req.Header.Get("Content-Type"))
-		originalReqHeaders := req.Header.Clone()
 
 		req.URL.Scheme = "https"
 		// Rewrite synthetic host-gateway hostname to actual IP for forwarding.
@@ -1724,6 +1784,31 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		// Use the CONNECT request r for context lookups since inner
 		// requests from the TLS stream don't carry the request context.
 		p.injectMCPCredentialsWithContext(r, req)
+
+		creds, credErr := p.getCredentialsForRequest(r, req, host)
+		if credErr != nil {
+			slog.Warn("dynamic credential resolution failed",
+				"subsystem", "proxy", "host", host, "error", credErr)
+			body := "credential resolution failed\n"
+			errResp := &http.Response{
+				StatusCode:    http.StatusBadGateway,
+				ProtoMajor:    1,
+				ProtoMinor:    1,
+				Header:        make(http.Header),
+				ContentLength: int64(len(body)),
+				Body:          io.NopCloser(strings.NewReader(body)),
+			}
+			errResp.Header.Set("Content-Type", "text/plain")
+			_ = errResp.Write(tlsClientConn)
+			continue
+		}
+
+		// Capture request body and headers after credential resolution
+		// so that resolver side effects (e.g., subject header stripping)
+		// are reflected and sensitive headers are not logged.
+		var reqBody []byte
+		reqBody, req.Body = captureBody(req.Body, req.Header.Get("Content-Type"))
+		originalReqHeaders := req.Header.Clone()
 
 		injectedHeaders := injectCredentials(req, creds, host, req.Method, req.URL.Path)
 

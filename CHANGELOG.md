@@ -4,6 +4,19 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.5.0 — 2026-04-21
+
+v0.5 adds RFC 8693 OAuth 2.0 Token Exchange as a credential source. Multiple callers with different user identities can route requests through a single shared gatekeeper instance — each receives user-scoped credentials resolved dynamically via an external Security Token Service (STS).
+
+### Added
+
+- **`token-exchange` credential source** — new source type implements RFC 8693 token exchange; gatekeeper extracts a subject identity from either a configurable request header (`subject_header`) or the proxy authentication username (`subject_from: proxy-auth`), calls an external STS to exchange it for an access token, and injects the token upstream ([#11](https://github.com/majorcontext/gatekeeper/pull/11))
+- **`subject_from: proxy-auth`** — extract subject identity from the `Proxy-Authorization` Basic auth username (`HTTP_PROXY=http://alice%40example.com:<token>@host:port`), enabling token exchange for clients that can only configure `HTTP_PROXY` and cannot set custom request headers ([#11](https://github.com/majorcontext/gatekeeper/pull/11))
+- **`CredentialResolver` function type** — per-request dynamic credential resolution in the proxy core; resolvers receive both the proxy-level request (with `Proxy-Authorization`) and the inner application request, enabling identity extraction from either layer ([#11](https://github.com/majorcontext/gatekeeper/pull/11))
+- **Per-subject token caching** — exchanged tokens are cached by subject with TTL from the STS `expires_in` response (default 5 minutes); concurrent cache misses for the same subject are coalesced via `singleflight` ([#11](https://github.com/majorcontext/gatekeeper/pull/11))
+- **`format: basic` on token-exchange credentials** — the `format`/`prefix` fields now work on token-exchange sources; exchanged tokens are encoded as `Authorization: Basic base64(prefix:token)` for endpoints that require HTTP Basic auth (e.g., `github.com` git smart HTTP with `x-access-token` as the username) ([#11](https://github.com/majorcontext/gatekeeper/pull/11))
+- **STS endpoint implementer guide** — `docs/token-exchange-endpoint.md` documents the exact wire format, authentication, caching semantics, and error handling contract for building compatible STS endpoints ([#11](https://github.com/majorcontext/gatekeeper/pull/11))
+
 ## v0.4.4 — 2026-04-20
 
 ### Added

@@ -90,6 +90,17 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve credentials before copying headers so resolver side effects
+	// (e.g., subject header stripping) are reflected in proxyReq.
+	host := targetURL.Host
+	creds, err := p.getCredentialsForRequest(r, r, host)
+	if err != nil {
+		slog.Warn("dynamic credential resolution failed",
+			"subsystem", "proxy", "host", host, "error", err)
+		http.Error(w, "credential resolution failed", http.StatusBadGateway)
+		return
+	}
+
 	// Copy headers (skip proxy-specific ones)
 	for key, values := range r.Header {
 		if key == "Proxy-Authorization" || key == "Proxy-Connection" {
@@ -100,13 +111,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Inject credentials and extra headers for the target host.
-	// Use the helper methods (getCredentialsForRequest, etc.) which check
-	// RunContextData first, then fall back to proxy's own maps. They also
-	// handle host:port fallback — credentials are registered by hostname
-	// only (isValidHost rejects colons), but targetURL.Host may include a port.
-	host := targetURL.Host
-	injectedHeaders := injectCredentials(proxyReq, p.getCredentialsForRequest(r, host), host, r.Method, rest)
+	injectedHeaders := injectCredentials(proxyReq, creds, host, r.Method, rest)
 	mergeExtraHeaders(proxyReq, host, p.getExtraHeadersForRequest(r, host))
 	for _, headerName := range p.getRemoveHeadersForRequest(r, host) {
 		if injectedHeaders[strings.ToLower(headerName)] {
