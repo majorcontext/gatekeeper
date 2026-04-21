@@ -2541,3 +2541,87 @@ func TestProxy_StaticCredentialsPriorityOverResolver(t *testing.T) {
 		t.Errorf("Authorization = %q, want %q", receivedAuth, "Bearer static-token")
 	}
 }
+
+func TestProxy_CredentialResolverStripsSubjectHeader(t *testing.T) {
+	var receivedAuth string
+	var receivedSubject string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		receivedSubject = r.Header.Get("X-Gatekeeper-Subject")
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	p.SetCredentialResolver("127.0.0.1", func(ctx context.Context, req *http.Request, host string) ([]CredentialHeader, error) {
+		subject := req.Header.Get("X-Gatekeeper-Subject")
+		if subject == "" {
+			return nil, nil
+		}
+		req.Header.Del("X-Gatekeeper-Subject")
+		return []CredentialHeader{{
+			Name:  "Authorization",
+			Value: "Bearer token-for-" + subject,
+			Grant: "test",
+		}}, nil
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+		},
+	}
+
+	req, _ := http.NewRequest("GET", backend.URL, nil)
+	req.Header.Set("X-Gatekeeper-Subject", "usr_abc123")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if receivedAuth != "Bearer token-for-usr_abc123" {
+		t.Errorf("Authorization = %q, want %q", receivedAuth, "Bearer token-for-usr_abc123")
+	}
+	if receivedSubject != "" {
+		t.Errorf("X-Gatekeeper-Subject should be stripped, got %q", receivedSubject)
+	}
+}
+
+func TestProxy_CredentialResolverNoMatch(t *testing.T) {
+	var receivedAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	// Resolver registered for a different host
+	p.SetCredentialResolver("api.example.com", func(ctx context.Context, req *http.Request, host string) ([]CredentialHeader, error) {
+		t.Error("resolver should not be called for non-matching host")
+		return nil, nil
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+		},
+	}
+
+	resp, err := client.Get(backend.URL)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if receivedAuth != "" {
+		t.Errorf("Authorization should be empty for non-matching host, got %q", receivedAuth)
+	}
+}
