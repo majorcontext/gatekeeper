@@ -251,21 +251,6 @@ func TestResolveSourceTokenExchangeMissingClientID(t *testing.T) {
 	}
 }
 
-func TestResolveSourceTokenExchangeMissingSubjectHeader(t *testing.T) {
-	_, _, err := ResolveCredentialSource(CredentialConfig{
-		Host: "api.github.com",
-		Source: SourceConfig{
-			Type:            "token-exchange",
-			Endpoint:        "https://sts.example.com/token",
-			ClientID:        "gk",
-			ClientSecretEnv: "SECRET",
-		},
-	})
-	if err == nil {
-		t.Fatal("expected error for missing subject_header")
-	}
-}
-
 func TestResolveSourceTokenExchangeNoSecret(t *testing.T) {
 	_, _, err := ResolveCredentialSource(CredentialConfig{
 		Host: "api.github.com",
@@ -300,6 +285,79 @@ func TestResolveSourceTokenExchangeValid(t *testing.T) {
 	}
 	if resolver == nil {
 		t.Fatal("expected non-nil resolver for token-exchange type")
+	}
+}
+
+func TestResolveSourceTokenExchangeSubjectFromProxyAuth(t *testing.T) {
+	t.Setenv("TEST_TE_SECRET_PXA", "s")
+	_, resolver, err := ResolveCredentialSource(CredentialConfig{
+		Host: "api.github.com",
+		Source: SourceConfig{
+			Type:            "token-exchange",
+			Endpoint:        "https://sts.example.com/token",
+			ClientID:        "gk",
+			ClientSecretEnv: "TEST_TE_SECRET_PXA",
+			SubjectFrom:     "proxy-auth",
+			Resource:        "https://api.github.com",
+		},
+		Grant: "github",
+	})
+	if err != nil {
+		t.Fatalf("ResolveCredentialSource: %v", err)
+	}
+	if resolver == nil {
+		t.Fatal("expected non-nil resolver for token-exchange with subject_from")
+	}
+}
+
+func TestResolveSourceTokenExchangeSubjectFromAndHeaderConflict(t *testing.T) {
+	t.Setenv("TEST_TE_SECRET_CONFLICT", "s")
+	_, _, err := ResolveCredentialSource(CredentialConfig{
+		Host: "api.github.com",
+		Source: SourceConfig{
+			Type:            "token-exchange",
+			Endpoint:        "https://sts.example.com/token",
+			ClientID:        "gk",
+			ClientSecretEnv: "TEST_TE_SECRET_CONFLICT",
+			SubjectHeader:   "X-Subject",
+			SubjectFrom:     "proxy-auth",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error when both subject_header and subject_from are set")
+	}
+}
+
+func TestResolveSourceTokenExchangeSubjectFromInvalid(t *testing.T) {
+	t.Setenv("TEST_TE_SECRET_INVALID", "s")
+	_, _, err := ResolveCredentialSource(CredentialConfig{
+		Host: "api.github.com",
+		Source: SourceConfig{
+			Type:            "token-exchange",
+			Endpoint:        "https://sts.example.com/token",
+			ClientID:        "gk",
+			ClientSecretEnv: "TEST_TE_SECRET_INVALID",
+			SubjectFrom:     "magic-header",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for unsupported subject_from value")
+	}
+}
+
+func TestResolveSourceTokenExchangeNoSubjectSource(t *testing.T) {
+	t.Setenv("TEST_TE_SECRET_NOSRC", "s")
+	_, _, err := ResolveCredentialSource(CredentialConfig{
+		Host: "api.github.com",
+		Source: SourceConfig{
+			Type:            "token-exchange",
+			Endpoint:        "https://sts.example.com/token",
+			ClientID:        "gk",
+			ClientSecretEnv: "TEST_TE_SECRET_NOSRC",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error when neither subject_header nor subject_from is set")
 	}
 }
 
