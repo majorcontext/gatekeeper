@@ -107,9 +107,13 @@ var httpTransport = &http.Transport{
 const MaxBodySize = 8 * 1024
 
 // RequestLogData contains all data for a logged request.
+// Designed for canonical log lines: one wide structured entry per request.
 type RequestLogData struct {
 	Method          string
 	URL             string
+	Host            string // Target hostname (extracted from URL or CONNECT)
+	Path            string // Request path (empty for CONNECT tunnel-level logs)
+	RequestType     string // "http", "connect", "mcp", "relay"
 	StatusCode      int
 	Duration        time.Duration
 	Err             error
@@ -117,8 +121,13 @@ type RequestLogData struct {
 	ResponseHeaders http.Header
 	RequestBody     []byte
 	ResponseBody    []byte
+	RequestSize     int64  // Content-Length of the request body, -1 if unknown
+	ResponseSize    int64  // Content-Length of the response body, -1 if unknown
 	AuthInjected    bool            // True if any credential header was injected for this host
 	InjectedHeaders map[string]bool // Lower-cased header names that were injected
+	Grants          []string        // Credential grant names that were injected
+	Denied          bool            // True if request was denied by network/keep policy
+	DenyReason      string          // Why the request was denied (e.g., "network_policy", "keep_policy")
 	RunID           string          // Run ID from per-run context (daemon mode)
 	Ctx             context.Context // Request context (for OTel span extraction, may be nil)
 }
@@ -225,33 +234,20 @@ func FilterHeaders(headers http.Header, injectedHeaders map[string]bool) map[str
 // logRequest is a helper that logs request data if a logger is configured.
 // The ctxReq parameter provides the RunContextData (from CONNECT or HTTP request context)
 // for extracting the RunID; it may be nil when context is unavailable.
-func (p *Proxy) logRequest(ctxReq *http.Request, method, url string, statusCode int, duration time.Duration, err error, reqHeaders, respHeaders http.Header, reqBody, respBody []byte, injectedHeaders map[string]bool) {
+// The data struct is passed by value; this method enriches it with RunID and Ctx
+// from ctxReq before forwarding to the logger callback.
+func (p *Proxy) logRequest(ctxReq *http.Request, data RequestLogData) {
 	if p.logger == nil {
 		return
 	}
-	var runID string
-	var reqCtx context.Context
 	if ctxReq != nil {
 		if rc := getRunContext(ctxReq); rc != nil {
-			runID = rc.RunID
+			data.RunID = rc.RunID
 		}
-		reqCtx = ctxReq.Context()
+		data.Ctx = ctxReq.Context()
 	}
-	p.logger(RequestLogData{
-		Method:          method,
-		URL:             url,
-		StatusCode:      statusCode,
-		Duration:        duration,
-		Err:             err,
-		RequestHeaders:  reqHeaders,
-		ResponseHeaders: respHeaders,
-		RequestBody:     reqBody,
-		ResponseBody:    respBody,
-		AuthInjected:    len(injectedHeaders) > 0,
-		InjectedHeaders: injectedHeaders,
-		RunID:           runID,
-		Ctx:             reqCtx,
-	})
+	data.AuthInjected = len(data.InjectedHeaders) > 0
+	p.logger(data)
 }
 
 // credentialHeader holds a header name and value for credential injection.
@@ -759,6 +755,12 @@ func (p *Proxy) getCredentialResolver(host string) CredentialResolver {
 	return nil
 }
 
+// credentialInjectionResult holds the outcome of credential injection.
+type credentialInjectionResult struct {
+	InjectedHeaders map[string]bool // Lower-cased header names that were injected
+	Grants          []string        // Grant names of injected credentials
+}
+
 // injectCredentials replaces credential headers in the request. For each
 // credential, if the client already sent that header (e.g., a placeholder),
 // the proxy replaces it with the real value. When no placeholder matches,
@@ -767,14 +769,15 @@ func (p *Proxy) getCredentialResolver(host string) CredentialResolver {
 // "claude" grant is skipped in favor of the other — claude uses OAuth and
 // should only be injected when Claude Code explicitly sends a placeholder.
 // When credentials have different header names, all are auto-injected.
-// Returns a set of lower-cased header names that were injected, so callers
-// can protect them from RemoveHeaders stripping.
-func injectCredentials(req *http.Request, creds []credentialHeader, host, method, path string) map[string]bool {
+// Returns a credentialInjectionResult with the set of lower-cased header
+// names that were injected and the grant names used.
+func injectCredentials(req *http.Request, creds []credentialHeader, host, method, path string) credentialInjectionResult {
 	if len(creds) == 0 {
-		return nil
+		return credentialInjectionResult{}
 	}
 
 	injected := make(map[string]bool, len(creds))
+	var grants []string
 
 	// First pass: inject credentials where the client sent a matching
 	// placeholder header. This lets the client choose which credential
@@ -783,6 +786,9 @@ func injectCredentials(req *http.Request, creds []credentialHeader, host, method
 		if req.Header.Get(c.Name) != "" {
 			req.Header.Set(c.Name, c.Value)
 			injected[strings.ToLower(c.Name)] = true
+			if c.Grant != "" {
+				grants = append(grants, c.Grant)
+			}
 			slog.Debug("credential injected",
 				"subsystem", "proxy",
 				"action", "inject",
@@ -809,6 +815,9 @@ func injectCredentials(req *http.Request, creds []credentialHeader, host, method
 		for _, c := range byHeader {
 			req.Header.Set(c.Name, c.Value)
 			injected[strings.ToLower(c.Name)] = true
+			if c.Grant != "" {
+				grants = append(grants, c.Grant)
+			}
 			slog.Debug("credential auto-injected",
 				"subsystem", "proxy",
 				"action", "inject-auto",
@@ -820,7 +829,7 @@ func injectCredentials(req *http.Request, creds []credentialHeader, host, method
 		}
 	}
 
-	return injected
+	return credentialInjectionResult{InjectedHeaders: injected, Grants: grants}
 }
 
 // mergeExtraHeaders injects extra headers into a request. If the request
@@ -1451,8 +1460,28 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if !p.checkNetworkPolicyForRequest(r, host, port, r.Method, r.URL.Path) {
 		duration := time.Since(start)
 		// Log blocked request
-		p.logRequest(r, r.Method, r.URL.String(), http.StatusProxyAuthRequired, duration, nil, originalReqHeaders, nil, reqBody, nil, nil)
 		rc := getRunContext(r)
+		var denyReason string
+		if rc != nil && isHostGateway(rc, host) {
+			denyReason = "Host service blocked: " + host + ":" + strconv.Itoa(port)
+		} else {
+			denyReason = "Host not in allow list: " + host
+		}
+		p.logRequest(r, RequestLogData{
+			Method:         r.Method,
+			URL:            r.URL.String(),
+			Host:           host,
+			Path:           r.URL.Path,
+			RequestType:    "http",
+			StatusCode:     http.StatusProxyAuthRequired,
+			Duration:       duration,
+			RequestHeaders: originalReqHeaders,
+			RequestBody:    reqBody,
+			RequestSize:    r.ContentLength,
+			ResponseSize:   -1,
+			Denied:         true,
+			DenyReason:     denyReason,
+		})
 		if rc != nil && isHostGateway(rc, host) {
 			p.logPolicy(r, "network", "http.request", "", "Host service blocked: "+host+":"+strconv.Itoa(port))
 			p.writeHostBlockedResponse(w, host, port)
@@ -1484,7 +1513,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			outReq.Header.Add(key, value)
 		}
 	}
-	injectedHeaders := injectCredentials(outReq, creds, host, r.Method, r.URL.Path)
+	credResult := injectCredentials(outReq, creds, host, r.Method, r.URL.Path)
 
 	// Inject any additional headers configured for this host.
 	// Merges with existing values (comma-separated) to preserve client
@@ -1500,7 +1529,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// RemoveRequestHeader("x-api-key") for OAuth, but if "anthropic" also
 	// injected x-api-key, the injected header must survive.
 	for _, headerName := range p.getRemoveHeadersForRequest(r, host) {
-		if injectedHeaders[strings.ToLower(headerName)] {
+		if credResult.InjectedHeaders[strings.ToLower(headerName)] {
 			continue
 		}
 		outReq.Header.Del(headerName)
@@ -1520,13 +1549,32 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	var respBody []byte
 	var respHeaders http.Header
 	var statusCode int
+	var responseSize int64 = -1
 	if resp != nil {
 		respHeaders = resp.Header.Clone()
 		respBody, resp.Body = captureBody(resp.Body, resp.Header.Get("Content-Type"))
 		statusCode = resp.StatusCode
+		responseSize = resp.ContentLength
 	}
 
-	p.logRequest(r, r.Method, r.URL.String(), statusCode, duration, err, originalReqHeaders, respHeaders, reqBody, respBody, injectedHeaders)
+	p.logRequest(r, RequestLogData{
+		Method:          r.Method,
+		URL:             r.URL.String(),
+		Host:            host,
+		Path:            r.URL.Path,
+		RequestType:     "http",
+		StatusCode:      statusCode,
+		Duration:        duration,
+		Err:             err,
+		RequestHeaders:  originalReqHeaders,
+		ResponseHeaders: respHeaders,
+		RequestBody:     reqBody,
+		ResponseBody:    respBody,
+		RequestSize:     r.ContentLength,
+		ResponseSize:    responseSize,
+		InjectedHeaders: credResult.InjectedHeaders,
+		Grants:          credResult.Grants,
+	})
 
 	if err != nil {
 		// Redact proxy userinfo from logged URLs so the per-run auth token
@@ -1570,11 +1618,24 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	// Check network policy before establishing tunnel
 	if !p.checkNetworkPolicyForRequest(r, host, port, "CONNECT", "") {
-		// Log blocked request
-		if p.logger != nil {
-			p.logRequest(r, r.Method, r.Host, http.StatusProxyAuthRequired, 0, nil, nil, nil, nil, nil, nil)
-		}
 		rc := getRunContext(r)
+		var denyReason string
+		if rc != nil && isHostGateway(rc, host) {
+			denyReason = "Host service blocked: " + host + ":" + strconv.Itoa(port)
+		} else {
+			denyReason = "Host not in allow list: " + host
+		}
+		p.logRequest(r, RequestLogData{
+			Method:       r.Method,
+			URL:          r.Host,
+			Host:         host,
+			RequestType:  "connect",
+			StatusCode:   http.StatusProxyAuthRequired,
+			RequestSize:  -1,
+			ResponseSize: -1,
+			Denied:       true,
+			DenyReason:   denyReason,
+		})
 		if rc != nil && isHostGateway(rc, host) {
 			p.logPolicy(r, "network", "http.connect", "", "Host service blocked: "+host+":"+strconv.Itoa(port))
 			p.writeHostBlockedResponse(w, host, port)
@@ -1749,7 +1810,18 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		// Check request-level rules (method + path) for the inner HTTP request.
 		// The CONNECT request r carries the per-run context for rule lookup.
 		if !p.checkNetworkPolicyForRequest(r, host, connectPort, req.Method, req.URL.Path) {
-			p.logRequest(r, req.Method, req.URL.String(), http.StatusProxyAuthRequired, 0, nil, nil, nil, nil, nil, nil)
+			p.logRequest(r, RequestLogData{
+				Method:       req.Method,
+				URL:          req.URL.String(),
+				Host:         host,
+				Path:         req.URL.Path,
+				RequestType:  "connect",
+				StatusCode:   http.StatusProxyAuthRequired,
+				RequestSize:  -1,
+				ResponseSize: -1,
+				Denied:       true,
+				DenyReason:   req.Method + " " + host + req.URL.Path,
+			})
 			p.logPolicy(r, "network", "http.request", "", req.Method+" "+host+req.URL.Path)
 			body := "Moat: request blocked by network policy.\nHost: " + host + "\nTo allow this request, update network.rules in moat.yaml.\n"
 			blockedResp := &http.Response{
@@ -1846,7 +1918,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		reqBody, req.Body = captureBody(req.Body, req.Header.Get("Content-Type"))
 		originalReqHeaders := req.Header.Clone()
 
-		injectedHeaders := injectCredentials(req, creds, host, req.Method, req.URL.Path)
+		credResult := injectCredentials(req, creds, host, req.Method, req.URL.Path)
 
 		// Inject any additional headers configured for this host.
 		// Merges with existing values (comma-separated) to preserve client
@@ -1859,7 +1931,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		// remove a credential header the proxy just injected (see comment
 		// in handleHTTP for the multi-grant conflict scenario).
 		for _, headerName := range p.getRemoveHeadersForRequest(r, host) {
-			if injectedHeaders[strings.ToLower(headerName)] {
+			if credResult.InjectedHeaders[strings.ToLower(headerName)] {
 				continue
 			}
 			req.Header.Del(headerName)
@@ -1968,9 +2040,11 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		var respBody []byte
 		var respHeaders http.Header
 		var statusCode int
+		var responseSize int64 = -1
 		if resp != nil {
 			respHeaders = resp.Header.Clone()
 			statusCode = resp.StatusCode
+			responseSize = resp.ContentLength
 
 			// Apply response transformers BEFORE capturing body
 			// so transformer can read the original response body.
@@ -1992,7 +2066,24 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			respBody, resp.Body = captureBody(resp.Body, resp.Header.Get("Content-Type"))
 		}
 
-		p.logRequest(r, req.Method, logURL, statusCode, duration, err, originalReqHeaders, respHeaders, reqBody, respBody, injectedHeaders)
+		p.logRequest(r, RequestLogData{
+			Method:          req.Method,
+			URL:             logURL,
+			Host:            host,
+			Path:            req.URL.Path,
+			RequestType:     "connect",
+			StatusCode:      statusCode,
+			Duration:        duration,
+			Err:             err,
+			RequestHeaders:  originalReqHeaders,
+			ResponseHeaders: respHeaders,
+			RequestBody:     reqBody,
+			ResponseBody:    respBody,
+			RequestSize:     req.ContentLength,
+			ResponseSize:    responseSize,
+			InjectedHeaders: credResult.InjectedHeaders,
+			Grants:          credResult.Grants,
+		})
 
 		if err != nil {
 			errResp := &http.Response{

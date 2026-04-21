@@ -18,7 +18,6 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -211,32 +210,75 @@ func New(ctx context.Context, cfg *Config) (*Server, error) {
 		return nil, fmt.Errorf("loading credentials: %w", err)
 	}
 
-	// Set up request logging so proxied requests are visible.
+	// Canonical log line: one wide structured entry per request at completion.
+	// Accumulates all request context (method, host, status, duration,
+	// credentials, policy decisions, sizes) into a single log line for
+	// grep-ability and dashboard extraction.
 	p.SetLogger(func(data proxy.RequestLogData) {
+		durationMS := float64(data.Duration.Milliseconds())
 		attrs := []slog.Attr{
-			slog.String("method", data.Method),
-			slog.String("url", data.URL),
-			slog.Int("status", data.StatusCode),
-			slog.String("duration", data.Duration.Round(time.Millisecond).String()),
+			slog.String("http_method", data.Method),
+			slog.String("http_host", data.Host),
+			slog.String("http_path", data.Path),
+			slog.Int("http_status", data.StatusCode),
+			slog.Float64("duration_ms", durationMS),
+			slog.String("proxy_type", data.RequestType),
+		}
+		if data.RunID != "" {
+			attrs = append(attrs, slog.String("run_id", data.RunID))
 		}
 		if data.AuthInjected {
 			attrs = append(attrs, slog.Bool("credential_injected", true))
+			var headerNames []string
+			for name := range data.InjectedHeaders {
+				headerNames = append(headerNames, name)
+			}
+			slices.Sort(headerNames)
+			attrs = append(attrs, slog.String("injected_headers", strings.Join(headerNames, ",")))
+			if len(data.Grants) > 0 {
+				attrs = append(attrs, slog.String("grants", strings.Join(data.Grants, ",")))
+			}
+		}
+		if data.Denied {
+			attrs = append(attrs, slog.Bool("denied", true))
+			attrs = append(attrs, slog.String("deny_reason", data.DenyReason))
+		}
+		if data.RequestSize >= 0 {
+			attrs = append(attrs, slog.Int64("request_size", data.RequestSize))
+		}
+		if data.ResponseSize >= 0 {
+			attrs = append(attrs, slog.Int64("response_size", data.ResponseSize))
 		}
 		if data.Err != nil {
 			attrs = append(attrs, slog.String("error", data.Err.Error()))
+		}
+
+		level := slog.LevelInfo
+		if data.Err != nil || data.StatusCode >= 500 {
+			level = slog.LevelError
+		} else if data.Denied || data.StatusCode >= 400 {
+			level = slog.LevelWarn
+		}
+
+		logCtx := context.Background()
+		if data.Ctx != nil {
+			logCtx = data.Ctx
 		}
 		args := make([]any, len(attrs))
 		for i, a := range attrs {
 			args[i] = a
 		}
-		slog.Info("request", args...)
+		slog.Log(logCtx, level, "request", args...)
 
+		// OpenTelemetry span enrichment
 		if data.Ctx != nil {
 			span := trace.SpanFromContext(data.Ctx)
 			if span.SpanContext().IsValid() {
 				spanAttrs := []attribute.KeyValue{
-					attribute.Float64("duration_ms", data.Duration.Seconds()*1000),
+					attribute.Float64("duration_ms", durationMS),
 					attribute.Bool("credential_injected", data.AuthInjected),
+					attribute.String("proxy.request.type", data.RequestType),
+					attribute.String("http.host", data.Host),
 				}
 				if data.RunID != "" {
 					spanAttrs = append(spanAttrs, attribute.String("run_id", data.RunID))
@@ -249,18 +291,21 @@ func New(ctx context.Context, cfg *Config) (*Server, error) {
 				if len(headerNames) > 0 {
 					spanAttrs = append(spanAttrs, attribute.StringSlice("injected_headers", headerNames))
 				}
+				if len(data.Grants) > 0 {
+					spanAttrs = append(spanAttrs, attribute.StringSlice("grants", data.Grants))
+				}
+				if data.Denied {
+					spanAttrs = append(spanAttrs, attribute.Bool("denied", true))
+					spanAttrs = append(spanAttrs, attribute.String("deny_reason", data.DenyReason))
+				}
 				span.AddEvent("request.complete", trace.WithAttributes(spanAttrs...))
 				if data.Err != nil {
 					span.RecordError(data.Err)
 				}
 
 				if data.AuthInjected {
-					host := data.URL
-					if u, parseErr := url.Parse(data.URL); parseErr == nil {
-						host = u.Hostname()
-					}
 					for name := range data.InjectedHeaders {
-						proxy.RecordCredentialInjection(data.Ctx, host, name)
+						proxy.RecordCredentialInjection(data.Ctx, data.Host, name)
 					}
 				}
 			}
