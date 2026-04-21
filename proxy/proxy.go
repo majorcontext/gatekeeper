@@ -1615,17 +1615,6 @@ func (p *Proxy) handleConnectTunnel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Request, host string) {
-	// TODO: move credential resolution into the per-inner-request loop so
-	// dynamic resolvers receive the actual inner request (needed for subject
-	// header extraction in token exchange). Currently passes r twice.
-	creds, err := p.getCredentialsForRequest(r, r, host)
-	if err != nil {
-		slog.Warn("dynamic credential resolution failed",
-			"subsystem", "proxy", "host", host, "error", err)
-		http.Error(w, "credential resolution failed", http.StatusBadGateway)
-		return
-	}
-
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "hijacking not supported", http.StatusInternalServerError)
@@ -1787,6 +1776,24 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		// Use the CONNECT request r for context lookups since inner
 		// requests from the TLS stream don't carry the request context.
 		p.injectMCPCredentialsWithContext(r, req)
+
+		creds, credErr := p.getCredentialsForRequest(r, req, host)
+		if credErr != nil {
+			slog.Warn("dynamic credential resolution failed",
+				"subsystem", "proxy", "host", host, "error", credErr)
+			body := "credential resolution failed\n"
+			errResp := &http.Response{
+				StatusCode:    http.StatusBadGateway,
+				ProtoMajor:    1,
+				ProtoMinor:    1,
+				Header:        make(http.Header),
+				ContentLength: int64(len(body)),
+				Body:          io.NopCloser(strings.NewReader(body)),
+			}
+			errResp.Header.Set("Content-Type", "text/plain")
+			_ = errResp.Write(tlsClientConn)
+			continue
+		}
 
 		injectedHeaders := injectCredentials(req, creds, host, req.Method, req.URL.Path)
 
