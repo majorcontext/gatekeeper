@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -2436,5 +2437,38 @@ func TestRewriteHostPort(t *testing.T) {
 				t.Errorf("rewriteHostPort(%q, %q) = %q, want %q", tc.in, tc.newHost, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestProxy_CredentialResolver(t *testing.T) {
+	var receivedAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	p.SetCredentialResolver("127.0.0.1", func(ctx context.Context, req *http.Request, host string) ([]CredentialHeader, error) {
+		return []CredentialHeader{{Name: "Authorization", Value: "Bearer dynamic-token", Grant: "test"}}, nil
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+		},
+	}
+
+	resp, err := client.Get(backend.URL)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if receivedAuth != "Bearer dynamic-token" {
+		t.Errorf("Authorization = %q, want %q", receivedAuth, "Bearer dynamic-token")
 	}
 }

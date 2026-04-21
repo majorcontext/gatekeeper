@@ -106,7 +106,14 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// handle host:port fallback — credentials are registered by hostname
 	// only (isValidHost rejects colons), but targetURL.Host may include a port.
 	host := targetURL.Host
-	injectedHeaders := injectCredentials(proxyReq, p.getCredentialsForRequest(r, host), host, r.Method, rest)
+	creds, err := p.getCredentialsForRequest(r, r, host)
+	if err != nil {
+		slog.Warn("dynamic credential resolution failed",
+			"subsystem", "proxy", "host", host, "error", err)
+		http.Error(w, "credential resolution failed", http.StatusBadGateway)
+		return
+	}
+	injectedHeaders := injectCredentials(proxyReq, creds, host, r.Method, rest)
 	mergeExtraHeaders(proxyReq, host, p.getExtraHeadersForRequest(r, host))
 	for _, headerName := range p.getRemoveHeadersForRequest(r, host) {
 		if injectedHeaders[strings.ToLower(headerName)] {
