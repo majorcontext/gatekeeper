@@ -1272,8 +1272,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ctx := context.WithValue(r.Context(), runContextKey, rc)
 		r = r.WithContext(ctx)
 	} else if p.delegateAuth {
-		tok, ok := extractProxyToken(r)
-		if !ok || tok == "" {
+		if !hasBasicProxyAuth(r) {
 			writeProxyAuthRequired(w, "Proxy authentication required")
 			return
 		}
@@ -1317,6 +1316,22 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"port", r.URL.Port(),
 		"path", r.URL.Path)
 	p.handleHTTP(w, r)
+}
+
+// hasBasicProxyAuth returns true if the request carries a Basic
+// Proxy-Authorization with a non-empty password. Used by delegateAuth to
+// require credentials without comparing against a static token.
+func hasBasicProxyAuth(r *http.Request) bool {
+	auth := r.Header.Get("Proxy-Authorization")
+	if !strings.HasPrefix(auth, "Basic ") {
+		return false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(auth[6:])
+	if err != nil {
+		return false
+	}
+	_, password, ok := strings.Cut(string(decoded), ":")
+	return ok && password != ""
 }
 
 // extractProxyToken extracts the token from a Proxy-Authorization header.

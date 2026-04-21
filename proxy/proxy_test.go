@@ -301,6 +301,39 @@ func TestProxy_DelegateAuthBlocksEmptyPassword(t *testing.T) {
 	}
 }
 
+func TestProxy_DelegateAuthRejectsBearerAuth(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("backend response"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	p.SetDelegateAuth(true)
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	proxyURL := mustParseURL(proxyServer.URL)
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+			ProxyConnectHeader: http.Header{
+				"Proxy-Authorization": {"Bearer some-token"},
+			},
+		},
+	}
+
+	resp, err := client.Get(backend.URL)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Errorf("status = %d, want %d; delegateAuth should reject Bearer auth", resp.StatusCode, http.StatusProxyAuthRequired)
+	}
+}
+
 func TestProxy_NetworkPolicyPermissive(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("backend response"))

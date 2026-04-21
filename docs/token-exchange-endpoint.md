@@ -202,6 +202,8 @@ When `actor_token_from` is not set, the proxy auth password is ignored and no `a
 
 By default, `actor_token_type` is `urn:ietf:params:oauth:token-type:access_token`. To override (e.g., if your actor tokens are JWTs), set `actor_token_type` in the source config.
 
+**Important:** When `actor_token_from` is configured on any credential, gatekeeper's static `auth_token` check is replaced with a requirement that clients provide Basic proxy auth with a non-empty password. The password is not compared against a static value — it is forwarded to the STS as the actor token. If your config mixes `actor_token_from` credentials with non-token-exchange credentials, use `network.policy: strict` with a tight `allow` list to restrict which hosts the proxy can reach.
+
 ## Implementation Checklist
 
 - [ ] Accept `POST` with `Content-Type: application/x-www-form-urlencoded`
