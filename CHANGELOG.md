@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.4.3 — 2026-04-20
+
+### Changed
+
+- **Docker multi-arch build uses cross-compilation** — pin builder stage to native platform and use Go's `GOOS`/`GOARCH` instead of QEMU emulation; reduces release build time from ~14 minutes to ~2-3 minutes ([#9](https://github.com/majorcontext/gatekeeper/pull/9))
+
 ## v0.4.2 — 2026-04-20
 
 ### Fixed
