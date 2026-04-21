@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -23,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/majorcontext/gatekeeper/credentialsource"
 	"github.com/majorcontext/gatekeeper/proxy"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
@@ -140,6 +142,13 @@ func (h *healthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.next.ServeHTTP(w, r)
 }
 
+// pendingRefresh captures a RefreshingSource and its credential config so the
+// refresh goroutine can be started later in Start().
+type pendingRefresh struct {
+	src  credentialsource.RefreshingSource
+	cred CredentialConfig
+}
+
 // Server is the Gate Keeper server. It manages a TLS-intercepting proxy
 // with statically configured credentials.
 type Server struct {
@@ -150,6 +159,9 @@ type Server struct {
 	proxyLn     net.Listener
 	proxyServer *http.Server
 	logCleanup  func() // closes log file if output is a file path
+
+	pendingRefreshes []pendingRefresh
+	refreshCancel    context.CancelFunc
 
 	mu      sync.Mutex
 	started bool
@@ -325,8 +337,85 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 		}
 
 		s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
+		if rs, ok := src.(credentialsource.RefreshingSource); ok {
+			s.pendingRefreshes = append(s.pendingRefreshes, pendingRefresh{src: rs, cred: cred})
+		}
 	}
 	return nil
+}
+
+// startCredentialRefresh starts a background goroutine that periodically
+// re-fetches a credential from a RefreshingSource and hot-swaps it on the proxy.
+func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsource.RefreshingSource, cred CredentialConfig) {
+	header := cred.Header
+	if header == "" {
+		header = "Authorization"
+	}
+
+	go func() {
+		backoff := time.Duration(0)
+		const maxBackoff = 60 * time.Second
+
+		for {
+			var wait time.Duration
+			if backoff > 0 {
+				wait = backoff
+			} else {
+				wait = refreshInterval(src.TTL())
+			}
+
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+
+			fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			val, err := src.Fetch(fetchCtx)
+			cancel()
+
+			if err != nil {
+				if backoff == 0 {
+					backoff = time.Second
+				} else {
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+				}
+				jitter := time.Duration(rand.Int64N(int64(backoff) / 4))
+				backoff += jitter
+				slog.Warn("credential refresh failed, retrying",
+					"host", cred.Host,
+					"grant", cred.Grant,
+					"backoff", backoff.String(),
+					"error", err)
+				continue
+			}
+
+			backoff = 0
+			if strings.EqualFold(header, "Authorization") {
+				val = ensureAuthScheme(val, cred.Prefix)
+			}
+			s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
+			ttl := src.TTL()
+			slog.Debug("credential refreshed",
+				"host", cred.Host,
+				"grant", cred.Grant,
+				"ttl", ttl.String())
+		}
+	}()
+}
+
+// refreshInterval returns 75% of TTL, floored at 30 seconds.
+func refreshInterval(ttl time.Duration) time.Duration {
+	interval := ttl * 3 / 4
+	if interval < 30*time.Second {
+		interval = 30 * time.Second
+	}
+	return interval
 }
 
 // ensureAuthScheme ensures a credential value has an auth scheme prefix
@@ -423,6 +512,14 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	go func() { _ = s.proxyServer.Serve(ln) }()
 
+	// Start background refresh goroutines for any RefreshingSource credentials.
+	refreshCtx, refreshCancel := context.WithCancel(context.Background())
+	s.refreshCancel = refreshCancel
+	for _, pr := range s.pendingRefreshes {
+		s.startCredentialRefresh(refreshCtx, pr.src, pr.cred)
+	}
+	s.pendingRefreshes = nil
+
 	// Block until context canceled, then shut down.
 	<-ctx.Done()
 
@@ -431,8 +528,11 @@ func (s *Server) Start(ctx context.Context) error {
 	return s.Stop(shutdownCtx)
 }
 
-// Stop gracefully shuts down the proxy server.
+// Stop gracefully shuts down the proxy server and all background refresh goroutines.
 func (s *Server) Stop(ctx context.Context) error {
+	if s.refreshCancel != nil {
+		s.refreshCancel()
+	}
 	if s.logCleanup != nil {
 		defer s.logCleanup()
 	}
