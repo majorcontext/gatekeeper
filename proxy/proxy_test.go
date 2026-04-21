@@ -2472,3 +2472,72 @@ func TestProxy_CredentialResolver(t *testing.T) {
 		t.Errorf("Authorization = %q, want %q", receivedAuth, "Bearer dynamic-token")
 	}
 }
+
+func TestProxy_CredentialResolverError(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("backend should not be called when resolver fails")
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	p.SetCredentialResolver("127.0.0.1", func(ctx context.Context, req *http.Request, host string) ([]CredentialHeader, error) {
+		return nil, fmt.Errorf("STS endpoint unreachable")
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+		},
+	}
+
+	resp, err := client.Get(backend.URL)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadGateway)
+	}
+}
+
+func TestProxy_StaticCredentialsPriorityOverResolver(t *testing.T) {
+	var receivedAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	p.SetCredential("127.0.0.1", "Bearer static-token")
+	p.SetCredentialResolver("127.0.0.1", func(ctx context.Context, req *http.Request, host string) ([]CredentialHeader, error) {
+		t.Error("resolver should not be called when static credentials exist")
+		return nil, nil
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+		},
+	}
+
+	req, _ := http.NewRequest("GET", backend.URL, nil)
+	req.Header.Set("Authorization", "placeholder")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if receivedAuth != "Bearer static-token" {
+		t.Errorf("Authorization = %q, want %q", receivedAuth, "Bearer static-token")
+	}
+}
