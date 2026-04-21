@@ -1271,9 +1271,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		ctx := context.WithValue(r.Context(), runContextKey, rc)
 		r = r.WithContext(ctx)
-	} else if p.authToken != "" && !p.delegateAuth && !p.checkAuth(r) {
-		writeProxyAuthRequired(w, "Proxy authentication required")
-		return
+	} else if p.authToken != "" && !p.checkAuth(r) {
+		if !p.delegateAuth {
+			writeProxyAuthRequired(w, "Proxy authentication required")
+			return
+		}
+		if _, ok := extractProxyToken(r); !ok {
+			writeProxyAuthRequired(w, "Proxy authentication required")
+			return
+		}
 	}
 
 	// Handle AWS credential endpoint

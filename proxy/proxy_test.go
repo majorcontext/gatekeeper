@@ -225,6 +225,37 @@ func TestProxy_DelegateAuthSkipsStaticCheck(t *testing.T) {
 	}
 }
 
+func TestProxy_DelegateAuthBlocksAnonymous(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("backend response"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	p.SetAuthToken("static-token")
+	p.SetDelegateAuth(true)
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	// Without any proxy auth, delegateAuth should still reject the request.
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+		},
+	}
+
+	resp, err := client.Get(backend.URL)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Errorf("status = %d, want %d; delegateAuth should still require proxy auth credentials", resp.StatusCode, http.StatusProxyAuthRequired)
+	}
+}
+
 func TestProxy_NetworkPolicyPermissive(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("backend response"))

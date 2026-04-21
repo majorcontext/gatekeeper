@@ -72,6 +72,8 @@ A JSON response per [RFC 8693 §2.2.1](https://datatracker.ietf.org/doc/html/rfc
 
 Gatekeeper treats any non-200 HTTP response as a failure. It reads up to 200 bytes of the response body for error logging. The request that triggered the exchange receives an HTTP 502 Bad Gateway response from the proxy.
 
+**Important:** Do not echo request parameters (especially `actor_token`) in error response bodies. Gatekeeper includes the STS error body in log messages, so sensitive values like the caller's API key would appear in proxy logs.
+
 Use standard OAuth error responses for debugging clarity:
 
 ```json
@@ -83,7 +85,7 @@ Use standard OAuth error responses for debugging clarity:
 
 ## Caching Behavior
 
-Gatekeeper caches tokens per `(subject_token, actor_token, endpoint)` tuple:
+Gatekeeper caches tokens per `(subject_token, actor_token)` pair within each credential source instance:
 
 - If `expires_in` is provided, the token is cached until expiry. No refresh is attempted — when the cache entry expires, the next request triggers a new exchange.
 - If `expires_in` is `0` or omitted, a default TTL of 5 minutes is applied.
