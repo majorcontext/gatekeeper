@@ -839,11 +839,174 @@ func TestAuthSchemeAutoDetectionThroughProxy(t *testing.T) {
 	}
 }
 
+func TestBasicFormatCredentialInjection(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, r.Header.Get("Authorization"))
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		Credentials: []CredentialConfig{
+			{
+				Host:   backendURL.Hostname(),
+				Grant:  "github-git",
+				Format: "basic",
+				Prefix: "x-access-token",
+				Source: SourceConfig{Type: "static", Value: "ghs_abc123"},
+			},
+		},
+		Network: NetworkConfig{Policy: "permissive"},
+	}
+
+	srv, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx := t.Context()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	proxyURL, _ := url.Parse("http://" + srv.ProxyAddr())
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+	}
+
+	resp, err := client.Get(backend.URL + "/info/refs?service=git-upload-pack")
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	want := "Basic eC1hY2Nlc3MtdG9rZW46Z2hzX2FiYzEyMw=="
+	if string(body) != want {
+		t.Errorf("backend got Authorization = %q, want %q", body, want)
+	}
+}
+
+func TestBasicFormatHTTPSCredentialInjection(t *testing.T) {
+	caDir := t.TempDir()
+	ca, err := proxy.NewCA(caDir)
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+
+	var (
+		gotAuth string
+		authMu  sync.Mutex
+	)
+	_, backendPort, caCertPool := startTLSBackend(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authMu.Lock()
+		gotAuth = r.Header.Get("Authorization")
+		authMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		TLS: TLSConfig{
+			CACert: filepath.Join(caDir, "ca.crt"),
+			CAKey:  filepath.Join(caDir, "ca.key"),
+		},
+		Credentials: []CredentialConfig{
+			{
+				Host:   "127.0.0.1",
+				Grant:  "github-git",
+				Format: "basic",
+				Prefix: "x-access-token",
+				Source: SourceConfig{Type: "static", Value: "ghs_abc123"},
+			},
+		},
+		Network: NetworkConfig{Policy: "permissive"},
+	}
+
+	srv, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.proxy.SetUpstreamCAs(caCertPool)
+
+	ctx := t.Context()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	proxyURL, _ := url.Parse("http://" + srv.ProxyAddr())
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: caCertPool, MinVersion: tls.VersionTLS12},
+		},
+	}
+
+	resp, err := client.Get("https://127.0.0.1:" + backendPort + "/info/refs?service=git-upload-pack")
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	resp.Body.Close()
+
+	authMu.Lock()
+	auth := gotAuth
+	authMu.Unlock()
+
+	want := "Basic eC1hY2Nlc3MtdG9rZW46Z2hzX2FiYzEyMw=="
+	if auth != want {
+		t.Errorf("backend got Authorization = %q, want %q", auth, want)
+	}
+}
+
+func TestBasicFormatValidation(t *testing.T) {
+	t.Run("unknown format", func(t *testing.T) {
+		cfg := &Config{
+			Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+			Credentials: []CredentialConfig{
+				{
+					Host:   "github.com",
+					Format: "basci",
+					Source: SourceConfig{Type: "static", Value: "test"},
+				},
+			},
+		}
+		_, err := New(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected error for unknown format")
+		}
+		if !strings.Contains(err.Error(), "unknown format") {
+			t.Errorf("error = %q, want mention of 'unknown format'", err)
+		}
+	})
+
+	t.Run("basic with non-Authorization header", func(t *testing.T) {
+		cfg := &Config{
+			Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+			Credentials: []CredentialConfig{
+				{
+					Host:   "api.example.com",
+					Header: "x-api-key",
+					Format: "basic",
+					Source: SourceConfig{Type: "static", Value: "test"},
+				},
+			},
+		}
+		_, err := New(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected error for basic format with non-Authorization header")
+		}
+		if !strings.Contains(err.Error(), "only supported with the Authorization header") {
+			t.Errorf("error = %q, want mention of 'only supported with the Authorization header'", err)
+		}
+	})
+}
+
 func TestEnsureAuthScheme(t *testing.T) {
 	tests := []struct {
 		name   string
 		val    string
 		prefix string
+		format string
 		want   string
 	}{
 		// Already prefixed — pass through unchanged.
@@ -867,13 +1030,18 @@ func TestEnsureAuthScheme(t *testing.T) {
 		// Unknown tokens default to Bearer.
 		{name: "unknown token", val: "sk-ant-abc123", prefix: "", want: "Bearer sk-ant-abc123"},
 		{name: "opaque token", val: "abc123def456", prefix: "", want: "Bearer abc123def456"},
+
+		// Basic format — encodes as HTTP Basic auth.
+		{name: "basic format with username", val: "ghs_abc123", prefix: "x-access-token", format: "basic", want: "Basic eC1hY2Nlc3MtdG9rZW46Z2hzX2FiYzEyMw=="},
+		{name: "basic format no username", val: "ghs_abc123", prefix: "", format: "basic", want: "Basic Omdoc19hYmMxMjM="},
+		{name: "basic format case insensitive", val: "mytoken", prefix: "user", format: "Basic", want: "Basic dXNlcjpteXRva2Vu"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ensureAuthScheme(tt.val, tt.prefix)
+			got := ensureAuthScheme(tt.val, tt.prefix, tt.format)
 			if got != tt.want {
-				t.Errorf("ensureAuthScheme(%q, %q) = %q, want %q", tt.val, tt.prefix, got, tt.want)
+				t.Errorf("ensureAuthScheme(%q, %q, %q) = %q, want %q", tt.val, tt.prefix, tt.format, got, tt.want)
 			}
 		})
 	}

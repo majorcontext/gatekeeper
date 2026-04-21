@@ -21,10 +21,22 @@ tls:
 credentials:
   - host: api.github.com
     header: Authorization
-    grant: github
+    grant: github-api
     source:
       type: env
       var: GITHUB_TOKEN  # bare token (e.g. "ghp_...") — auth scheme auto-detected
+
+  # For git clone/push over HTTPS, github.com requires HTTP Basic auth
+  # with username "x-access-token". Set format: basic so gatekeeper
+  # encodes the header as: Authorization: Basic base64(prefix:token)
+  #
+  # - host: github.com
+  #   grant: github-git
+  #   format: basic
+  #   prefix: x-access-token
+  #   source:
+  #     type: env
+  #     var: GITHUB_TOKEN
 
 network:
   policy: permissive

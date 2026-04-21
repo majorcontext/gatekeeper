@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.4.4 — 2026-04-20
+
+### Added
+
+- **`format: basic` credential option** — new `format` field on credential config supports HTTP Basic authentication encoding; when set to `"basic"`, the `prefix` field becomes the Basic auth username and the credential value becomes the password (`Authorization: Basic base64(prefix:value)`); required for `github.com` git smart HTTP which accepts `x-access-token` as the username ([#10](https://github.com/majorcontext/gatekeeper/pull/10))
+
 ## v0.4.3 — 2026-04-20
 
 ### Changed

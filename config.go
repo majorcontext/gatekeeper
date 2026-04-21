@@ -38,10 +38,15 @@ type TLSConfig struct {
 // is a bare token without a scheme prefix, the gatekeeper auto-detects the
 // correct scheme from known token prefixes (GitHub ghp_/gho_/etc.) or
 // defaults to "Bearer". Set Prefix to override the auto-detected scheme.
+//
+// For hosts that require HTTP Basic authentication (e.g., github.com git
+// smart HTTP), set Format to "basic" and Prefix to the Basic auth username.
+// The credential value becomes the password: Authorization: Basic base64(prefix:value).
 type CredentialConfig struct {
 	Host   string       `yaml:"host"`             // Target host (e.g., "api.github.com")
 	Header string       `yaml:"header,omitempty"` // Header name (default: "Authorization")
 	Prefix string       `yaml:"prefix,omitempty"` // Auth scheme prefix (e.g., "Bearer", "token"); auto-detected if omitted
+	Format string       `yaml:"format,omitempty"` // Auth format: "" (default scheme prefix) or "basic" (HTTP Basic)
 	Source SourceConfig `yaml:"source"`
 	Grant  string       `yaml:"grant,omitempty"` // Optional label for logging
 }
