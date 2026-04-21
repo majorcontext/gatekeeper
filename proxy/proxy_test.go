@@ -2505,7 +2505,7 @@ func TestProxy_CredentialResolverError(t *testing.T) {
 	}
 }
 
-func TestProxy_StaticCredentialsPriorityOverResolver(t *testing.T) {
+func TestProxy_ResolverFallbackToStatic(t *testing.T) {
 	var receivedAuth string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedAuth = r.Header.Get("Authorization")
@@ -2513,10 +2513,11 @@ func TestProxy_StaticCredentialsPriorityOverResolver(t *testing.T) {
 	}))
 	defer backend.Close()
 
+	resolverCalled := false
 	p := NewProxy()
 	p.SetCredential("127.0.0.1", "Bearer static-token")
 	p.SetCredentialResolver("127.0.0.1", func(ctx context.Context, _, _ *http.Request, host string) ([]CredentialHeader, error) {
-		t.Error("resolver should not be called when static credentials exist")
+		resolverCalled = true
 		return nil, nil
 	})
 
@@ -2530,15 +2531,51 @@ func TestProxy_StaticCredentialsPriorityOverResolver(t *testing.T) {
 	}
 
 	req, _ := http.NewRequest("GET", backend.URL, nil)
-	req.Header.Set("Authorization", "placeholder")
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
 	resp.Body.Close()
 
+	if !resolverCalled {
+		t.Error("resolver should be called before falling back to static credentials")
+	}
 	if receivedAuth != "Bearer static-token" {
 		t.Errorf("Authorization = %q, want %q", receivedAuth, "Bearer static-token")
+	}
+}
+
+func TestProxy_ResolverTakesPriorityOverStatic(t *testing.T) {
+	var receivedAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	p.SetCredential("127.0.0.1", "Bearer static-token")
+	p.SetCredentialResolver("127.0.0.1", func(ctx context.Context, _, _ *http.Request, host string) ([]CredentialHeader, error) {
+		return []CredentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "test"}}, nil
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+		},
+	}
+
+	resp, err := client.Get(backend.URL)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if receivedAuth != "Bearer resolver-token" {
+		t.Errorf("Authorization = %q, want %q (resolver should take priority over static)", receivedAuth, "Bearer resolver-token")
 	}
 }
 

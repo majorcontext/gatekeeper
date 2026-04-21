@@ -1885,3 +1885,138 @@ func TestHTTPTokenExchangeProxyAuthRelay(t *testing.T) {
 	}
 }
 
+func TestHTTPSTokenExchangeFallbackToStatic(t *testing.T) {
+	caDir := t.TempDir()
+	ca, err := proxy.NewCA(caDir)
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+
+	stsCalled := false
+	var stsMu sync.Mutex
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stsMu.Lock()
+		stsCalled = true
+		stsMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "user-oauth-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer sts.Close()
+
+	var (
+		backendAuth string
+		backendMu   sync.Mutex
+	)
+	_, backendPort, caCertPool := startTLSBackend(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendMu.Lock()
+		backendAuth = r.Header.Get("Authorization")
+		backendMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	t.Setenv("TEST_TE_SECRET_FALLBACK", "secret")
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		TLS: TLSConfig{
+			CACert: filepath.Join(caDir, "ca.crt"),
+			CAKey:  filepath.Join(caDir, "ca.key"),
+		},
+		Credentials: []CredentialConfig{
+			{
+				Host:  "127.0.0.1",
+				Grant: "github-user",
+				Source: SourceConfig{
+					Type:            "token-exchange",
+					Endpoint:        sts.URL,
+					ClientID:        "gk",
+					ClientSecretEnv: "TEST_TE_SECRET_FALLBACK",
+					SubjectHeader:   "X-Gatekeeper-Subject",
+				},
+			},
+			{
+				Host:  "127.0.0.1",
+				Grant: "github-bot",
+				Source: SourceConfig{Type: "static", Value: "Bearer bot-fallback-token"},
+			},
+		},
+		Network: NetworkConfig{Policy: "permissive"},
+	}
+
+	srv, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.proxy.SetUpstreamCAs(caCertPool)
+
+	ctx := t.Context()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	proxyURL, _ := url.Parse("http://" + srv.ProxyAddr())
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: caCertPool, MinVersion: tls.VersionTLS12},
+		},
+	}
+
+	// No subject header — resolver returns nil, falls through to static.
+	resp, err := client.Get("https://127.0.0.1:" + backendPort + "/user")
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	stsMu.Lock()
+	called := stsCalled
+	stsMu.Unlock()
+	if called {
+		t.Error("STS should not have been called when no subject header is present")
+	}
+
+	backendMu.Lock()
+	fallbackAuth := backendAuth
+	backendMu.Unlock()
+	if fallbackAuth != "Bearer bot-fallback-token" {
+		t.Errorf("backend Authorization = %q, want %q (static fallback)", fallbackAuth, "Bearer bot-fallback-token")
+	}
+
+	// With subject header — resolver returns credentials, static is not used.
+	req, err := http.NewRequest(http.MethodGet, "https://127.0.0.1:"+backendPort+"/user", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Gatekeeper-Subject", "usr_alice")
+
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("GET with subject: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	stsMu.Lock()
+	called = stsCalled
+	stsMu.Unlock()
+	if !called {
+		t.Error("STS should have been called when subject header is present")
+	}
+
+	backendMu.Lock()
+	resolverAuth := backendAuth
+	backendMu.Unlock()
+	if resolverAuth != "Bearer user-oauth-token" {
+		t.Errorf("backend Authorization = %q, want %q (resolver result)", resolverAuth, "Bearer user-oauth-token")
+	}
+}
+
