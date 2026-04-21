@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -384,6 +385,8 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 						backoff = maxBackoff
 					}
 				}
+				jitter := time.Duration(rand.Int64N(int64(backoff) / 4))
+				backoff += jitter
 				slog.Warn("credential refresh failed, retrying",
 					"host", cred.Host,
 					"grant", cred.Grant,
