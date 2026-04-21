@@ -43,7 +43,7 @@ func TestTokenExchange_BasicExchange(t *testing.T) {
 		SubjectTokenType: "urn:ietf:params:oauth:token-type:access_token",
 	})
 
-	token, err := src.Exchange(context.Background(), "usr_abc123")
+	token, err := src.Exchange(context.Background(), "usr_abc123", "")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestTokenExchange_STSError(t *testing.T) {
 		ClientSecret: "secret",
 	})
 
-	_, err := src.Exchange(context.Background(), "bad_subject")
+	_, err := src.Exchange(context.Background(), "bad_subject", "")
 	if err == nil {
 		t.Fatal("expected error for 400 response")
 	}
@@ -224,7 +224,7 @@ func TestTokenExchange_MalformedJSON(t *testing.T) {
 		ClientSecret: "secret",
 	})
 
-	_, err := src.Exchange(context.Background(), "usr_abc")
+	_, err := src.Exchange(context.Background(), "usr_abc", "")
 	if err == nil {
 		t.Fatal("expected error for malformed JSON")
 	}
@@ -246,7 +246,7 @@ func TestTokenExchange_MissingAccessToken(t *testing.T) {
 		ClientSecret: "secret",
 	})
 
-	_, err := src.Exchange(context.Background(), "usr_abc")
+	_, err := src.Exchange(context.Background(), "usr_abc", "")
 	if err == nil {
 		t.Fatal("expected error for missing access_token")
 	}
@@ -267,7 +267,7 @@ func TestTokenExchange_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err := src.Exchange(ctx, "usr_abc")
+	_, err := src.Exchange(ctx, "usr_abc", "")
 	if err == nil {
 		t.Fatal("expected error for cancelled context")
 	}
@@ -336,7 +336,7 @@ func TestTokenExchange_ActorToken(t *testing.T) {
 		Resource:     "https://api.github.com",
 	})
 
-	_, err := src.Exchange(context.Background(), "alice@example.com", ExchangeOptions{ActorToken: "ak_alice_xxx"})
+	_, err := src.Exchange(context.Background(), "alice@example.com", "ak_alice_xxx")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestTokenExchange_ActorTokenNotSentWhenEmpty(t *testing.T) {
 		ClientSecret: "secret",
 	})
 
-	_, err := src.Exchange(context.Background(), "alice@example.com")
+	_, err := src.Exchange(context.Background(), "alice@example.com", "")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
 	}

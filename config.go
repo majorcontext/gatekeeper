@@ -74,6 +74,7 @@ type SourceConfig struct {
 	SubjectTokenType string `yaml:"subject_token_type,omitempty"`
 	Resource         string `yaml:"resource,omitempty"`
 	ActorTokenFrom   string `yaml:"actor_token_from,omitempty"`
+	ActorTokenType   string `yaml:"actor_token_type,omitempty"`
 }
 
 // NetworkConfig configures network policy.

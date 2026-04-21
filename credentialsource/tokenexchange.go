@@ -23,6 +23,7 @@ type TokenExchangeConfig struct {
 	ClientSecret     string // OAuth client secret
 	Resource         string // Target resource URI (e.g., "https://api.github.com")
 	SubjectTokenType string // Subject token type URI (defaults to access_token type)
+	ActorTokenType   string // Actor token type URI (defaults to access_token type)
 }
 
 // TokenExchangeResponse is the STS response per RFC 8693 §2.2.1.
@@ -41,6 +42,7 @@ type TokenExchangeSource struct {
 	clientSecret     string
 	resource         string
 	subjectTokenType string
+	actorTokenType   string
 	client           *http.Client
 
 	mu    sync.Mutex
@@ -64,24 +66,25 @@ func NewTokenExchangeSource(cfg TokenExchangeConfig) *TokenExchangeSource {
 	if subjectTokenType == "" {
 		subjectTokenType = "urn:ietf:params:oauth:token-type:access_token"
 	}
+	actorTokenType := cfg.ActorTokenType
+	if actorTokenType == "" {
+		actorTokenType = "urn:ietf:params:oauth:token-type:access_token"
+	}
 	return &TokenExchangeSource{
 		endpoint:         cfg.Endpoint,
 		clientID:         cfg.ClientID,
 		clientSecret:     cfg.ClientSecret,
 		resource:         cfg.Resource,
 		subjectTokenType: subjectTokenType,
+		actorTokenType:   actorTokenType,
 		client:           &http.Client{Timeout: 30 * time.Second},
 		cache:            make(map[tokenCacheKey]cachedToken),
 	}
 }
 
-// ExchangeOptions provides optional parameters for a token exchange.
-type ExchangeOptions struct {
-	ActorToken string
-}
-
 // Exchange performs an RFC 8693 token exchange for the given subject token.
-func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken string, opts ...ExchangeOptions) (*TokenExchangeResponse, error) {
+// When actorToken is non-empty, it is included as the actor_token parameter.
+func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken, actorToken string) (*TokenExchangeResponse, error) {
 	form := url.Values{
 		"grant_type":         {tokenExchangeGrantType},
 		"subject_token":      {subjectToken},
@@ -90,9 +93,9 @@ func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken string,
 	if s.resource != "" {
 		form.Set("resource", s.resource)
 	}
-	if len(opts) > 0 && opts[0].ActorToken != "" {
-		form.Set("actor_token", opts[0].ActorToken)
-		form.Set("actor_token_type", "urn:ietf:params:oauth:token-type:access_token")
+	if actorToken != "" {
+		form.Set("actor_token", actorToken)
+		form.Set("actor_token_type", s.actorTokenType)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint, strings.NewReader(form.Encode()))
@@ -163,11 +166,7 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorTo
 		// This is intentional: a short deadline from one caller shouldn't cancel
 		// the STS call for all singleflight waiters. The 30s http.Client timeout
 		// still bounds the call.
-		var opts []ExchangeOptions
-		if actorToken != "" {
-			opts = append(opts, ExchangeOptions{ActorToken: actorToken})
-		}
-		result, err := s.Exchange(context.WithoutCancel(ctx), subjectToken, opts...)
+		result, err := s.Exchange(context.WithoutCancel(ctx), subjectToken, actorToken)
 		if err != nil {
 			return nil, err
 		}

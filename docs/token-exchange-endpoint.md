@@ -179,7 +179,7 @@ Without a valid API key for `alice@example.com`, another user cannot exchange to
 
 ### Gatekeeper Configuration
 
-To enable actor token forwarding, add `actor_token_from: proxy-auth-password` to the token-exchange source config. This requires `subject_from: proxy-auth`.
+To enable actor token forwarding, add `actor_token_from: proxy-auth-password` to the token-exchange source config. This requires `subject_from: proxy-auth`. When `actor_token_from` is configured, gatekeeper rejects requests that do not include a proxy auth password — the STS is never called without an actor token.
 
 ```yaml
 credentials:
@@ -197,6 +197,8 @@ credentials:
 ```
 
 When `actor_token_from` is not set, the proxy auth password is ignored and no `actor_token` parameter is sent to the STS.
+
+By default, `actor_token_type` is `urn:ietf:params:oauth:token-type:access_token`. To override (e.g., if your actor tokens are JWTs), set `actor_token_type` in the source config.
 
 ## Implementation Checklist
 

@@ -18,6 +18,7 @@ type tokenExchangeResolverConfig struct {
 	ClientSecret     string
 	Resource         string
 	SubjectTokenType string
+	ActorTokenType   string
 	SubjectHeader    string
 	SubjectFrom      string
 	ActorTokenFrom   string
@@ -34,6 +35,7 @@ func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialR
 		ClientSecret:     cfg.ClientSecret,
 		Resource:         cfg.Resource,
 		SubjectTokenType: cfg.SubjectTokenType,
+		ActorTokenType:   cfg.ActorTokenType,
 	})
 
 	header := cfg.Header
@@ -132,7 +134,7 @@ func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, erro
 	}
 	// Reject extraneous fields from other source types
 	if cfg.Var != "" || cfg.Value != "" || cfg.Secret != "" || cfg.Region != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" {
-		return nil, fmt.Errorf("token-exchange source only uses 'endpoint', 'client_id', 'client_secret'/'client_secret_env', 'subject_header'/'subject_from', 'actor_token_from', 'subject_token_type', and 'resource'; found extraneous fields")
+		return nil, fmt.Errorf("token-exchange source only uses 'endpoint', 'client_id', 'client_secret'/'client_secret_env', 'subject_header'/'subject_from', 'actor_token_from', 'actor_token_type', 'subject_token_type', and 'resource'; found extraneous fields")
 	}
 
 	clientSecret := cfg.ClientSecret
@@ -154,6 +156,7 @@ func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, erro
 		ClientSecret:     clientSecret,
 		Resource:         cfg.Resource,
 		SubjectTokenType: cfg.SubjectTokenType,
+		ActorTokenType:   cfg.ActorTokenType,
 		SubjectHeader:    cfg.SubjectHeader,
 		SubjectFrom:      cfg.SubjectFrom,
 		ActorTokenFrom:   cfg.ActorTokenFrom,
