@@ -133,6 +133,13 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken string) 
 	s.mu.Unlock()
 
 	v, err, _ := s.sf.Do(subjectToken, func() (any, error) {
+		s.mu.Lock()
+		if cached, ok := s.cache[subjectToken]; ok && time.Now().Before(cached.expiresAt) {
+			s.mu.Unlock()
+			return cached.accessToken, nil
+		}
+		s.mu.Unlock()
+
 		result, err := s.Exchange(context.WithoutCancel(ctx), subjectToken)
 		if err != nil {
 			return nil, err
