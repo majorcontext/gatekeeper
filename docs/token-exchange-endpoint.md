@@ -31,7 +31,7 @@ Authorization: Basic base64(client_id:client_secret)
 | `subject_token_type` | A token type URI (default: `urn:ietf:params:oauth:token-type:access_token`) | Yes  |
 | `resource`           | Target resource URI (e.g., `https://api.github.com`)               | Only if configured |
 | `actor_token`        | Caller proof token (e.g., the proxy auth password)                 | Only if `actor_token_from` is configured |
-| `actor_token_type`   | `urn:ietf:params:oauth:token-type:access_token`                    | Only if `actor_token` is present |
+| `actor_token_type`   | Token type URI (default: `urn:ietf:params:oauth:token-type:access_token`; configurable via `actor_token_type`) | Only if `actor_token` is present |
 
 ### Example Request
 

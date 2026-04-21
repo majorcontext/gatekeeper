@@ -231,17 +231,62 @@ func TestProxy_DelegateAuthBlocksAnonymous(t *testing.T) {
 	}))
 	defer backend.Close()
 
+	tests := []struct {
+		name      string
+		authToken string
+	}{
+		{"with auth_token", "static-token"},
+		{"without auth_token", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewProxy()
+			if tt.authToken != "" {
+				p.SetAuthToken(tt.authToken)
+			}
+			p.SetDelegateAuth(true)
+
+			proxyServer := httptest.NewServer(p)
+			defer proxyServer.Close()
+
+			client := &http.Client{
+				Transport: &http.Transport{
+					Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+				},
+			}
+
+			resp, err := client.Get(backend.URL)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			resp.Body.Close()
+
+			if resp.StatusCode != http.StatusProxyAuthRequired {
+				t.Errorf("status = %d, want %d; delegateAuth should require proxy auth credentials", resp.StatusCode, http.StatusProxyAuthRequired)
+			}
+		})
+	}
+}
+
+func TestProxy_DelegateAuthBlocksEmptyPassword(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("backend response"))
+	}))
+	defer backend.Close()
+
 	p := NewProxy()
-	p.SetAuthToken("static-token")
 	p.SetDelegateAuth(true)
 
 	proxyServer := httptest.NewServer(p)
 	defer proxyServer.Close()
 
-	// Without any proxy auth, delegateAuth should still reject the request.
+	// Basic auth with empty password ("alice:") should be rejected.
+	proxyURL := mustParseURL(proxyServer.URL)
+	proxyURL.User = url.UserPassword("alice", "")
+
 	client := &http.Client{
 		Transport: &http.Transport{
-			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+			Proxy: http.ProxyURL(proxyURL),
 		},
 	}
 
@@ -252,7 +297,7 @@ func TestProxy_DelegateAuthBlocksAnonymous(t *testing.T) {
 	resp.Body.Close()
 
 	if resp.StatusCode != http.StatusProxyAuthRequired {
-		t.Errorf("status = %d, want %d; delegateAuth should still require proxy auth credentials", resp.StatusCode, http.StatusProxyAuthRequired)
+		t.Errorf("status = %d, want %d; delegateAuth should reject empty password", resp.StatusCode, http.StatusProxyAuthRequired)
 	}
 }
 
