@@ -1,0 +1,40 @@
+# Gate Keeper — GitHub App credential source example.
+#
+# Generates short-lived installation tokens from a GitHub App private key.
+# Tokens refresh automatically in the background at 75% of TTL (~45 min).
+#
+# Setup:
+#   1. Create a GitHub App: https://github.com/settings/apps/new
+#   2. Install it on your org/account
+#   3. Download the private key PEM from the app settings page
+#   4. Fill in app_id, installation_id, and private_key_path below
+#   5. Generate a CA: cd examples && ./gen-ca.sh
+#   6. Run: cd examples && go run ../cmd/gatekeeper/ --config gatekeeper-github-app.yaml
+#   7. Test:
+#        curl -x http://127.0.0.1:9080 --cacert ca.crt \
+#          https://api.github.com/installation/repositories
+
+proxy:
+  host: 127.0.0.1
+  port: 9080
+
+tls:
+  ca_cert: ca.crt
+  ca_key: ca.key
+
+credentials:
+  - host: api.github.com
+    header: Authorization
+    grant: github
+    source:
+      type: github-app
+      app_id: "REPLACE_ME"
+      installation_id: "REPLACE_ME"
+      private_key_path: ./github-app-key.pem
+
+network:
+  policy: permissive
+
+log:
+  level: debug
+  format: text
