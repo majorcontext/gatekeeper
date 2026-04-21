@@ -137,7 +137,7 @@ const defaultTokenTTL = 5 * time.Minute
 func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorToken string) (string, error) {
 	cacheKey := subjectToken
 	if actorToken != "" {
-		cacheKey = subjectToken + "\x00" + actorToken
+		cacheKey = fmt.Sprintf("%d:%s:%s", len(subjectToken), subjectToken, actorToken)
 	}
 
 	s.mu.Lock()

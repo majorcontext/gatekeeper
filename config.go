@@ -53,7 +53,7 @@ type CredentialConfig struct {
 
 // SourceConfig describes where to read a credential value from.
 type SourceConfig struct {
-	Type   string `yaml:"type"`             // "env", "static", "aws-secretsmanager", "github-app"
+	Type   string `yaml:"type"`             // "env", "static", "aws-secretsmanager", "github-app", "token-exchange"
 	Var    string `yaml:"var,omitempty"`    // for env source
 	Value  string `yaml:"value,omitempty"`  // for static source
 	Secret string `yaml:"secret,omitempty"` // for aws-secretsmanager

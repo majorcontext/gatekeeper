@@ -205,6 +205,47 @@ func TestNewTokenExchangeResolver_NoActorTokenWithoutConfig(t *testing.T) {
 	}
 }
 
+func TestNewTokenExchangeResolver_ActorTokenRequiredButMissing(t *testing.T) {
+	stsCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stsCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "gho_resolved",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	resolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
+		Endpoint:       srv.URL,
+		ClientID:       "gk",
+		ClientSecret:   "secret",
+		SubjectFrom:    "proxy-auth",
+		ActorTokenFrom: "proxy-auth-password",
+		Grant:          "github",
+		Header:         "Authorization",
+		Prefix:         "Bearer",
+	})
+
+	proxyReq, _ := http.NewRequest("CONNECT", "http://api.github.com:443", nil)
+	proxyReq.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("alice@example.com:")))
+
+	innerReq := httptest.NewRequest("GET", "https://api.github.com/user", nil)
+
+	creds, err := resolver(context.Background(), proxyReq, innerReq, "api.github.com")
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	if len(creds) != 0 {
+		t.Errorf("got %d creds, want 0 (missing password should skip when actor_token_from configured)", len(creds))
+	}
+	if stsCalled {
+		t.Error("STS should not be called when actor_token_from is configured but password is empty")
+	}
+}
+
 func TestExtractProxyAuthCredentials_NilRequest(t *testing.T) {
 	gotUser, gotPassword := extractProxyAuthCredentials(nil)
 	if gotUser != "" {
