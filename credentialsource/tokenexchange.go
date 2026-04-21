@@ -70,8 +70,13 @@ func NewTokenExchangeSource(cfg TokenExchangeConfig) *TokenExchangeSource {
 	}
 }
 
+// ExchangeOptions provides optional parameters for a token exchange.
+type ExchangeOptions struct {
+	ActorToken string
+}
+
 // Exchange performs an RFC 8693 token exchange for the given subject token.
-func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken string) (*TokenExchangeResponse, error) {
+func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken string, opts ...ExchangeOptions) (*TokenExchangeResponse, error) {
 	form := url.Values{
 		"grant_type":         {tokenExchangeGrantType},
 		"subject_token":      {subjectToken},
@@ -79,6 +84,10 @@ func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken string)
 	}
 	if s.resource != "" {
 		form.Set("resource", s.resource)
+	}
+	if len(opts) > 0 && opts[0].ActorToken != "" {
+		form.Set("actor_token", opts[0].ActorToken)
+		form.Set("actor_token_type", "urn:ietf:params:oauth:token-type:access_token")
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint, strings.NewReader(form.Encode()))
@@ -122,19 +131,26 @@ const defaultTokenTTL = 5 * time.Minute
 
 // Resolve returns a credential for the given subject, using the cache when
 // possible. Concurrent requests for the same subject are coalesced into a
-// single STS call via singleflight.
-func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken string) (string, error) {
+// single STS call via singleflight. When actorToken is non-empty, it is
+// forwarded to the STS as the RFC 8693 actor_token parameter and included
+// in the cache key.
+func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorToken string) (string, error) {
+	cacheKey := subjectToken
+	if actorToken != "" {
+		cacheKey = subjectToken + "\x00" + actorToken
+	}
+
 	s.mu.Lock()
-	if cached, ok := s.cache[subjectToken]; ok && time.Now().Before(cached.expiresAt) {
+	if cached, ok := s.cache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		token := cached.accessToken
 		s.mu.Unlock()
 		return token, nil
 	}
 	s.mu.Unlock()
 
-	v, err, _ := s.sf.Do(subjectToken, func() (any, error) {
+	v, err, _ := s.sf.Do(cacheKey, func() (any, error) {
 		s.mu.Lock()
-		if cached, ok := s.cache[subjectToken]; ok && time.Now().Before(cached.expiresAt) {
+		if cached, ok := s.cache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 			s.mu.Unlock()
 			return cached.accessToken, nil
 		}
@@ -144,7 +160,11 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken string) 
 		// This is intentional: a short deadline from one caller shouldn't cancel
 		// the STS call for all singleflight waiters. The 30s http.Client timeout
 		// still bounds the call.
-		result, err := s.Exchange(context.WithoutCancel(ctx), subjectToken)
+		var opts []ExchangeOptions
+		if actorToken != "" {
+			opts = append(opts, ExchangeOptions{ActorToken: actorToken})
+		}
+		result, err := s.Exchange(context.WithoutCancel(ctx), subjectToken, opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -161,7 +181,7 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken string) 
 				delete(s.cache, k)
 			}
 		}
-		s.cache[subjectToken] = cachedToken{
+		s.cache[cacheKey] = cachedToken{
 			accessToken: result.AccessToken,
 			expiresAt:   now.Add(ttl),
 		}

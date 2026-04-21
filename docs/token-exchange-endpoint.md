@@ -30,6 +30,8 @@ Authorization: Basic base64(client_id:client_secret)
 | `subject_token`      | The subject identity (e.g., `usr_alice` or `alice@example.com`)    | Yes            |
 | `subject_token_type` | A token type URI (default: `urn:ietf:params:oauth:token-type:access_token`) | Yes  |
 | `resource`           | Target resource URI (e.g., `https://api.github.com`)               | Only if configured |
+| `actor_token`        | Caller proof token (e.g., the proxy auth password)                 | Only if `actor_token_from` is configured |
+| `actor_token_type`   | `urn:ietf:params:oauth:token-type:access_token`                    | Only if `actor_token` is present |
 
 ### Example Request
 
@@ -81,7 +83,7 @@ Use standard OAuth error responses for debugging clarity:
 
 ## Caching Behavior
 
-Gatekeeper caches tokens per `(subject_token, endpoint)` pair:
+Gatekeeper caches tokens per `(subject_token, actor_token, endpoint)` tuple:
 
 - If `expires_in` is provided, the token is cached until expiry. No refresh is attempted — when the cache entry expires, the next request triggers a new exchange.
 - If `expires_in` is `0` or omitted, a default TTL of 5 minutes is applied.
@@ -127,6 +129,75 @@ credentials:
 
 The two options are mutually exclusive — set one or the other, not both.
 
+## Preventing Subject Impersonation
+
+By default, subject identities are self-asserted — any caller can claim to be any user via the subject header or proxy auth username. This is acceptable when callers are isolated (separate containers with pre-configured `HTTP_PROXY` values), but in shared environments you may want the STS to verify the caller's identity.
+
+The recommended pattern uses the proxy auth **password** as a per-user proof token. With `subject_from: proxy-auth`, gatekeeper extracts the username as the subject, but the password is also available to the STS via the RFC 8693 `actor_token` parameter (requires gatekeeper configuration to forward it — see below). The STS validates that the password belongs to the claimed subject before issuing tokens.
+
+### Example: per-user API keys as proof tokens
+
+Each user receives a unique API key. The client configures:
+
+```
+HTTP_PROXY=http://alice%40example.com:ak_alice_xxxxx@proxy:port
+```
+
+Gatekeeper sends the STS:
+
+```
+grant_type=urn:ietf:params:oauth:grant-type:token-exchange
+&subject_token=alice@example.com
+&subject_token_type=urn:ietf:params:oauth:token-type:access_token
+&actor_token=ak_alice_xxxxx
+&actor_token_type=urn:ietf:params:oauth:token-type:access_token
+&resource=https://api.github.com
+```
+
+The STS implementation:
+
+```python
+def handle_token_exchange(request):
+    # Validate gatekeeper client credentials (unchanged)
+    if not verify_basic_auth(request, CLIENT_ID, CLIENT_SECRET):
+        return error_response(401, "unauthorized")
+
+    subject = request.form["subject_token"]      # alice@example.com
+    actor   = request.form.get("actor_token")     # ak_alice_xxxxx
+
+    # Verify the actor token belongs to this subject
+    if not verify_api_key(subject, actor):
+        return error_response(403, "invalid_grant",
+            "actor_token does not match subject")
+
+    # Issue scoped token as before
+    token = mint_token_for(subject, request.form.get("resource"))
+    return {"access_token": token, "expires_in": 3600}
+```
+
+Without a valid API key for `alice@example.com`, another user cannot exchange tokens on Alice's behalf — even if they control the proxy auth username.
+
+### Gatekeeper Configuration
+
+To enable actor token forwarding, add `actor_token_from: proxy-auth-password` to the token-exchange source config. This requires `subject_from: proxy-auth`.
+
+```yaml
+credentials:
+  - host: api.github.com
+    grant: github
+    prefix: Bearer
+    source:
+      type: token-exchange
+      endpoint: https://sts.example.com/token
+      client_id: gk-client
+      client_secret_env: STS_CLIENT_SECRET
+      subject_from: proxy-auth
+      actor_token_from: proxy-auth-password
+      resource: https://api.github.com
+```
+
+When `actor_token_from` is not set, the proxy auth password is ignored and no `actor_token` parameter is sent to the STS.
+
 ## Implementation Checklist
 
 - [ ] Accept `POST` with `Content-Type: application/x-www-form-urlencoded`
@@ -139,6 +210,7 @@ The two options are mutually exclusive — set one or the other, not both.
 - [ ] Set `expires_in` to enable client-side caching and reduce request volume
 - [ ] Return non-200 with an error body for invalid/expired/unknown subjects
 - [ ] Handle concurrent requests for the same subject (idempotency or internal locking)
+- [ ] *(Optional)* Validate `actor_token` against `subject_token` to prevent impersonation (see [Preventing Subject Impersonation](#preventing-subject-impersonation))
 
 ## Testing
 
