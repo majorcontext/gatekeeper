@@ -15,6 +15,7 @@ import (
 var relayClient = &http.Client{
 	Transport: &http.Transport{
 		Proxy:                 nil, // Disable proxy - connect directly to target
+		TLSHandshakeTimeout:  10 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 		IdleConnTimeout:       90 * time.Second,
 	},
