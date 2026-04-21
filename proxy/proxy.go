@@ -1548,7 +1548,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Capture response body and headers
 	var respBody []byte
 	var respHeaders http.Header
-	var statusCode int
+	statusCode := http.StatusBadGateway
 	var responseSize int64 = -1
 	if resp != nil {
 		respHeaders = resp.Header.Clone()
