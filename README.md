@@ -135,6 +135,8 @@ import (
     "github.com/majorcontext/gatekeeper/proxy"
 )
 
+ca, _ := proxy.LoadCA(certPEM, keyPEM)
+
 p := proxy.NewProxy()
 p.SetCA(ca)
 p.SetCredentialWithGrant("api.github.com", "Authorization", "Bearer xxx", "github")
