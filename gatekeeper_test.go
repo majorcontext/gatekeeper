@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -980,7 +981,7 @@ func TestBasicFormatValidation(t *testing.T) {
 		}
 	})
 
-	t.Run("basic with token-exchange source", func(t *testing.T) {
+	t.Run("basic format with token-exchange source", func(t *testing.T) {
 		t.Setenv("TEST_TE_FMT_SECRET", "s")
 		cfg := &Config{
 			Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
@@ -988,6 +989,7 @@ func TestBasicFormatValidation(t *testing.T) {
 				{
 					Host:   "api.github.com",
 					Format: "basic",
+					Prefix: "x-access-token",
 					Source: SourceConfig{
 						Type:            "token-exchange",
 						Endpoint:        "http://sts.example.com/token",
@@ -999,11 +1001,8 @@ func TestBasicFormatValidation(t *testing.T) {
 			},
 		}
 		_, err := New(context.Background(), cfg)
-		if err == nil {
-			t.Fatal("expected error for format with token-exchange source")
-		}
-		if !strings.Contains(err.Error(), "'format' is not supported") {
-			t.Errorf("error = %q, want mention of 'format is not supported'", err)
+		if err != nil {
+			t.Fatalf("format: basic should be accepted for token-exchange: %v", err)
 		}
 	})
 
@@ -1579,6 +1578,114 @@ func TestHTTPSTokenExchangeProxyAuthSubject(t *testing.T) {
 	backendMu.Unlock()
 	if gotAuth != "Bearer exchanged-for-alice@example.com" {
 		t.Errorf("backend Authorization = %q, want %q", gotAuth, "Bearer exchanged-for-alice@example.com")
+	}
+}
+
+func TestHTTPSTokenExchangeBasicFormat(t *testing.T) {
+	caDir := t.TempDir()
+	ca, err := proxy.NewCA(caDir)
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "want POST", http.StatusMethodNotAllowed)
+			return
+		}
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != "gk-client" || pass != "gk-secret" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":      "ghs_app_token_abc",
+			"issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+			"token_type":        "Bearer",
+			"expires_in":        3600,
+		})
+	}))
+	defer sts.Close()
+
+	var (
+		backendAuth string
+		backendMu   sync.Mutex
+	)
+	_, backendPort, caCertPool := startTLSBackend(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendMu.Lock()
+		backendAuth = r.Header.Get("Authorization")
+		backendMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	t.Setenv("TEST_TE_SECRET_BASIC", "gk-secret")
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		TLS: TLSConfig{
+			CACert: filepath.Join(caDir, "ca.crt"),
+			CAKey:  filepath.Join(caDir, "ca.key"),
+		},
+		Credentials: []CredentialConfig{
+			{
+				Host:   "127.0.0.1",
+				Grant:  "github",
+				Format: "basic",
+				Prefix: "x-access-token",
+				Source: SourceConfig{
+					Type:            "token-exchange",
+					Endpoint:        sts.URL,
+					ClientID:        "gk-client",
+					ClientSecretEnv: "TEST_TE_SECRET_BASIC",
+					SubjectHeader:   "X-Gatekeeper-Subject",
+					Resource:        "https://api.github.com",
+				},
+			},
+		},
+		Network: NetworkConfig{Policy: "permissive"},
+	}
+
+	srv, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.proxy.SetUpstreamCAs(caCertPool)
+
+	ctx := t.Context()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	proxyURL, _ := url.Parse("http://" + srv.ProxyAddr())
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: caCertPool, MinVersion: tls.VersionTLS12},
+		},
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "https://127.0.0.1:"+backendPort+"/info/refs", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Gatekeeper-Subject", "usr_alice")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	backendMu.Lock()
+	gotAuth := backendAuth
+	backendMu.Unlock()
+
+	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:ghs_app_token_abc"))
+	if gotAuth != wantAuth {
+		t.Errorf("backend Authorization = %q, want %q", gotAuth, wantAuth)
 	}
 }
 

@@ -23,6 +23,7 @@ type tokenExchangeResolverConfig struct {
 	Grant            string
 	Header           string
 	Prefix           string
+	Format           string
 }
 
 func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialResolver {
@@ -60,10 +61,7 @@ func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialR
 			return nil, err
 		}
 
-		value := token
-		if cfg.Prefix != "" {
-			value = cfg.Prefix + " " + token
-		}
+		value := ensureAuthScheme(token, cfg.Prefix, cfg.Format)
 
 		return []proxy.CredentialHeader{{
 			Name:  header,
@@ -147,5 +145,6 @@ func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, erro
 		Grant:            cred.Grant,
 		Header:           header,
 		Prefix:           cred.Prefix,
+		Format:           cred.Format,
 	}), nil
 }
