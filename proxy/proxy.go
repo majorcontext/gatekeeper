@@ -366,6 +366,7 @@ type Proxy struct {
 	ca                   *CA              // Optional CA for TLS interception
 	logger               RequestLogger    // Optional request logger
 	authToken            string           // Optional auth token required for proxy access
+	delegateAuth         bool             // Skip static authToken check; delegate to credential resolvers
 	policy               string           // "permissive" or "strict"
 	allowedHosts         []hostPattern    // parsed allow patterns for strict policy
 	requestChecker       RequestChecker   // per-host request rules checker
@@ -397,6 +398,14 @@ func NewProxy() *Proxy {
 // SetAuthToken sets the required authentication token for proxy access.
 func (p *Proxy) SetAuthToken(token string) {
 	p.authToken = token
+}
+
+// SetDelegateAuth skips the static authToken check, allowing credential
+// resolvers to validate caller identity instead. Used when actor_token_from
+// is configured and each caller has a unique proxy auth password that the
+// STS validates.
+func (p *Proxy) SetDelegateAuth(delegate bool) {
+	p.delegateAuth = delegate
 }
 
 // SetCA sets the CA for TLS interception.
@@ -1262,6 +1271,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		ctx := context.WithValue(r.Context(), runContextKey, rc)
 		r = r.WithContext(ctx)
+	} else if p.delegateAuth {
+		if !hasBasicProxyAuth(r) {
+			writeProxyAuthRequired(w, "Proxy authentication required")
+			return
+		}
 	} else if p.authToken != "" && !p.checkAuth(r) {
 		writeProxyAuthRequired(w, "Proxy authentication required")
 		return
@@ -1302,6 +1316,22 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"port", r.URL.Port(),
 		"path", r.URL.Path)
 	p.handleHTTP(w, r)
+}
+
+// hasBasicProxyAuth returns true if the request carries a Basic
+// Proxy-Authorization with a non-empty password. Used by delegateAuth to
+// require credentials without comparing against a static token.
+func hasBasicProxyAuth(r *http.Request) bool {
+	auth := r.Header.Get("Proxy-Authorization")
+	if !strings.HasPrefix(auth, "Basic ") {
+		return false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(auth[6:])
+	if err != nil {
+		return false
+	}
+	_, password, ok := strings.Cut(string(decoded), ":")
+	return ok && password != ""
 }
 
 // extractProxyToken extracts the token from a Proxy-Authorization header.

@@ -4,6 +4,19 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.5.2 — 2026-04-21
+
+### Added
+
+- **`actor_token_from: proxy-auth-password`** — new token-exchange config option forwards the proxy auth password as the RFC 8693 `actor_token` parameter to the STS, enabling server-side validation that the caller owns the claimed subject identity; requires `subject_from: proxy-auth`; gatekeeper rejects requests without a password when this option is configured ([#13](https://github.com/majorcontext/gatekeeper/pull/13))
+- **`actor_token_type` config field** — configurable actor token type URI for token-exchange sources; defaults to `urn:ietf:params:oauth:token-type:access_token`; set to `urn:ietf:params:oauth:token-type:jwt` or other RFC 8693 type URIs if the STS requires it ([#13](https://github.com/majorcontext/gatekeeper/pull/13))
+
+### Changed
+
+- **Delegated auth when `actor_token_from` is configured** — when any credential uses `actor_token_from`, the proxy skips its static `auth_token` check, delegating caller authentication to the STS; enables per-user proxy passwords where each user's API key is forwarded as the actor token and validated server-side ([#13](https://github.com/majorcontext/gatekeeper/pull/13))
+- **`TokenExchangeSource.Exchange` signature** — changed from variadic `Exchange(ctx, subject, opts ...ExchangeOptions)` to explicit `Exchange(ctx, subject, actorToken string)` for consistency with `Resolve`; `ExchangeOptions` type removed ([#13](https://github.com/majorcontext/gatekeeper/pull/13))
+- **`TokenExchangeSource.Resolve` signature** — added `actorToken string` parameter; callers must pass `""` when no actor token is needed ([#13](https://github.com/majorcontext/gatekeeper/pull/13))
+
 ## v0.5.1 — 2026-04-21
 
 ### Changed

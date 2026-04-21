@@ -1581,6 +1581,240 @@ func TestHTTPSTokenExchangeProxyAuthSubject(t *testing.T) {
 	}
 }
 
+func TestHTTPSTokenExchangeActorToken(t *testing.T) {
+	caDir := t.TempDir()
+	ca, err := proxy.NewCA(caDir)
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+
+	var (
+		stsSubject    string
+		stsActorToken string
+		stsMu         sync.Mutex
+	)
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "want POST", http.StatusMethodNotAllowed)
+			return
+		}
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != "gk-client" || pass != "gk-secret" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		stsMu.Lock()
+		stsSubject = r.FormValue("subject_token")
+		stsActorToken = r.FormValue("actor_token")
+		stsMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":      "exchanged-for-" + r.FormValue("subject_token"),
+			"issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+			"token_type":        "Bearer",
+			"expires_in":        3600,
+		})
+	}))
+	defer sts.Close()
+
+	var (
+		backendAuth string
+		backendMu   sync.Mutex
+	)
+	_, backendPort, caCertPool := startTLSBackend(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendMu.Lock()
+		backendAuth = r.Header.Get("Authorization")
+		backendMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	t.Setenv("TEST_TE_SECRET_ACTOR", "gk-secret")
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		TLS: TLSConfig{
+			CACert: filepath.Join(caDir, "ca.crt"),
+			CAKey:  filepath.Join(caDir, "ca.key"),
+		},
+		Credentials: []CredentialConfig{
+			{
+				Host:   "127.0.0.1",
+				Grant:  "github",
+				Prefix: "Bearer",
+				Source: SourceConfig{
+					Type:            "token-exchange",
+					Endpoint:        sts.URL,
+					ClientID:        "gk-client",
+					ClientSecretEnv: "TEST_TE_SECRET_ACTOR",
+					SubjectFrom:     "proxy-auth",
+					ActorTokenFrom:  "proxy-auth-password",
+					Resource:        "https://api.github.com",
+				},
+			},
+		},
+		Network: NetworkConfig{Policy: "permissive"},
+	}
+
+	srv, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.proxy.SetUpstreamCAs(caCertPool)
+
+	ctx := t.Context()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	proxyURL, _ := url.Parse("http://" + srv.ProxyAddr())
+	proxyURL.User = url.UserPassword("alice@example.com", "ak_alice_xxx")
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: caCertPool, MinVersion: tls.VersionTLS12},
+		},
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "https://127.0.0.1:"+backendPort+"/user", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	stsMu.Lock()
+	gotSubject := stsSubject
+	gotActor := stsActorToken
+	stsMu.Unlock()
+	if gotSubject != "alice@example.com" {
+		t.Errorf("STS subject_token = %q, want %q", gotSubject, "alice@example.com")
+	}
+	if gotActor != "ak_alice_xxx" {
+		t.Errorf("STS actor_token = %q, want %q", gotActor, "ak_alice_xxx")
+	}
+
+	backendMu.Lock()
+	gotAuth := backendAuth
+	backendMu.Unlock()
+	if gotAuth != "Bearer exchanged-for-alice@example.com" {
+		t.Errorf("backend Authorization = %q, want %q", gotAuth, "Bearer exchanged-for-alice@example.com")
+	}
+}
+
+func TestHTTPSTokenExchangeActorTokenWithAuthToken(t *testing.T) {
+	caDir := t.TempDir()
+	ca, err := proxy.NewCA(caDir)
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "want POST", http.StatusMethodNotAllowed)
+			return
+		}
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != "gk-client" || pass != "gk-secret" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":      "exchanged-for-" + r.FormValue("subject_token"),
+			"issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+			"token_type":        "Bearer",
+			"expires_in":        3600,
+		})
+	}))
+	defer sts.Close()
+
+	var (
+		backendAuth string
+		backendMu   sync.Mutex
+	)
+	_, backendPort, caCertPool := startTLSBackend(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendMu.Lock()
+		backendAuth = r.Header.Get("Authorization")
+		backendMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	t.Setenv("TEST_TE_SECRET_ACTOR_AUTH", "gk-secret")
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1", AuthToken: "static-proxy-token"},
+		TLS: TLSConfig{
+			CACert: filepath.Join(caDir, "ca.crt"),
+			CAKey:  filepath.Join(caDir, "ca.key"),
+		},
+		Credentials: []CredentialConfig{
+			{
+				Host:   "127.0.0.1",
+				Grant:  "github",
+				Prefix: "Bearer",
+				Source: SourceConfig{
+					Type:            "token-exchange",
+					Endpoint:        sts.URL,
+					ClientID:        "gk-client",
+					ClientSecretEnv: "TEST_TE_SECRET_ACTOR_AUTH",
+					SubjectFrom:     "proxy-auth",
+					ActorTokenFrom:  "proxy-auth-password",
+					Resource:        "https://api.github.com",
+				},
+			},
+		},
+		Network: NetworkConfig{Policy: "permissive"},
+	}
+
+	srv, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.proxy.SetUpstreamCAs(caCertPool)
+
+	ctx := t.Context()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	proxyURL, _ := url.Parse("http://" + srv.ProxyAddr())
+	proxyURL.User = url.UserPassword("alice@example.com", "ak_alice_xxx")
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: caCertPool, MinVersion: tls.VersionTLS12},
+		},
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "https://127.0.0.1:"+backendPort+"/user", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; auth_token + actor_token_from should delegate auth to STS", resp.StatusCode)
+	}
+
+	backendMu.Lock()
+	gotAuth := backendAuth
+	backendMu.Unlock()
+	if gotAuth != "Bearer exchanged-for-alice@example.com" {
+		t.Errorf("backend Authorization = %q, want %q", gotAuth, "Bearer exchanged-for-alice@example.com")
+	}
+}
+
 func TestHTTPSTokenExchangeBasicFormat(t *testing.T) {
 	caDir := t.TempDir()
 	ca, err := proxy.NewCA(caDir)

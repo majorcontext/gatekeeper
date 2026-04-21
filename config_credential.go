@@ -16,7 +16,7 @@ func ResolveSource(cfg SourceConfig) (credentialsource.CredentialSource, error) 
 		if cfg.Var == "" {
 			return nil, fmt.Errorf("env source requires 'var' field")
 		}
-		if cfg.Value != "" || cfg.Secret != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" {
+		if cfg.Value != "" || cfg.Secret != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" || cfg.ActorTokenFrom != "" || cfg.ActorTokenType != "" {
 			return nil, fmt.Errorf("env source only uses 'var'; found extraneous fields")
 		}
 		return credentialsource.NewEnvSource(cfg.Var), nil
@@ -24,7 +24,7 @@ func ResolveSource(cfg SourceConfig) (credentialsource.CredentialSource, error) 
 		if cfg.Value == "" {
 			return nil, fmt.Errorf("static source requires 'value' field")
 		}
-		if cfg.Var != "" || cfg.Secret != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" {
+		if cfg.Var != "" || cfg.Secret != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" || cfg.ActorTokenFrom != "" || cfg.ActorTokenType != "" {
 			return nil, fmt.Errorf("static source only uses 'value'; found extraneous fields")
 		}
 		return credentialsource.NewStaticSource(cfg.Value), nil
@@ -32,7 +32,7 @@ func ResolveSource(cfg SourceConfig) (credentialsource.CredentialSource, error) 
 		if cfg.Secret == "" {
 			return nil, fmt.Errorf("aws-secretsmanager source requires 'secret' field")
 		}
-		if cfg.Var != "" || cfg.Value != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" {
+		if cfg.Var != "" || cfg.Value != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" || cfg.ActorTokenFrom != "" || cfg.ActorTokenType != "" {
 			return nil, fmt.Errorf("aws-secretsmanager source only uses 'secret' and 'region'; found extraneous fields")
 		}
 		return credentialsource.NewAWSSecretsManagerSource(cfg.Secret, cfg.Region)
@@ -49,7 +49,7 @@ func ResolveSource(cfg SourceConfig) (credentialsource.CredentialSource, error) 
 		if cfg.PrivateKeyPath != "" && cfg.PrivateKeyEnv != "" {
 			return nil, fmt.Errorf("github-app source: set 'private_key_path' or 'private_key_env', not both")
 		}
-		if cfg.Var != "" || cfg.Value != "" || cfg.Secret != "" || cfg.Region != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" {
+		if cfg.Var != "" || cfg.Value != "" || cfg.Secret != "" || cfg.Region != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" || cfg.ActorTokenFrom != "" || cfg.ActorTokenType != "" {
 			return nil, fmt.Errorf("github-app source only uses 'app_id', 'installation_id', and one of 'private_key_path'/'private_key_env'; found extraneous fields")
 		}
 		var keyPEM []byte

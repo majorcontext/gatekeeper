@@ -43,7 +43,7 @@ func TestTokenExchange_BasicExchange(t *testing.T) {
 		SubjectTokenType: "urn:ietf:params:oauth:token-type:access_token",
 	})
 
-	token, err := src.Exchange(context.Background(), "usr_abc123")
+	token, err := src.Exchange(context.Background(), "usr_abc123", "")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
 	}
@@ -98,11 +98,11 @@ func TestTokenExchange_CachesToken(t *testing.T) {
 		Resource:     "https://api.github.com",
 	})
 
-	token1, err := src.Resolve(context.Background(), "usr_abc")
+	token1, err := src.Resolve(context.Background(), "usr_abc", "")
 	if err != nil {
 		t.Fatalf("first Resolve: %v", err)
 	}
-	token2, err := src.Resolve(context.Background(), "usr_abc")
+	token2, err := src.Resolve(context.Background(), "usr_abc", "")
 	if err != nil {
 		t.Fatalf("second Resolve: %v", err)
 	}
@@ -138,8 +138,8 @@ func TestTokenExchange_CachePerSubject(t *testing.T) {
 		Resource:     "https://api.github.com",
 	})
 
-	token1, _ := src.Resolve(context.Background(), "usr_alice")
-	token2, _ := src.Resolve(context.Background(), "usr_bob")
+	token1, _ := src.Resolve(context.Background(), "usr_alice", "")
+	token2, _ := src.Resolve(context.Background(), "usr_bob", "")
 
 	if token1 != "token_for_usr_alice" {
 		t.Errorf("alice token = %q, want token_for_usr_alice", token1)
@@ -173,14 +173,14 @@ func TestTokenExchange_CacheExpiry(t *testing.T) {
 		Resource:     "https://api.github.com",
 	})
 
-	token1, _ := src.Resolve(context.Background(), "usr_abc")
+	token1, _ := src.Resolve(context.Background(), "usr_abc", "")
 	if token1 != "token_v1" {
 		t.Errorf("first token = %q, want token_v1", token1)
 	}
 
 	time.Sleep(1100 * time.Millisecond)
 
-	token2, _ := src.Resolve(context.Background(), "usr_abc")
+	token2, _ := src.Resolve(context.Background(), "usr_abc", "")
 	if token2 != "token_v2" {
 		t.Errorf("second token = %q, want token_v2", token2)
 	}
@@ -202,7 +202,7 @@ func TestTokenExchange_STSError(t *testing.T) {
 		ClientSecret: "secret",
 	})
 
-	_, err := src.Exchange(context.Background(), "bad_subject")
+	_, err := src.Exchange(context.Background(), "bad_subject", "")
 	if err == nil {
 		t.Fatal("expected error for 400 response")
 	}
@@ -224,7 +224,7 @@ func TestTokenExchange_MalformedJSON(t *testing.T) {
 		ClientSecret: "secret",
 	})
 
-	_, err := src.Exchange(context.Background(), "usr_abc")
+	_, err := src.Exchange(context.Background(), "usr_abc", "")
 	if err == nil {
 		t.Fatal("expected error for malformed JSON")
 	}
@@ -246,7 +246,7 @@ func TestTokenExchange_MissingAccessToken(t *testing.T) {
 		ClientSecret: "secret",
 	})
 
-	_, err := src.Exchange(context.Background(), "usr_abc")
+	_, err := src.Exchange(context.Background(), "usr_abc", "")
 	if err == nil {
 		t.Fatal("expected error for missing access_token")
 	}
@@ -267,7 +267,7 @@ func TestTokenExchange_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err := src.Exchange(ctx, "usr_abc")
+	_, err := src.Exchange(ctx, "usr_abc", "")
 	if err == nil {
 		t.Fatal("expected error for cancelled context")
 	}
@@ -298,7 +298,7 @@ func TestTokenExchange_ConcurrentCacheMiss(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			token, err := src.Resolve(context.Background(), "usr_x")
+			token, err := src.Resolve(context.Background(), "usr_x", "")
 			if err != nil {
 				t.Errorf("Resolve: %v", err)
 				return
@@ -312,5 +312,177 @@ func TestTokenExchange_ConcurrentCacheMiss(t *testing.T) {
 
 	if n := callCount.Load(); n != 1 {
 		t.Errorf("STS calls = %d, want 1 (singleflight should deduplicate)", n)
+	}
+}
+
+func TestTokenExchange_ActorToken(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "exchanged",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	src := NewTokenExchangeSource(TokenExchangeConfig{
+		Endpoint:     srv.URL,
+		ClientID:     "gk",
+		ClientSecret: "secret",
+		Resource:     "https://api.github.com",
+	})
+
+	_, err := src.Exchange(context.Background(), "alice@example.com", "ak_alice_xxx")
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+
+	if !strings.Contains(gotBody, "actor_token=ak_alice_xxx") {
+		t.Errorf("body missing actor_token, got: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, "actor_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token") {
+		t.Errorf("body missing actor_token_type, got: %s", gotBody)
+	}
+}
+
+func TestTokenExchange_ActorTokenNotSentWhenEmpty(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "exchanged",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	src := NewTokenExchangeSource(TokenExchangeConfig{
+		Endpoint:     srv.URL,
+		ClientID:     "gk",
+		ClientSecret: "secret",
+	})
+
+	_, err := src.Exchange(context.Background(), "alice@example.com", "")
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+
+	if strings.Contains(gotBody, "actor_token") {
+		t.Errorf("body should not contain actor_token when not provided, got: %s", gotBody)
+	}
+}
+
+func TestTokenExchange_CachePerActorToken(t *testing.T) {
+	var callCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount.Add(1)
+		r.ParseForm()
+		actor := r.FormValue("actor_token")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "token_for_actor_" + actor,
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	src := NewTokenExchangeSource(TokenExchangeConfig{
+		Endpoint:     srv.URL,
+		ClientID:     "gk",
+		ClientSecret: "secret",
+	})
+
+	token1, _ := src.Resolve(context.Background(), "alice", "ak_alice")
+	token2, _ := src.Resolve(context.Background(), "alice", "ak_bob")
+	token3, _ := src.Resolve(context.Background(), "alice", "ak_alice")
+
+	if token1 != "token_for_actor_ak_alice" {
+		t.Errorf("token1 = %q, want token_for_actor_ak_alice", token1)
+	}
+	if token2 != "token_for_actor_ak_bob" {
+		t.Errorf("token2 = %q, want token_for_actor_ak_bob", token2)
+	}
+	if token3 != token1 {
+		t.Errorf("token3 = %q, want same as token1 (cached)", token3)
+	}
+	if n := callCount.Load(); n != 2 {
+		t.Errorf("STS calls = %d, want 2 (same actor should be cached)", n)
+	}
+}
+
+func TestTokenExchange_CachePerSubjectWithSameActor(t *testing.T) {
+	var callCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount.Add(1)
+		r.ParseForm()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "token_for_" + r.FormValue("subject_token"),
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	src := NewTokenExchangeSource(TokenExchangeConfig{
+		Endpoint:     srv.URL,
+		ClientID:     "gk",
+		ClientSecret: "secret",
+	})
+
+	token1, _ := src.Resolve(context.Background(), "alice", "shared_key")
+	token2, _ := src.Resolve(context.Background(), "bob", "shared_key")
+	token3, _ := src.Resolve(context.Background(), "alice", "shared_key")
+
+	if token1 != "token_for_alice" {
+		t.Errorf("token1 = %q, want token_for_alice", token1)
+	}
+	if token2 != "token_for_bob" {
+		t.Errorf("token2 = %q, want token_for_bob", token2)
+	}
+	if token3 != token1 {
+		t.Errorf("token3 = %q, want same as token1 (cached)", token3)
+	}
+	if n := callCount.Load(); n != 2 {
+		t.Errorf("STS calls = %d, want 2 (same subject+actor should be cached)", n)
+	}
+}
+
+func TestTokenExchange_CustomActorTokenType(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "exchanged",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	src := NewTokenExchangeSource(TokenExchangeConfig{
+		Endpoint:       srv.URL,
+		ClientID:       "gk",
+		ClientSecret:   "secret",
+		ActorTokenType: "urn:ietf:params:oauth:token-type:jwt",
+	})
+
+	_, err := src.Exchange(context.Background(), "alice", "jwt_token_here")
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+
+	if !strings.Contains(gotBody, "actor_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Ajwt") {
+		t.Errorf("expected custom actor_token_type, got: %s", gotBody)
 	}
 }

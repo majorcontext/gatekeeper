@@ -91,8 +91,14 @@ func TestResolveSourceExtraneousFields(t *testing.T) {
 		{"aws with value", SourceConfig{Type: "aws-secretsmanager", Secret: "s", Value: "extra"}},
 		{"aws with app_id", SourceConfig{Type: "aws-secretsmanager", Secret: "s", AppID: "extra"}},
 		{"env with subject_from", SourceConfig{Type: "env", Var: "X", SubjectFrom: "proxy-auth"}},
+		{"env with actor_token_from", SourceConfig{Type: "env", Var: "X", ActorTokenFrom: "proxy-auth-password"}},
+		{"env with actor_token_type", SourceConfig{Type: "env", Var: "X", ActorTokenType: "urn:ietf:params:oauth:token-type:jwt"}},
 		{"static with subject_from", SourceConfig{Type: "static", Value: "v", SubjectFrom: "proxy-auth"}},
+		{"static with actor_token_from", SourceConfig{Type: "static", Value: "v", ActorTokenFrom: "proxy-auth-password"}},
+		{"static with actor_token_type", SourceConfig{Type: "static", Value: "v", ActorTokenType: "urn:ietf:params:oauth:token-type:jwt"}},
 		{"aws with subject_from", SourceConfig{Type: "aws-secretsmanager", Secret: "s", SubjectFrom: "proxy-auth"}},
+		{"aws with actor_token_from", SourceConfig{Type: "aws-secretsmanager", Secret: "s", ActorTokenFrom: "proxy-auth-password"}},
+		{"aws with actor_token_type", SourceConfig{Type: "aws-secretsmanager", Secret: "s", ActorTokenType: "urn:ietf:params:oauth:token-type:jwt"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -213,6 +219,8 @@ func TestResolveSourceGitHubAppExtraneousFields(t *testing.T) {
 		{"with secret", SourceConfig{Type: "github-app", AppID: "1", InstallationID: "2", PrivateKeyEnv: "X", Secret: "extra"}},
 		{"with region", SourceConfig{Type: "github-app", AppID: "1", InstallationID: "2", PrivateKeyEnv: "X", Region: "extra"}},
 		{"with subject_from", SourceConfig{Type: "github-app", AppID: "1", InstallationID: "2", PrivateKeyEnv: "X", SubjectFrom: "proxy-auth"}},
+		{"with actor_token_from", SourceConfig{Type: "github-app", AppID: "1", InstallationID: "2", PrivateKeyEnv: "X", ActorTokenFrom: "proxy-auth-password"}},
+		{"with actor_token_type", SourceConfig{Type: "github-app", AppID: "1", InstallationID: "2", PrivateKeyEnv: "X", ActorTokenType: "urn:ietf:params:oauth:token-type:jwt"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

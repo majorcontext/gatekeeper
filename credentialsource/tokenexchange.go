@@ -23,6 +23,7 @@ type TokenExchangeConfig struct {
 	ClientSecret     string // OAuth client secret
 	Resource         string // Target resource URI (e.g., "https://api.github.com")
 	SubjectTokenType string // Subject token type URI (defaults to access_token type)
+	ActorTokenType   string // Actor token type URI (defaults to access_token type)
 }
 
 // TokenExchangeResponse is the STS response per RFC 8693 §2.2.1.
@@ -41,11 +42,17 @@ type TokenExchangeSource struct {
 	clientSecret     string
 	resource         string
 	subjectTokenType string
+	actorTokenType   string
 	client           *http.Client
 
 	mu    sync.Mutex
-	cache map[string]cachedToken
+	cache map[tokenCacheKey]cachedToken
 	sf    singleflight.Group
+}
+
+type tokenCacheKey struct {
+	subject string
+	actor   string
 }
 
 type cachedToken struct {
@@ -59,19 +66,25 @@ func NewTokenExchangeSource(cfg TokenExchangeConfig) *TokenExchangeSource {
 	if subjectTokenType == "" {
 		subjectTokenType = "urn:ietf:params:oauth:token-type:access_token"
 	}
+	actorTokenType := cfg.ActorTokenType
+	if actorTokenType == "" {
+		actorTokenType = "urn:ietf:params:oauth:token-type:access_token"
+	}
 	return &TokenExchangeSource{
 		endpoint:         cfg.Endpoint,
 		clientID:         cfg.ClientID,
 		clientSecret:     cfg.ClientSecret,
 		resource:         cfg.Resource,
 		subjectTokenType: subjectTokenType,
+		actorTokenType:   actorTokenType,
 		client:           &http.Client{Timeout: 30 * time.Second},
-		cache:            make(map[string]cachedToken),
+		cache:            make(map[tokenCacheKey]cachedToken),
 	}
 }
 
 // Exchange performs an RFC 8693 token exchange for the given subject token.
-func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken string) (*TokenExchangeResponse, error) {
+// When actorToken is non-empty, it is included as the actor_token parameter.
+func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken, actorToken string) (*TokenExchangeResponse, error) {
 	form := url.Values{
 		"grant_type":         {tokenExchangeGrantType},
 		"subject_token":      {subjectToken},
@@ -79,6 +92,10 @@ func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken string)
 	}
 	if s.resource != "" {
 		form.Set("resource", s.resource)
+	}
+	if actorToken != "" {
+		form.Set("actor_token", actorToken)
+		form.Set("actor_token_type", s.actorTokenType)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint, strings.NewReader(form.Encode()))
@@ -122,19 +139,24 @@ const defaultTokenTTL = 5 * time.Minute
 
 // Resolve returns a credential for the given subject, using the cache when
 // possible. Concurrent requests for the same subject are coalesced into a
-// single STS call via singleflight.
-func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken string) (string, error) {
+// single STS call via singleflight. When actorToken is non-empty, it is
+// forwarded to the STS as the RFC 8693 actor_token parameter and included
+// in the cache key.
+func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorToken string) (string, error) {
+	ck := tokenCacheKey{subject: subjectToken, actor: actorToken}
+	sfKey := fmt.Sprintf("%q\x00%q", subjectToken, actorToken)
+
 	s.mu.Lock()
-	if cached, ok := s.cache[subjectToken]; ok && time.Now().Before(cached.expiresAt) {
+	if cached, ok := s.cache[ck]; ok && time.Now().Before(cached.expiresAt) {
 		token := cached.accessToken
 		s.mu.Unlock()
 		return token, nil
 	}
 	s.mu.Unlock()
 
-	v, err, _ := s.sf.Do(subjectToken, func() (any, error) {
+	v, err, _ := s.sf.Do(sfKey, func() (any, error) {
 		s.mu.Lock()
-		if cached, ok := s.cache[subjectToken]; ok && time.Now().Before(cached.expiresAt) {
+		if cached, ok := s.cache[ck]; ok && time.Now().Before(cached.expiresAt) {
 			s.mu.Unlock()
 			return cached.accessToken, nil
 		}
@@ -144,7 +166,7 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken string) 
 		// This is intentional: a short deadline from one caller shouldn't cancel
 		// the STS call for all singleflight waiters. The 30s http.Client timeout
 		// still bounds the call.
-		result, err := s.Exchange(context.WithoutCancel(ctx), subjectToken)
+		result, err := s.Exchange(context.WithoutCancel(ctx), subjectToken, actorToken)
 		if err != nil {
 			return nil, err
 		}
@@ -161,7 +183,7 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken string) 
 				delete(s.cache, k)
 			}
 		}
-		s.cache[subjectToken] = cachedToken{
+		s.cache[ck] = cachedToken{
 			accessToken: result.AccessToken,
 			expiresAt:   now.Add(ttl),
 		}
