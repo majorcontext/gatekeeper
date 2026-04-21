@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -1179,6 +1180,258 @@ func TestStartCredentialRefresh_CancelStopsGoroutine(t *testing.T) {
 
 	if count := mock.fetchCount(); count != 0 {
 		t.Errorf("fetch called %d times after immediate cancel, want 0", count)
+	}
+}
+
+func TestHTTPSTokenExchangeEndToEnd(t *testing.T) {
+	// End-to-end: TLS interception + token-exchange credential.
+	// Verifies STS receives correct RFC 8693 request, backend gets
+	// the exchanged token, and the subject header is stripped.
+
+	caDir := t.TempDir()
+	ca, err := proxy.NewCA(caDir)
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+
+	// Mock STS that validates the RFC 8693 request and returns an exchanged token.
+	var (
+		stsSubject   string
+		stsResource  string
+		stsGrantType string
+		stsMu        sync.Mutex
+	)
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "want POST", http.StatusMethodNotAllowed)
+			return
+		}
+
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != "gk-client" || pass != "gk-secret" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		stsMu.Lock()
+		stsGrantType = r.FormValue("grant_type")
+		stsSubject = r.FormValue("subject_token")
+		stsResource = r.FormValue("resource")
+		stsMu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":      "exchanged-token-for-" + r.FormValue("subject_token"),
+			"issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+			"token_type":        "Bearer",
+			"expires_in":        3600,
+		})
+	}))
+	defer sts.Close()
+
+	// TLS backend that records what it received.
+	var (
+		backendAuth          string
+		backendSubjectHeader string
+		backendMu            sync.Mutex
+	)
+	_, backendPort, caCertPool := startTLSBackend(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendMu.Lock()
+		backendAuth = r.Header.Get("Authorization")
+		backendSubjectHeader = r.Header.Get("X-Gatekeeper-Subject")
+		backendMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	t.Setenv("TEST_TE_CLIENT_SECRET", "gk-secret")
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		TLS: TLSConfig{
+			CACert: filepath.Join(caDir, "ca.crt"),
+			CAKey:  filepath.Join(caDir, "ca.key"),
+		},
+		Credentials: []CredentialConfig{
+			{
+				Host:   "127.0.0.1",
+				Grant:  "github",
+				Prefix: "Bearer",
+				Source: SourceConfig{
+					Type:            "token-exchange",
+					Endpoint:        sts.URL,
+					ClientID:        "gk-client",
+					ClientSecretEnv: "TEST_TE_CLIENT_SECRET",
+					SubjectHeader:   "X-Gatekeeper-Subject",
+					Resource:        "https://api.github.com",
+				},
+			},
+		},
+		Network: NetworkConfig{Policy: "permissive"},
+	}
+
+	srv, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.proxy.SetUpstreamCAs(caCertPool)
+
+	ctx := t.Context()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	proxyURL, _ := url.Parse("http://" + srv.ProxyAddr())
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: caCertPool, MinVersion: tls.VersionTLS12},
+		},
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "https://127.0.0.1:"+backendPort+"/user", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Gatekeeper-Subject", "usr_alice")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	// Verify STS received the correct RFC 8693 request.
+	stsMu.Lock()
+	gotGrantType := stsGrantType
+	gotSubject := stsSubject
+	gotResource := stsResource
+	stsMu.Unlock()
+
+	if gotGrantType != "urn:ietf:params:oauth:grant-type:token-exchange" {
+		t.Errorf("STS grant_type = %q, want RFC 8693 grant type", gotGrantType)
+	}
+	if gotSubject != "usr_alice" {
+		t.Errorf("STS subject_token = %q, want %q", gotSubject, "usr_alice")
+	}
+	if gotResource != "https://api.github.com" {
+		t.Errorf("STS resource = %q, want %q", gotResource, "https://api.github.com")
+	}
+
+	// Verify backend received the exchanged token and NOT the subject header.
+	backendMu.Lock()
+	gotAuth := backendAuth
+	gotSubjectHdr := backendSubjectHeader
+	backendMu.Unlock()
+
+	if gotAuth != "Bearer exchanged-token-for-usr_alice" {
+		t.Errorf("backend Authorization = %q, want %q", gotAuth, "Bearer exchanged-token-for-usr_alice")
+	}
+	if gotSubjectHdr != "" {
+		t.Errorf("backend still has X-Gatekeeper-Subject = %q, want stripped", gotSubjectHdr)
+	}
+}
+
+func TestHTTPSTokenExchangeNoSubject(t *testing.T) {
+	// When no X-Gatekeeper-Subject header is present, the resolver should
+	// not call the STS and no credential should be injected.
+
+	caDir := t.TempDir()
+	ca, err := proxy.NewCA(caDir)
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+
+	stsCalled := false
+	var stsMu sync.Mutex
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stsMu.Lock()
+		stsCalled = true
+		stsMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "should-not-appear",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer sts.Close()
+
+	var (
+		backendAuth string
+		backendMu   sync.Mutex
+	)
+	_, backendPort, caCertPool := startTLSBackend(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendMu.Lock()
+		backendAuth = r.Header.Get("Authorization")
+		backendMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	t.Setenv("TEST_TE_SECRET_NOSUB", "secret")
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		TLS: TLSConfig{
+			CACert: filepath.Join(caDir, "ca.crt"),
+			CAKey:  filepath.Join(caDir, "ca.key"),
+		},
+		Credentials: []CredentialConfig{
+			{
+				Host:  "127.0.0.1",
+				Grant: "github",
+				Source: SourceConfig{
+					Type:            "token-exchange",
+					Endpoint:        sts.URL,
+					ClientID:        "gk",
+					ClientSecretEnv: "TEST_TE_SECRET_NOSUB",
+					SubjectHeader:   "X-Gatekeeper-Subject",
+				},
+			},
+		},
+		Network: NetworkConfig{Policy: "permissive"},
+	}
+
+	srv, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.proxy.SetUpstreamCAs(caCertPool)
+
+	ctx := t.Context()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	proxyURL, _ := url.Parse("http://" + srv.ProxyAddr())
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: caCertPool, MinVersion: tls.VersionTLS12},
+		},
+	}
+
+	resp, err := client.Get("https://127.0.0.1:" + backendPort + "/user")
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	stsMu.Lock()
+	called := stsCalled
+	stsMu.Unlock()
+	if called {
+		t.Error("STS should not have been called when no subject header is present")
+	}
+
+	backendMu.Lock()
+	auth := backendAuth
+	backendMu.Unlock()
+	if auth != "" {
+		t.Errorf("backend got Authorization = %q, want empty (no credential injected)", auth)
 	}
 }
 
