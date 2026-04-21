@@ -11,6 +11,7 @@ package gatekeeper
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -333,7 +334,7 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 		// GitHub provider prepends "Bearer "). The gatekeeper bypasses
 		// providers, so we auto-detect the scheme from the token format.
 		if strings.EqualFold(header, "Authorization") {
-			val = ensureAuthScheme(val, cred.Prefix)
+			val = ensureAuthScheme(val, cred.Prefix, cred.Format)
 		}
 
 		s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
@@ -397,7 +398,7 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 
 			backoff = 0
 			if strings.EqualFold(header, "Authorization") {
-				val = ensureAuthScheme(val, cred.Prefix)
+				val = ensureAuthScheme(val, cred.Prefix, cred.Format)
 			}
 			s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
 			ttl := src.TTL()
@@ -419,11 +420,22 @@ func refreshInterval(ttl time.Duration) time.Duration {
 }
 
 // ensureAuthScheme ensures a credential value has an auth scheme prefix
-// suitable for an Authorization header. If the value already contains a
-// scheme (e.g., "Bearer xxx", "token xxx"), it is returned unchanged.
-// If prefix is set explicitly, it is used. Otherwise the scheme is
-// auto-detected from known GitHub token prefixes, defaulting to "Bearer".
-func ensureAuthScheme(val, prefix string) string {
+// suitable for an Authorization header.
+//
+// When format is "basic", the value is encoded as HTTP Basic auth:
+// "Basic base64(prefix:value)". The prefix field is the username
+// (e.g., "x-access-token" for GitHub git smart HTTP).
+//
+// Otherwise, if the value already contains a scheme (e.g., "Bearer xxx",
+// "token xxx"), it is returned unchanged. If prefix is set explicitly,
+// it is used as the scheme. Otherwise the scheme is auto-detected from
+// known GitHub token prefixes, defaulting to "Bearer".
+func ensureAuthScheme(val, prefix, format string) string {
+	if strings.EqualFold(format, "basic") {
+		encoded := base64.StdEncoding.EncodeToString([]byte(prefix + ":" + val))
+		return "Basic " + encoded
+	}
+
 	// If the value already has a scheme prefix, leave it alone.
 	// Auth schemes are a single token followed by a space (RFC 7235).
 	if i := strings.IndexByte(val, ' '); i > 0 {
