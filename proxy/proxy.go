@@ -1106,7 +1106,8 @@ func (p *Proxy) handleDirectMCPRelay(w http.ResponseWriter, r *http.Request) {
 
 	rc, found := p.contextResolver(token)
 	if !found {
-		writeProxyAuthRequired(w, "Invalid proxy token")
+		w.Header().Set("WWW-Authenticate", `Basic realm="gatekeeper"`)
+		http.Error(w, "Invalid proxy token", http.StatusUnauthorized)
 		return
 	}
 

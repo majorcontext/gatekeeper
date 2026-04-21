@@ -587,8 +587,11 @@ func TestServeHTTP_DirectMCPRelay_InvalidToken(t *testing.T) {
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusProxyAuthRequired {
-		t.Errorf("status = %d, want 407", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+	if got := rec.Header().Get("WWW-Authenticate"); got != `Basic realm="gatekeeper"` {
+		t.Errorf("WWW-Authenticate = %q, want %q", got, `Basic realm="gatekeeper"`)
 	}
 }
 
