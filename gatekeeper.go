@@ -331,6 +331,9 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 		}
 
 		if resolver != nil {
+			if cred.Format != "" {
+				return fmt.Errorf("credential for %s: 'format' is not supported for %s source type", cred.Host, cred.Source.Type)
+			}
 			s.proxy.SetCredentialResolver(cred.Host, resolver)
 			continue
 		}

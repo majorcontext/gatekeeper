@@ -133,7 +133,7 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken string) 
 	s.mu.Unlock()
 
 	v, err, _ := s.sf.Do(subjectToken, func() (any, error) {
-		result, err := s.Exchange(ctx, subjectToken)
+		result, err := s.Exchange(context.WithoutCancel(ctx), subjectToken)
 		if err != nil {
 			return nil, err
 		}

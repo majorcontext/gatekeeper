@@ -4,6 +4,17 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.5.0 — 2026-04-21
+
+v0.5 adds RFC 8693 OAuth 2.0 Token Exchange as a credential source. Multiple callers with different user identities can route requests through a single shared gatekeeper instance — each receives user-scoped credentials resolved dynamically via an external Security Token Service (STS).
+
+### Added
+
+- **`token-exchange` credential source** — new source type implements RFC 8693 token exchange; gatekeeper extracts a subject identity from a configurable request header, calls an external STS to exchange it for an access token, injects the token, and strips the subject header before forwarding upstream ([#11](https://github.com/majorcontext/gatekeeper/pull/11))
+- **`CredentialResolver` function type** — new per-request dynamic credential resolution path in the proxy core, parallel to static credentials; resolvers may inspect and modify the request and make external calls ([#11](https://github.com/majorcontext/gatekeeper/pull/11))
+- **Per-subject token caching** — exchanged tokens are cached by subject with TTL from the STS `expires_in` response (default 5 minutes); concurrent cache misses for the same subject are coalesced via `singleflight` ([#11](https://github.com/majorcontext/gatekeeper/pull/11))
+- **STS endpoint implementer guide** — `docs/token-exchange-endpoint.md` documents the exact wire format, authentication, caching semantics, and error handling contract for building compatible STS endpoints ([#11](https://github.com/majorcontext/gatekeeper/pull/11))
+
 ## v0.4.4 — 2026-04-20
 
 ### Added

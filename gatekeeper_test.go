@@ -980,6 +980,33 @@ func TestBasicFormatValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("basic with token-exchange source", func(t *testing.T) {
+		t.Setenv("TEST_TE_FMT_SECRET", "s")
+		cfg := &Config{
+			Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+			Credentials: []CredentialConfig{
+				{
+					Host:   "api.github.com",
+					Format: "basic",
+					Source: SourceConfig{
+						Type:            "token-exchange",
+						Endpoint:        "http://sts.example.com/token",
+						ClientID:        "gk",
+						ClientSecretEnv: "TEST_TE_FMT_SECRET",
+						SubjectHeader:   "X-Subject",
+					},
+				},
+			},
+		}
+		_, err := New(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected error for format with token-exchange source")
+		}
+		if !strings.Contains(err.Error(), "'format' is not supported") {
+			t.Errorf("error = %q, want mention of 'format is not supported'", err)
+		}
+	})
+
 	t.Run("basic with non-Authorization header", func(t *testing.T) {
 		cfg := &Config{
 			Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
