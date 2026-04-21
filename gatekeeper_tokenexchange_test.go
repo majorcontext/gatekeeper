@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -206,9 +207,9 @@ func TestNewTokenExchangeResolver_NoActorTokenWithoutConfig(t *testing.T) {
 }
 
 func TestNewTokenExchangeResolver_ActorTokenRequiredButMissing(t *testing.T) {
-	stsCalled := false
+	var stsCalled atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		stsCalled = true
+		stsCalled.Store(true)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token": "gho_resolved",
@@ -241,7 +242,7 @@ func TestNewTokenExchangeResolver_ActorTokenRequiredButMissing(t *testing.T) {
 	if !strings.Contains(err.Error(), "requires a proxy auth password") {
 		t.Errorf("error = %q, want to contain 'requires a proxy auth password'", err)
 	}
-	if stsCalled {
+	if stsCalled.Load() {
 		t.Error("STS should not be called when actor_token_from is configured but password is empty")
 	}
 }
