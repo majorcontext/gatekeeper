@@ -18,7 +18,7 @@ No `GITHUB_TOKEN` in the command. No secrets in environment variables. The token
 go install github.com/majorcontext/gatekeeper/cmd/gatekeeper@latest
 ```
 
-**Requires:** Go 1.23+
+**Requires:** Go 1.25+
 
 ## How it works
 
@@ -114,7 +114,7 @@ network:
     - "*.anthropic.com"
 ```
 
-Policies: `permissive` (allow all, deny listed), `strict` (deny all, allow listed).
+Policies: `permissive` (allow all), `strict` (deny all, allow listed).
 
 ## Observability
 
