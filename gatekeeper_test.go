@@ -1689,3 +1689,199 @@ func TestHTTPSTokenExchangeBasicFormat(t *testing.T) {
 	}
 }
 
+func TestHTTPTokenExchangeRelay(t *testing.T) {
+	// End-to-end test for token-exchange over the plain HTTP (non-CONNECT) relay
+	// path. Exercises handleHTTP where proxyReq == innerReq.
+
+	var (
+		backendAuth          string
+		backendSubjectHeader string
+		backendMu            sync.Mutex
+	)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendMu.Lock()
+		backendAuth = r.Header.Get("Authorization")
+		backendSubjectHeader = r.Header.Get("X-Gatekeeper-Subject")
+		backendMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "want POST", http.StatusMethodNotAllowed)
+			return
+		}
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != "gk-client" || pass != "gk-secret" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":      "exchanged-for-" + r.FormValue("subject_token"),
+			"issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+			"token_type":        "Bearer",
+			"expires_in":        3600,
+		})
+	}))
+	defer sts.Close()
+
+	t.Setenv("TEST_TE_RELAY_SECRET", "gk-secret")
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		Credentials: []CredentialConfig{
+			{
+				Host:   backendURL.Hostname(),
+				Grant:  "test",
+				Prefix: "Bearer",
+				Source: SourceConfig{
+					Type:            "token-exchange",
+					Endpoint:        sts.URL,
+					ClientID:        "gk-client",
+					ClientSecretEnv: "TEST_TE_RELAY_SECRET",
+					SubjectHeader:   "X-Gatekeeper-Subject",
+				},
+			},
+		},
+		Network: NetworkConfig{Policy: "permissive"},
+	}
+
+	srv, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx := t.Context()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	proxyURL, _ := url.Parse("http://" + srv.ProxyAddr())
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+	}
+
+	req, err := http.NewRequest(http.MethodGet, backend.URL+"/test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Gatekeeper-Subject", "usr_bob")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	backendMu.Lock()
+	gotAuth := backendAuth
+	gotSubjectHdr := backendSubjectHeader
+	backendMu.Unlock()
+
+	if gotAuth != "Bearer exchanged-for-usr_bob" {
+		t.Errorf("backend Authorization = %q, want %q", gotAuth, "Bearer exchanged-for-usr_bob")
+	}
+	if gotSubjectHdr != "" {
+		t.Errorf("backend still has X-Gatekeeper-Subject = %q, want stripped", gotSubjectHdr)
+	}
+}
+
+func TestHTTPTokenExchangeProxyAuthRelay(t *testing.T) {
+	// End-to-end test for token-exchange with subject_from: proxy-auth over the
+	// plain HTTP relay path. The Proxy-Authorization username is the subject.
+
+	var (
+		backendAuth string
+		backendMu   sync.Mutex
+	)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendMu.Lock()
+		backendAuth = r.Header.Get("Authorization")
+		backendMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "want POST", http.StatusMethodNotAllowed)
+			return
+		}
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != "gk-client" || pass != "gk-secret" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":      "exchanged-for-" + r.FormValue("subject_token"),
+			"issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+			"token_type":        "Bearer",
+			"expires_in":        3600,
+		})
+	}))
+	defer sts.Close()
+
+	t.Setenv("TEST_TE_RELAY_PXA_SECRET", "gk-secret")
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		Credentials: []CredentialConfig{
+			{
+				Host:   backendURL.Hostname(),
+				Grant:  "test",
+				Prefix: "Bearer",
+				Source: SourceConfig{
+					Type:            "token-exchange",
+					Endpoint:        sts.URL,
+					ClientID:        "gk-client",
+					ClientSecretEnv: "TEST_TE_RELAY_PXA_SECRET",
+					SubjectFrom:     "proxy-auth",
+				},
+			},
+		},
+		Network: NetworkConfig{Policy: "permissive"},
+	}
+
+	srv, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx := t.Context()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	proxyURL, _ := url.Parse("http://" + srv.ProxyAddr())
+	proxyURL.User = url.UserPassword("alice@example.com", "unused")
+
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+	}
+
+	resp, err := client.Get(backend.URL + "/test")
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	backendMu.Lock()
+	gotAuth := backendAuth
+	backendMu.Unlock()
+
+	if gotAuth != "Bearer exchanged-for-alice@example.com" {
+		t.Errorf("backend Authorization = %q, want %q", gotAuth, "Bearer exchanged-for-alice@example.com")
+	}
+}
+
