@@ -4,6 +4,18 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.4.1 — 2026-04-20
+
+### Fixed
+
+- **HTTP client/server timeout defaults** — added explicit timeouts to all HTTP clients and transports across the codebase; Go's `net/http` defaults to zero timeouts, which can cause goroutine hangs on unresponsive upstreams ([#7](https://github.com/majorcontext/gatekeeper/pull/7))
+  - GitHub App credential source: 30s client timeout
+  - MCP relay client: 10s TLS handshake, 30s response header, 90s idle connection
+  - CONNECT interception transport: 10s TLS handshake, 30s response header
+  - Non-CONNECT HTTP forwarding: replaced `http.DefaultTransport` with configured transport (10s TLS handshake, 30s response header, 90s idle)
+  - Relay client: 10s TLS handshake
+  - Library server (`proxy.Server`): 120s idle timeout
+
 ## v0.4.0 — 2026-04-20
 
 v0.4 adds GitHub App installation tokens as a credential source with automatic background refresh. Tokens are generated from an RSA private key via RS256 JWT signing and exchanged for short-lived installation access tokens through GitHub's API. A new `RefreshingSource` interface enables any credential source to opt into background refresh — the proxy always holds a valid token without restarts.

@@ -54,7 +54,8 @@ func (s *Server) Start() error {
 
 	s.server = &http.Server{
 		Handler:           s.proxy,
-		ReadHeaderTimeout: 60 * time.Second, // Prevent Slowloris attacks
+		ReadHeaderTimeout: 60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {

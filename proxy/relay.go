@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,7 +15,12 @@ import (
 // where localhost correctly reaches host-side services.
 var relayClient = &http.Client{
 	Transport: &http.Transport{
-		Proxy:                 nil, // Disable proxy - connect directly to target
+		Proxy: nil,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 		IdleConnTimeout:       90 * time.Second,
 	},

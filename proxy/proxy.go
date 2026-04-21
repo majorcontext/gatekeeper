@@ -88,6 +88,20 @@ type RequestChecker func(host string, port int, method, path string) bool
 // When true, the proxy intercepts CONNECT tunnels for path-level inspection.
 type PathRulesChecker func(host string, port int) bool
 
+// httpTransport is a shared transport for non-CONNECT HTTP forwarding with
+// sane timeout defaults. No client-level Timeout is set because the proxy may
+// handle streaming responses.
+var httpTransport = &http.Transport{
+	Proxy: nil,
+	DialContext: (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ResponseHeaderTimeout: 30 * time.Second,
+	IdleConnTimeout:       90 * time.Second,
+}
+
 // MaxBodySize is the maximum size of request/response bodies to capture (8KB).
 // Only this much is buffered for logging; the full body is always forwarded.
 const MaxBodySize = 8 * 1024
@@ -1387,7 +1401,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Forward request
-	resp, err := http.DefaultTransport.RoundTrip(outReq)
+	resp, err := httpTransport.RoundTrip(outReq)
 	duration := time.Since(start)
 
 	// Capture response body and headers
@@ -1575,12 +1589,19 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 	defer tlsClientConn.Close()
 
 	transport := &http.Transport{
+		Proxy: nil,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			RootCAs:    p.upstreamCAs, // nil means system roots
 		},
-		MaxIdleConns:    100,
-		IdleConnTimeout: 90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
 		// Note: Do NOT set ForceAttemptHTTP2 here. This transport forwards
 		// HTTP/1.1 requests read from the intercepted TLS connection. Enabling
 		// HTTP/2 on the upstream side causes framing mismatches and hangs.

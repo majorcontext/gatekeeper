@@ -52,7 +52,7 @@ func NewGitHubAppSource(appID, installationID string, privateKeyPEM []byte) (*Gi
 		appID:          appID,
 		installationID: installationID,
 		key:            key,
-		client:         &http.Client{},
+		client:         &http.Client{Timeout: 30 * time.Second},
 		apiBaseURL:     gitHubAPIBaseURL,
 	}, nil
 }
