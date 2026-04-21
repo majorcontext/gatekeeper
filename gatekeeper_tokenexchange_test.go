@@ -234,12 +234,12 @@ func TestNewTokenExchangeResolver_ActorTokenRequiredButMissing(t *testing.T) {
 
 	innerReq := httptest.NewRequest("GET", "https://api.github.com/user", nil)
 
-	creds, err := resolver(context.Background(), proxyReq, innerReq, "api.github.com")
-	if err != nil {
-		t.Fatalf("resolver: %v", err)
+	_, err := resolver(context.Background(), proxyReq, innerReq, "api.github.com")
+	if err == nil {
+		t.Fatal("expected error when actor_token_from is configured but password is empty")
 	}
-	if len(creds) != 0 {
-		t.Errorf("got %d creds, want 0 (missing password should skip when actor_token_from configured)", len(creds))
+	if !strings.Contains(err.Error(), "requires a proxy auth password") {
+		t.Errorf("error = %q, want to contain 'requires a proxy auth password'", err)
 	}
 	if stsCalled {
 		t.Error("STS should not be called when actor_token_from is configured but password is empty")

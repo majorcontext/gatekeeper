@@ -49,7 +49,7 @@ func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialR
 			subject, password = extractProxyAuthCredentials(proxyReq)
 			if cfg.ActorTokenFrom == "proxy-auth-password" {
 				if password == "" {
-					return nil, nil
+					return nil, fmt.Errorf("actor_token_from %q requires a proxy auth password", cfg.ActorTokenFrom)
 				}
 				actorToken = password
 			}

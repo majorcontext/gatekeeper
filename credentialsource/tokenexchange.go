@@ -141,7 +141,7 @@ const defaultTokenTTL = 5 * time.Minute
 // in the cache key.
 func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorToken string) (string, error) {
 	ck := tokenCacheKey{subject: subjectToken, actor: actorToken}
-	sfKey := subjectToken + "\n" + actorToken
+	sfKey := fmt.Sprintf("%q\x00%q", subjectToken, actorToken)
 
 	s.mu.Lock()
 	if cached, ok := s.cache[ck]; ok && time.Now().Before(cached.expiresAt) {
