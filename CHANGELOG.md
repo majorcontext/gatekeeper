@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.5.1 — 2026-04-21
+
+### Changed
+
+- **Resolver-to-static credential fallback** — when a `CredentialResolver` (e.g., `token-exchange`) and a static credential (e.g., `github-app`) are both registered for the same host, the resolver runs first; if it returns no credentials (no subject identity found), the static credential is used as a fallback; enables the pattern "per-user OAuth via token-exchange, with a bot identity fallback" ([#12](https://github.com/majorcontext/gatekeeper/pull/12))
+
 ## v0.5.0 — 2026-04-21
 
 v0.5 adds RFC 8693 OAuth 2.0 Token Exchange as a credential source. Multiple callers with different user identities can route requests through a single shared gatekeeper instance — each receives user-scoped credentials resolved dynamically via an external Security Token Service (STS).

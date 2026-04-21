@@ -881,12 +881,16 @@ func getRunContext(r *http.Request) *RunContextData {
 
 // getCredentialsForRequest returns all credentials for a host. When
 // RunContextData is present, only its credentials are used (the caller
-// owns the full credential set for that run). Otherwise, the proxy's
-// static map is checked, then dynamic credential resolvers.
+// owns the full credential set for that run). Otherwise, dynamic
+// credential resolvers are tried first — if a resolver returns
+// credentials, those are used. If the resolver returns nil (e.g., no
+// subject identity found), the proxy falls through to static credentials
+// for the same host. This enables patterns like "per-user OAuth via
+// token-exchange, with a bot identity fallback."
 //
 // ctxReq carries the RunContextData (the CONNECT request for intercepted
 // connections, or the same request for plain HTTP). innerReq is the actual
-// request the resolver may inspect (e.g., for subject headers).
+// request the resolver may inspect and modify (e.g., strip subject headers).
 func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
 	if rc := getRunContext(ctxReq); rc != nil {
 		if creds := rc.Credentials[host]; len(creds) > 0 {
@@ -900,14 +904,16 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 		}
 		return nil, nil
 	}
-	if creds := p.getCredentials(host); len(creds) > 0 {
-		return creds, nil
+	if resolver := p.getCredentialResolver(host); resolver != nil {
+		creds, err := resolver(innerReq.Context(), ctxReq, innerReq, host)
+		if err != nil {
+			return nil, err
+		}
+		if len(creds) > 0 {
+			return creds, nil
+		}
 	}
-	resolver := p.getCredentialResolver(host)
-	if resolver == nil {
-		return nil, nil
-	}
-	return resolver(innerReq.Context(), ctxReq, innerReq, host)
+	return p.getCredentials(host), nil
 }
 
 // getExtraHeadersForRequest returns extra headers for a host, checking
