@@ -1989,6 +1989,10 @@ func TestHTTPSTokenExchangeFallbackToStatic(t *testing.T) {
 		t.Errorf("backend Authorization = %q, want %q (static fallback)", fallbackAuth, "Bearer bot-fallback-token")
 	}
 
+	stsMu.Lock()
+	stsCalled = false
+	stsMu.Unlock()
+
 	// With subject header — resolver returns credentials, static is not used.
 	req, err := http.NewRequest(http.MethodGet, "https://127.0.0.1:"+backendPort+"/user", nil)
 	if err != nil {
