@@ -215,7 +215,7 @@ func New(ctx context.Context, cfg *Config) (*Server, error) {
 	// credentials, policy decisions, sizes) into a single log line for
 	// grep-ability and dashboard extraction.
 	p.SetLogger(func(data proxy.RequestLogData) {
-		durationMS := float64(data.Duration.Milliseconds())
+		durationMS := float64(data.Duration.Nanoseconds()) / 1e6
 		attrs := []slog.Attr{
 			slog.String("http_method", data.Method),
 			slog.String("http_host", data.Host),

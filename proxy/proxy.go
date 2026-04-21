@@ -1820,7 +1820,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				RequestSize:  -1,
 				ResponseSize: -1,
 				Denied:       true,
-				DenyReason:   req.Method + " " + host + req.URL.Path,
+				DenyReason:   "Request blocked by network policy: " + req.Method + " " + host + req.URL.Path,
 			})
 			p.logPolicy(r, "network", "http.request", "", req.Method+" "+host+req.URL.Path)
 			body := "Moat: request blocked by network policy.\nHost: " + host + "\nTo allow this request, update network.rules in moat.yaml.\n"
@@ -1852,6 +1852,18 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 						"method", req.Method,
 						"path", req.URL.Path,
 						"error", evalErr)
+					p.logRequest(r, RequestLogData{
+						Method:       req.Method,
+						URL:          req.URL.String(),
+						Host:         host,
+						Path:         req.URL.Path,
+						RequestType:  "connect",
+						StatusCode:   http.StatusForbidden,
+						RequestSize:  req.ContentLength,
+						ResponseSize: -1,
+						Denied:       true,
+						DenyReason:   "Keep policy evaluation error",
+					})
 					p.logPolicy(r, scope, "http.request", "evaluation-error", "Policy evaluation failed")
 					msg := "Moat: request blocked — policy evaluation error.\nHost: " + host + "\n"
 					blockedResp := &http.Response{
@@ -1867,6 +1879,18 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 					_ = blockedResp.Write(tlsClientConn)
 					continue
 				} else if result.Decision == keeplib.Deny {
+					p.logRequest(r, RequestLogData{
+						Method:       req.Method,
+						URL:          req.URL.String(),
+						Host:         host,
+						Path:         req.URL.Path,
+						RequestType:  "connect",
+						StatusCode:   http.StatusForbidden,
+						RequestSize:  req.ContentLength,
+						ResponseSize: -1,
+						Denied:       true,
+						DenyReason:   "Keep policy denied: " + result.Rule + " " + result.Message,
+					})
 					p.logPolicy(r, scope, "http.request", result.Rule, result.Message)
 					msg := "Moat: request blocked by Keep policy.\nHost: " + host + "\n"
 					if result.Message != "" {
@@ -1947,6 +1971,10 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		resp, err := transport.RoundTrip(req)
 		duration := time.Since(start)
 
+		// Track LLM policy denials for the canonical log line.
+		var llmDenied bool
+		var llmDenyReason string
+
 		// Evaluate LLM gateway policy on Anthropic API responses.
 		// NOTE: Only applies to the default Anthropic endpoint. Custom
 		// ANTHROPIC_BASE_URL endpoints bypass policy evaluation — this is
@@ -1960,6 +1988,8 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 						slog.Warn("failed to read response body for LLM policy, denying (fail-closed)",
 							"host", host, "error", readErr)
 						p.logPolicy(r, "llm-gateway", "llm.read_error", "read-error", "Failed to read response body for policy evaluation")
+						llmDenied = true
+						llmDenyReason = "LLM policy read error"
 						errorBody := buildPolicyDeniedResponse("read-error", "Failed to read response body for policy evaluation.")
 						resp = &http.Response{
 							StatusCode:    http.StatusBadRequest,
@@ -1976,6 +2006,8 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 						slog.Warn("LLM response exceeds max size for policy evaluation, denying (fail-closed)",
 							"size", len(respBodyBytes), "limit", maxLLMResponseSize)
 						p.logPolicy(r, "llm-gateway", "llm.response_too_large", "size-limit", "Response too large for policy evaluation")
+						llmDenied = true
+						llmDenyReason = "LLM policy response too large"
 						errorBody := buildPolicyDeniedResponse("size-limit", "Response too large for policy evaluation.")
 						resp = &http.Response{
 							StatusCode:    http.StatusBadRequest,
@@ -1993,6 +2025,8 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 							slog.Info("LLM tool_use denied by policy",
 								"rule", result.Rule, "message", result.Message)
 							p.logPolicy(r, "llm-gateway", "llm.tool_use", result.Rule, result.Message)
+							llmDenied = true
+							llmDenyReason = "LLM policy denied: " + result.Rule + " " + result.Message
 							errorBody := buildPolicyDeniedResponse(result.Rule, result.Message)
 							resp = &http.Response{
 								StatusCode:    http.StatusBadRequest,
@@ -2083,6 +2117,8 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			ResponseSize:    responseSize,
 			InjectedHeaders: credResult.InjectedHeaders,
 			Grants:          credResult.Grants,
+			Denied:          llmDenied,
+			DenyReason:      llmDenyReason,
 		})
 
 		if err != nil {
