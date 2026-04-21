@@ -70,6 +70,7 @@ type SourceConfig struct {
 	ClientSecret     string `yaml:"client_secret,omitempty"`
 	ClientSecretEnv  string `yaml:"client_secret_env,omitempty"`
 	SubjectHeader    string `yaml:"subject_header,omitempty"`
+	SubjectFrom      string `yaml:"subject_from,omitempty"`
 	SubjectTokenType string `yaml:"subject_token_type,omitempty"`
 	Resource         string `yaml:"resource,omitempty"`
 }

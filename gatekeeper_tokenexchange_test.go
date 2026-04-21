@@ -34,7 +34,7 @@ func TestNewTokenExchangeResolver(t *testing.T) {
 	req := httptest.NewRequest("GET", "https://api.github.com/user", nil)
 	req.Header.Set("X-Gatekeeper-Subject", "usr_abc123")
 
-	creds, err := resolver(context.Background(), req, "api.github.com")
+	creds, err := resolver(context.Background(), req, req, "api.github.com")
 	if err != nil {
 		t.Fatalf("resolver: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestNewTokenExchangeResolver_NoSubjectHeader(t *testing.T) {
 	req := httptest.NewRequest("GET", "https://api.github.com/user", nil)
 	// No X-Gatekeeper-Subject header set
 
-	creds, err := resolver(context.Background(), req, "api.github.com")
+	creds, err := resolver(context.Background(), req, req, "api.github.com")
 	if err != nil {
 		t.Fatalf("resolver: %v", err)
 	}

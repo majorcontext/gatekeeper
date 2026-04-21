@@ -2449,7 +2449,7 @@ func TestProxy_CredentialResolver(t *testing.T) {
 	defer backend.Close()
 
 	p := NewProxy()
-	p.SetCredentialResolver("127.0.0.1", func(ctx context.Context, req *http.Request, host string) ([]CredentialHeader, error) {
+	p.SetCredentialResolver("127.0.0.1", func(ctx context.Context, _, _ *http.Request, host string) ([]CredentialHeader, error) {
 		return []CredentialHeader{{Name: "Authorization", Value: "Bearer dynamic-token", Grant: "test"}}, nil
 	})
 
@@ -2481,7 +2481,7 @@ func TestProxy_CredentialResolverError(t *testing.T) {
 	defer backend.Close()
 
 	p := NewProxy()
-	p.SetCredentialResolver("127.0.0.1", func(ctx context.Context, req *http.Request, host string) ([]CredentialHeader, error) {
+	p.SetCredentialResolver("127.0.0.1", func(ctx context.Context, _, _ *http.Request, host string) ([]CredentialHeader, error) {
 		return nil, fmt.Errorf("STS endpoint unreachable")
 	})
 
@@ -2515,7 +2515,7 @@ func TestProxy_StaticCredentialsPriorityOverResolver(t *testing.T) {
 
 	p := NewProxy()
 	p.SetCredential("127.0.0.1", "Bearer static-token")
-	p.SetCredentialResolver("127.0.0.1", func(ctx context.Context, req *http.Request, host string) ([]CredentialHeader, error) {
+	p.SetCredentialResolver("127.0.0.1", func(ctx context.Context, _, _ *http.Request, host string) ([]CredentialHeader, error) {
 		t.Error("resolver should not be called when static credentials exist")
 		return nil, nil
 	})
@@ -2553,12 +2553,12 @@ func TestProxy_CredentialResolverStripsSubjectHeader(t *testing.T) {
 	defer backend.Close()
 
 	p := NewProxy()
-	p.SetCredentialResolver("127.0.0.1", func(ctx context.Context, req *http.Request, host string) ([]CredentialHeader, error) {
-		subject := req.Header.Get("X-Gatekeeper-Subject")
+	p.SetCredentialResolver("127.0.0.1", func(ctx context.Context, _, innerReq *http.Request, host string) ([]CredentialHeader, error) {
+		subject := innerReq.Header.Get("X-Gatekeeper-Subject")
 		if subject == "" {
 			return nil, nil
 		}
-		req.Header.Del("X-Gatekeeper-Subject")
+		innerReq.Header.Del("X-Gatekeeper-Subject")
 		return []CredentialHeader{{
 			Name:  "Authorization",
 			Value: "Bearer token-for-" + subject,
@@ -2601,7 +2601,7 @@ func TestProxy_CredentialResolverNoMatch(t *testing.T) {
 
 	p := NewProxy()
 	// Resolver registered for a different host
-	p.SetCredentialResolver("api.example.com", func(ctx context.Context, req *http.Request, host string) ([]CredentialHeader, error) {
+	p.SetCredentialResolver("api.example.com", func(ctx context.Context, _, _ *http.Request, host string) ([]CredentialHeader, error) {
 		t.Error("resolver should not be called for non-matching host")
 		return nil, nil
 	})

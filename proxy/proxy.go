@@ -328,8 +328,14 @@ type ContextResolver func(token string) (*RunContextData, bool)
 // static credentials (pre-resolved at startup), resolvers may inspect and
 // modify the request (e.g., strip a subject identity header) and may make
 // external calls (e.g., RFC 8693 token exchange).
+//
+// proxyReq is the original proxy-level request (CONNECT for intercepted
+// connections, or the same as innerReq for plain HTTP/relay). It carries
+// Proxy-Authorization and other proxy-hop headers. innerReq is the
+// application-level request the resolver may inspect and modify.
+//
 // Returns nil with no error when the resolver has no credentials to offer.
-type CredentialResolver func(ctx context.Context, req *http.Request, host string) ([]credentialHeader, error)
+type CredentialResolver func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error)
 
 // Proxy is an HTTP proxy that injects credentials into outgoing requests.
 //
@@ -901,7 +907,7 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 	if resolver == nil {
 		return nil, nil
 	}
-	return resolver(innerReq.Context(), innerReq, host)
+	return resolver(innerReq.Context(), ctxReq, innerReq, host)
 }
 
 // getExtraHeadersForRequest returns extra headers for a host, checking

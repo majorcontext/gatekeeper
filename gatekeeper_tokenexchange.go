@@ -2,9 +2,11 @@ package gatekeeper
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/majorcontext/gatekeeper/credentialsource"
 	"github.com/majorcontext/gatekeeper/proxy"
@@ -17,6 +19,7 @@ type tokenExchangeResolverConfig struct {
 	Resource         string
 	SubjectTokenType string
 	SubjectHeader    string
+	SubjectFrom      string
 	Grant            string
 	Header           string
 	Prefix           string
@@ -36,12 +39,21 @@ func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialR
 		header = "Authorization"
 	}
 
-	return func(ctx context.Context, req *http.Request, host string) ([]proxy.CredentialHeader, error) {
-		subject := req.Header.Get(cfg.SubjectHeader)
+	return func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]proxy.CredentialHeader, error) {
+		var subject string
+		switch cfg.SubjectFrom {
+		case "proxy-auth":
+			subject = extractProxyAuthUsername(proxyReq)
+		default:
+			subject = innerReq.Header.Get(cfg.SubjectHeader)
+			if subject != "" {
+				innerReq.Header.Del(cfg.SubjectHeader)
+			}
+		}
+
 		if subject == "" {
 			return nil, nil
 		}
-		req.Header.Del(cfg.SubjectHeader)
 
 		token, err := src.Resolve(ctx, subject)
 		if err != nil {
@@ -61,6 +73,28 @@ func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialR
 	}
 }
 
+func extractProxyAuthUsername(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	auth := r.Header.Get("Proxy-Authorization")
+	if auth == "" {
+		return ""
+	}
+	if !strings.HasPrefix(auth, "Basic ") {
+		return ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(auth[6:])
+	if err != nil {
+		return ""
+	}
+	username, _, ok := strings.Cut(string(decoded), ":")
+	if !ok {
+		return ""
+	}
+	return username
+}
+
 func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, error) {
 	cfg := cred.Source
 	if cfg.Endpoint == "" {
@@ -69,8 +103,14 @@ func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, erro
 	if cfg.ClientID == "" {
 		return nil, fmt.Errorf("token-exchange source requires 'client_id' field")
 	}
-	if cfg.SubjectHeader == "" {
-		return nil, fmt.Errorf("token-exchange source requires 'subject_header' field")
+	if cfg.SubjectHeader != "" && cfg.SubjectFrom != "" {
+		return nil, fmt.Errorf("token-exchange source: set 'subject_header' or 'subject_from', not both")
+	}
+	if cfg.SubjectHeader == "" && cfg.SubjectFrom == "" {
+		return nil, fmt.Errorf("token-exchange source requires 'subject_header' or 'subject_from' field")
+	}
+	if cfg.SubjectFrom != "" && cfg.SubjectFrom != "proxy-auth" {
+		return nil, fmt.Errorf("token-exchange source: unsupported subject_from value %q (supported: proxy-auth)", cfg.SubjectFrom)
 	}
 	if cfg.ClientSecret == "" && cfg.ClientSecretEnv == "" {
 		return nil, fmt.Errorf("token-exchange source requires 'client_secret' or 'client_secret_env' field")
@@ -80,7 +120,7 @@ func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, erro
 	}
 	// Reject extraneous fields from other source types
 	if cfg.Var != "" || cfg.Value != "" || cfg.Secret != "" || cfg.Region != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" {
-		return nil, fmt.Errorf("token-exchange source only uses 'endpoint', 'client_id', 'client_secret'/'client_secret_env', 'subject_header', 'subject_token_type', and 'resource'; found extraneous fields")
+		return nil, fmt.Errorf("token-exchange source only uses 'endpoint', 'client_id', 'client_secret'/'client_secret_env', 'subject_header'/'subject_from', 'subject_token_type', and 'resource'; found extraneous fields")
 	}
 
 	clientSecret := cfg.ClientSecret
@@ -103,6 +143,7 @@ func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, erro
 		Resource:         cfg.Resource,
 		SubjectTokenType: cfg.SubjectTokenType,
 		SubjectHeader:    cfg.SubjectHeader,
+		SubjectFrom:      cfg.SubjectFrom,
 		Grant:            cred.Grant,
 		Header:           header,
 		Prefix:           cred.Prefix,
