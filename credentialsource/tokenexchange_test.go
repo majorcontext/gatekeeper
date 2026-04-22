@@ -43,7 +43,7 @@ func TestTokenExchange_BasicExchange(t *testing.T) {
 		SubjectTokenType: "urn:ietf:params:oauth:token-type:access_token",
 	})
 
-	token, err := src.Exchange(context.Background(), "usr_abc123", "")
+	token, err := src.Exchange(context.Background(), "usr_abc123", "", "")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
 	}
@@ -98,11 +98,11 @@ func TestTokenExchange_CachesToken(t *testing.T) {
 		Resource:     "https://api.github.com",
 	})
 
-	token1, err := src.Resolve(context.Background(), "usr_abc", "")
+	token1, err := src.Resolve(context.Background(), "usr_abc", "", "")
 	if err != nil {
 		t.Fatalf("first Resolve: %v", err)
 	}
-	token2, err := src.Resolve(context.Background(), "usr_abc", "")
+	token2, err := src.Resolve(context.Background(), "usr_abc", "", "")
 	if err != nil {
 		t.Fatalf("second Resolve: %v", err)
 	}
@@ -138,8 +138,8 @@ func TestTokenExchange_CachePerSubject(t *testing.T) {
 		Resource:     "https://api.github.com",
 	})
 
-	token1, _ := src.Resolve(context.Background(), "usr_alice", "")
-	token2, _ := src.Resolve(context.Background(), "usr_bob", "")
+	token1, _ := src.Resolve(context.Background(), "usr_alice", "", "")
+	token2, _ := src.Resolve(context.Background(), "usr_bob", "", "")
 
 	if token1 != "token_for_usr_alice" {
 		t.Errorf("alice token = %q, want token_for_usr_alice", token1)
@@ -173,14 +173,14 @@ func TestTokenExchange_CacheExpiry(t *testing.T) {
 		Resource:     "https://api.github.com",
 	})
 
-	token1, _ := src.Resolve(context.Background(), "usr_abc", "")
+	token1, _ := src.Resolve(context.Background(), "usr_abc", "", "")
 	if token1 != "token_v1" {
 		t.Errorf("first token = %q, want token_v1", token1)
 	}
 
 	time.Sleep(1100 * time.Millisecond)
 
-	token2, _ := src.Resolve(context.Background(), "usr_abc", "")
+	token2, _ := src.Resolve(context.Background(), "usr_abc", "", "")
 	if token2 != "token_v2" {
 		t.Errorf("second token = %q, want token_v2", token2)
 	}
@@ -202,7 +202,7 @@ func TestTokenExchange_STSError(t *testing.T) {
 		ClientSecret: "secret",
 	})
 
-	_, err := src.Exchange(context.Background(), "bad_subject", "")
+	_, err := src.Exchange(context.Background(), "bad_subject", "", "")
 	if err == nil {
 		t.Fatal("expected error for 400 response")
 	}
@@ -224,7 +224,7 @@ func TestTokenExchange_MalformedJSON(t *testing.T) {
 		ClientSecret: "secret",
 	})
 
-	_, err := src.Exchange(context.Background(), "usr_abc", "")
+	_, err := src.Exchange(context.Background(), "usr_abc", "", "")
 	if err == nil {
 		t.Fatal("expected error for malformed JSON")
 	}
@@ -246,7 +246,7 @@ func TestTokenExchange_MissingAccessToken(t *testing.T) {
 		ClientSecret: "secret",
 	})
 
-	_, err := src.Exchange(context.Background(), "usr_abc", "")
+	_, err := src.Exchange(context.Background(), "usr_abc", "", "")
 	if err == nil {
 		t.Fatal("expected error for missing access_token")
 	}
@@ -267,7 +267,7 @@ func TestTokenExchange_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err := src.Exchange(ctx, "usr_abc", "")
+	_, err := src.Exchange(ctx, "usr_abc", "", "")
 	if err == nil {
 		t.Fatal("expected error for cancelled context")
 	}
@@ -298,7 +298,7 @@ func TestTokenExchange_ConcurrentCacheMiss(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			token, err := src.Resolve(context.Background(), "usr_x", "")
+			token, err := src.Resolve(context.Background(), "usr_x", "", "")
 			if err != nil {
 				t.Errorf("Resolve: %v", err)
 				return
@@ -336,7 +336,7 @@ func TestTokenExchange_ActorToken(t *testing.T) {
 		Resource:     "https://api.github.com",
 	})
 
-	_, err := src.Exchange(context.Background(), "alice@example.com", "ak_alice_xxx")
+	_, err := src.Exchange(context.Background(), "alice@example.com", "ak_alice_xxx", "")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestTokenExchange_ActorTokenNotSentWhenEmpty(t *testing.T) {
 		ClientSecret: "secret",
 	})
 
-	_, err := src.Exchange(context.Background(), "alice@example.com", "")
+	_, err := src.Exchange(context.Background(), "alice@example.com", "", "")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
 	}
@@ -400,9 +400,9 @@ func TestTokenExchange_CachePerActorToken(t *testing.T) {
 		ClientSecret: "secret",
 	})
 
-	token1, _ := src.Resolve(context.Background(), "alice", "ak_alice")
-	token2, _ := src.Resolve(context.Background(), "alice", "ak_bob")
-	token3, _ := src.Resolve(context.Background(), "alice", "ak_alice")
+	token1, _ := src.Resolve(context.Background(), "alice", "ak_alice", "")
+	token2, _ := src.Resolve(context.Background(), "alice", "ak_bob", "")
+	token3, _ := src.Resolve(context.Background(), "alice", "ak_alice", "")
 
 	if token1 != "token_for_actor_ak_alice" {
 		t.Errorf("token1 = %q, want token_for_actor_ak_alice", token1)
@@ -438,9 +438,9 @@ func TestTokenExchange_CachePerSubjectWithSameActor(t *testing.T) {
 		ClientSecret: "secret",
 	})
 
-	token1, _ := src.Resolve(context.Background(), "alice", "shared_key")
-	token2, _ := src.Resolve(context.Background(), "bob", "shared_key")
-	token3, _ := src.Resolve(context.Background(), "alice", "shared_key")
+	token1, _ := src.Resolve(context.Background(), "alice", "shared_key", "")
+	token2, _ := src.Resolve(context.Background(), "bob", "shared_key", "")
+	token3, _ := src.Resolve(context.Background(), "alice", "shared_key", "")
 
 	if token1 != "token_for_alice" {
 		t.Errorf("token1 = %q, want token_for_alice", token1)
@@ -477,12 +477,70 @@ func TestTokenExchange_CustomActorTokenType(t *testing.T) {
 		ActorTokenType: "urn:ietf:params:oauth:token-type:jwt",
 	})
 
-	_, err := src.Exchange(context.Background(), "alice", "jwt_token_here")
+	_, err := src.Exchange(context.Background(), "alice", "jwt_token_here", "")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
 	}
 
 	if !strings.Contains(gotBody, "actor_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Ajwt") {
 		t.Errorf("expected custom actor_token_type, got: %s", gotBody)
+	}
+}
+
+func TestTokenExchange_RequestIDForwarded(t *testing.T) {
+	var gotRequestID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRequestID = r.Header.Get("X-Request-Id")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	src := NewTokenExchangeSource(TokenExchangeConfig{
+		Endpoint:     srv.URL,
+		ClientID:     "gk",
+		ClientSecret: "secret",
+	})
+
+	_, err := src.Exchange(context.Background(), "usr_abc", "", "req_test-correlation-id")
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	if gotRequestID != "req_test-correlation-id" {
+		t.Errorf("X-Request-Id = %q, want %q", gotRequestID, "req_test-correlation-id")
+	}
+}
+
+func TestTokenExchange_RequestIDOmittedWhenEmpty(t *testing.T) {
+	var gotRequestID string
+	var hasHeader bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRequestID = r.Header.Get("X-Request-Id")
+		_, hasHeader = r.Header["X-Request-Id"]
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	src := NewTokenExchangeSource(TokenExchangeConfig{
+		Endpoint:     srv.URL,
+		ClientID:     "gk",
+		ClientSecret: "secret",
+	})
+
+	_, err := src.Exchange(context.Background(), "usr_abc", "", "")
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	if hasHeader {
+		t.Errorf("X-Request-Id header should not be set when requestID is empty, got %q", gotRequestID)
 	}
 }

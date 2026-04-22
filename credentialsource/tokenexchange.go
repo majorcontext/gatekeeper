@@ -84,7 +84,8 @@ func NewTokenExchangeSource(cfg TokenExchangeConfig) *TokenExchangeSource {
 
 // Exchange performs an RFC 8693 token exchange for the given subject token.
 // When actorToken is non-empty, it is included as the actor_token parameter.
-func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken, actorToken string) (*TokenExchangeResponse, error) {
+// When requestID is non-empty, it is forwarded as X-Request-Id to the STS.
+func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken, actorToken, requestID string) (*TokenExchangeResponse, error) {
 	form := url.Values{
 		"grant_type":         {tokenExchangeGrantType},
 		"subject_token":      {subjectToken},
@@ -104,6 +105,9 @@ func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken, actorT
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth(s.clientID, s.clientSecret)
+	if requestID != "" {
+		req.Header.Set("X-Request-Id", requestID)
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -141,8 +145,9 @@ const defaultTokenTTL = 5 * time.Minute
 // possible. Concurrent requests for the same subject are coalesced into a
 // single STS call via singleflight. When actorToken is non-empty, it is
 // forwarded to the STS as the RFC 8693 actor_token parameter and included
-// in the cache key.
-func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorToken string) (string, error) {
+// in the cache key. When requestID is non-empty, it is forwarded as
+// X-Request-Id to the STS for cross-service correlation.
+func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorToken, requestID string) (string, error) {
 	ck := tokenCacheKey{subject: subjectToken, actor: actorToken}
 	sfKey := fmt.Sprintf("%q\x00%q", subjectToken, actorToken)
 
@@ -166,7 +171,7 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorTo
 		// This is intentional: a short deadline from one caller shouldn't cancel
 		// the STS call for all singleflight waiters. The 30s http.Client timeout
 		// still bounds the call.
-		result, err := s.Exchange(context.WithoutCancel(ctx), subjectToken, actorToken)
+		result, err := s.Exchange(context.WithoutCancel(ctx), subjectToken, actorToken, requestID)
 		if err != nil {
 			return nil, err
 		}
