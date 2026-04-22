@@ -66,7 +66,7 @@ func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialR
 			return nil, nil
 		}
 
-		token, err := src.Resolve(ctx, subject, actorToken)
+		token, err := src.Resolve(ctx, subject, actorToken, proxy.RequestIDFromContext(ctx))
 		if err != nil {
 			return nil, err
 		}

@@ -334,6 +334,9 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	proxyReq.ContentLength = r.ContentLength
+	if proxyReq.Header.Get("X-Request-Id") == "" {
+		proxyReq.Header.Set("X-Request-Id", RequestIDFromContext(r.Context()))
+	}
 
 	// Inject credentials.
 	// In daemon mode, credentials are pre-resolved in RunContextData.Credentials
