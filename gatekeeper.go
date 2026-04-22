@@ -152,6 +152,8 @@ type pendingRefresh struct {
 // Server is the Gate Keeper server. It manages a TLS-intercepting proxy
 // with statically configured credentials.
 type Server struct {
+	version string
+
 	proxy *proxy.Proxy
 	cfg   *Config
 
@@ -170,7 +172,8 @@ type Server struct {
 // New creates a new Gate Keeper server from the given configuration.
 // The context is used for credential fetching (e.g., AWS Secrets Manager)
 // and can be used to cancel startup if the process receives a signal.
-func New(ctx context.Context, cfg *Config) (*Server, error) {
+// The version string is included in the startup log line; pass "" if unknown.
+func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 	// Configure structured logging before anything else.
 	logCleanup, err := configureLogging(cfg.Log)
 	if err != nil {
@@ -180,6 +183,7 @@ func New(ctx context.Context, cfg *Config) (*Server, error) {
 	p := proxy.NewProxy()
 
 	s := &Server{
+		version:    version,
 		proxy:      p,
 		logCleanup: logCleanup,
 		cfg:        cfg,
@@ -579,7 +583,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("starting proxy listener: %w", err)
 	}
 
-	slog.Info("gatekeeper listening", "addr", ln.Addr().String())
+	slog.Info("gatekeeper listening", "addr", ln.Addr().String(), "version", s.version)
 
 	s.mu.Lock()
 	s.proxyLn = ln

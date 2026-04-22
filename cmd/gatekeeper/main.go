@@ -24,6 +24,8 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
+var version = "dev"
+
 func initOTel(ctx context.Context) (shutdown func(context.Context) error, err error) {
 	var shutdowns []func(context.Context) error
 	cleanup := func() {
@@ -37,8 +39,12 @@ func initOTel(ctx context.Context) (shutdown func(context.Context) error, err er
 		}
 	}()
 
+	// WithFromEnv() last so OTEL_RESOURCE_ATTRIBUTES can override at deploy time.
 	res, err := resource.New(ctx,
-		resource.WithAttributes(semconv.ServiceName("gatekeeper")),
+		resource.WithAttributes(
+			semconv.ServiceName("gatekeeper"),
+			semconv.ServiceVersion(version),
+		),
 		resource.WithFromEnv(),
 	)
 	if err != nil {
@@ -122,7 +128,7 @@ func main() {
 		}
 	}()
 
-	srv, err := gatekeeper.New(ctx, cfg)
+	srv, err := gatekeeper.New(ctx, cfg, version)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating server: %v\n", err)
 		os.Exit(1)
