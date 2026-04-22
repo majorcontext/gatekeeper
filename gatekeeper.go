@@ -152,6 +152,10 @@ type pendingRefresh struct {
 // Server is the Gate Keeper server. It manages a TLS-intercepting proxy
 // with statically configured credentials.
 type Server struct {
+	// Version is the build version, set by the caller (e.g., via -ldflags).
+	// Included in the startup log line.
+	Version string
+
 	proxy *proxy.Proxy
 	cfg   *Config
 
@@ -579,7 +583,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("starting proxy listener: %w", err)
 	}
 
-	slog.Info("gatekeeper listening", "addr", ln.Addr().String())
+	slog.Info("gatekeeper listening", "addr", ln.Addr().String(), "version", s.Version)
 
 	s.mu.Lock()
 	s.proxyLn = ln
