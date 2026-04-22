@@ -681,7 +681,9 @@ func (s *Server) Stop(ctx context.Context) error {
 		s.refreshCancel()
 	}
 	for _, c := range s.closers {
-		c.Close()
+		if err := c.Close(); err != nil {
+			slog.Warn("credential source close failed", "error", err)
+		}
 	}
 	if s.logCleanup != nil {
 		defer s.logCleanup()
