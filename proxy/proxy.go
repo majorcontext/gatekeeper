@@ -1876,11 +1876,6 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				call.Context.Scope = "http-" + host
 				result, evalErr := keeplib.SafeEvaluate(eng, call, scope)
 				if evalErr != nil {
-					slog.Warn("Keep evaluation error for HTTP request, denying (fail-closed)",
-						"host", host,
-						"method", req.Method,
-						"path", req.URL.Path,
-						"error", evalErr)
 					p.logRequest(r, RequestLogData{
 						RequestID:    innerReqID,
 						Method:       req.Method,
@@ -2032,8 +2027,6 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 					respBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, maxLLMResponseSize+1))
 					resp.Body.Close()
 					if readErr != nil {
-						slog.Warn("failed to read response body for LLM policy, denying (fail-closed)",
-							"host", host, "error", readErr)
 						p.logPolicy(r, "llm-gateway", "llm.read_error", "read-error", "Failed to read response body for policy evaluation")
 						llmDenied = true
 						llmDenyReason = "LLM policy read error"
@@ -2049,9 +2042,6 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 						resp.Header.Set("Content-Type", "application/json")
 						resp.Header.Set("X-Moat-Blocked", "llm-policy")
 					} else if int64(len(respBodyBytes)) > maxLLMResponseSize {
-						// Response exceeds size limit — deny (fail-closed).
-						slog.Warn("LLM response exceeds max size for policy evaluation, denying (fail-closed)",
-							"size", len(respBodyBytes), "limit", maxLLMResponseSize)
 						p.logPolicy(r, "llm-gateway", "llm.response_too_large", "size-limit", "Response too large for policy evaluation")
 						llmDenied = true
 						llmDenyReason = "LLM policy response too large"
@@ -2069,8 +2059,6 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 					} else {
 						result := evaluateLLMResponse(eng, respBodyBytes, resp)
 						if result.Denied {
-							slog.Info("LLM tool_use denied by policy",
-								"rule", result.Rule, "message", result.Message)
 							p.logPolicy(r, "llm-gateway", "llm.tool_use", result.Rule, result.Message)
 							llmDenied = true
 							llmDenyReason = "LLM policy denied: " + result.Rule + " " + result.Message
