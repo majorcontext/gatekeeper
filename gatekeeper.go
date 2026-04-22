@@ -14,6 +14,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand/v2"
 	"net"
@@ -164,6 +165,7 @@ type Server struct {
 
 	pendingRefreshes []pendingRefresh
 	refreshCancel    context.CancelFunc
+	closers          []io.Closer // credential sources that hold resources
 
 	// resolveSource overrides ResolveSource for testing. When non-nil,
 	// loadCredentials calls this instead of ResolveSource.
@@ -447,6 +449,9 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 			return fmt.Errorf("credential for %s: fetch failed: %w", cred.Host, fetchErr)
 		}
 		fetched[cred.Source] = &fetchedSource{src: src, val: val}
+		if c, ok := src.(io.Closer); ok {
+			s.closers = append(s.closers, c)
+		}
 
 		// For Authorization headers, ensure the value includes an auth
 		// scheme prefix. In the CLI flow, providers handle this (e.g.,
@@ -674,6 +679,11 @@ func (s *Server) Start(ctx context.Context) error {
 func (s *Server) Stop(ctx context.Context) error {
 	if s.refreshCancel != nil {
 		s.refreshCancel()
+	}
+	for _, c := range s.closers {
+		if err := c.Close(); err != nil {
+			slog.Warn("credential source close failed", "error", err)
+		}
 	}
 	if s.logCleanup != nil {
 		defer s.logCleanup()

@@ -76,6 +76,47 @@ func TestResolveSourceAWSMissingSecret(t *testing.T) {
 	}
 }
 
+func TestResolveSourceGCPMissingSecret(t *testing.T) {
+	_, err := ResolveSource(SourceConfig{Type: "gcp-secretmanager", Project: "my-project"})
+	if err == nil {
+		t.Fatal("expected error for missing secret field, got nil")
+	}
+}
+
+func TestResolveSourceGCPMissingProject(t *testing.T) {
+	_, err := ResolveSource(SourceConfig{Type: "gcp-secretmanager", Secret: "my-secret"})
+	if err == nil {
+		t.Fatal("expected error for missing project field, got nil")
+	}
+}
+
+func TestResolveSourceGCPExtraneousFields(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  SourceConfig
+	}{
+		{"with var", SourceConfig{Type: "gcp-secretmanager", Secret: "s", Project: "p", Var: "extra"}},
+		{"with value", SourceConfig{Type: "gcp-secretmanager", Secret: "s", Project: "p", Value: "extra"}},
+		{"with region", SourceConfig{Type: "gcp-secretmanager", Secret: "s", Project: "p", Region: "extra"}},
+		{"with app_id", SourceConfig{Type: "gcp-secretmanager", Secret: "s", Project: "p", AppID: "extra"}},
+		{"with installation_id", SourceConfig{Type: "gcp-secretmanager", Secret: "s", Project: "p", InstallationID: "extra"}},
+		{"with private_key_path", SourceConfig{Type: "gcp-secretmanager", Secret: "s", Project: "p", PrivateKeyPath: "extra"}},
+		{"with private_key_env", SourceConfig{Type: "gcp-secretmanager", Secret: "s", Project: "p", PrivateKeyEnv: "extra"}},
+		{"with endpoint", SourceConfig{Type: "gcp-secretmanager", Secret: "s", Project: "p", Endpoint: "extra"}},
+		{"with client_id", SourceConfig{Type: "gcp-secretmanager", Secret: "s", Project: "p", ClientID: "extra"}},
+		{"with subject_from", SourceConfig{Type: "gcp-secretmanager", Secret: "s", Project: "p", SubjectFrom: "proxy-auth"}},
+		{"with actor_token_from", SourceConfig{Type: "gcp-secretmanager", Secret: "s", Project: "p", ActorTokenFrom: "proxy-auth-password"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ResolveSource(tt.cfg)
+			if err == nil {
+				t.Fatal("expected error for extraneous fields")
+			}
+		})
+	}
+}
+
 func TestResolveSourceExtraneousFields(t *testing.T) {
 	tests := []struct {
 		name string
@@ -84,12 +125,18 @@ func TestResolveSourceExtraneousFields(t *testing.T) {
 		{"env with value", SourceConfig{Type: "env", Var: "X", Value: "extra"}},
 		{"env with secret", SourceConfig{Type: "env", Var: "X", Secret: "extra"}},
 		{"env with app_id", SourceConfig{Type: "env", Var: "X", AppID: "extra"}},
+		{"env with project", SourceConfig{Type: "env", Var: "X", Project: "extra"}},
+		{"env with version", SourceConfig{Type: "env", Var: "X", Version: "extra"}},
 		{"static with var", SourceConfig{Type: "static", Value: "v", Var: "extra"}},
 		{"static with secret", SourceConfig{Type: "static", Value: "v", Secret: "extra"}},
 		{"static with app_id", SourceConfig{Type: "static", Value: "v", AppID: "extra"}},
+		{"static with project", SourceConfig{Type: "static", Value: "v", Project: "extra"}},
+		{"static with version", SourceConfig{Type: "static", Value: "v", Version: "extra"}},
 		{"aws with var", SourceConfig{Type: "aws-secretsmanager", Secret: "s", Var: "extra"}},
 		{"aws with value", SourceConfig{Type: "aws-secretsmanager", Secret: "s", Value: "extra"}},
 		{"aws with app_id", SourceConfig{Type: "aws-secretsmanager", Secret: "s", AppID: "extra"}},
+		{"aws with project", SourceConfig{Type: "aws-secretsmanager", Secret: "s", Project: "extra"}},
+		{"aws with version", SourceConfig{Type: "aws-secretsmanager", Secret: "s", Version: "extra"}},
 		{"env with subject_from", SourceConfig{Type: "env", Var: "X", SubjectFrom: "proxy-auth"}},
 		{"env with actor_token_from", SourceConfig{Type: "env", Var: "X", ActorTokenFrom: "proxy-auth-password"}},
 		{"env with actor_token_type", SourceConfig{Type: "env", Var: "X", ActorTokenType: "urn:ietf:params:oauth:token-type:jwt"}},
