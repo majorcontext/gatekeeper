@@ -1447,8 +1447,6 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	host := r.URL.Hostname()
 	creds, err := p.getCredentialsForRequest(r, r, host)
 	if err != nil {
-		slog.Warn("dynamic credential resolution failed",
-			"subsystem", "proxy", "host", host, "error", err)
 		http.Error(w, "credential resolution failed", http.StatusBadGateway)
 		p.logRequest(r, RequestLogData{
 			Method:       r.Method,
