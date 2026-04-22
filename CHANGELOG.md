@@ -4,6 +4,16 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.8.0 — 2026-04-22
+
+### Added
+
+- **GCP Secret Manager credential source** — new `gcp-secretmanager` source type fetches secrets from Google Cloud Secret Manager; requires `project` and `secret` fields; optional `version` field defaults to `"latest"`; authenticates via Application Default Credentials (ADC); uses the same testability pattern as the AWS source (interface-based client for mock injection) ([#20](https://github.com/majorcontext/gatekeeper/pull/20))
+
+### Changed
+
+- **`SourceConfig` struct** — added `Project` and `Version` fields for the GCP Secret Manager source; all existing source types reject these as extraneous fields ([#20](https://github.com/majorcontext/gatekeeper/pull/20))
+
 ## v0.7.0 — 2026-04-22
 
 v0.7 improves cross-service observability and eliminates redundant credential fetches.
