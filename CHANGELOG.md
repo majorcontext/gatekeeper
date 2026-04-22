@@ -4,6 +4,17 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.9.0 — 2026-04-22
+
+### Added
+
+- **WebSocket support through TLS interception** — WebSocket upgrades (101 Switching Protocols) now work through CONNECT+TLS intercepted connections; credentials are injected on the upgrade request, then the proxy switches to bidirectional byte tunneling for WebSocket frames ([#22](https://github.com/majorcontext/gatekeeper/pull/22))
+
+### Changed
+
+- **Refactored `handleConnectWithInterception`** — replaced the manual `http.ReadRequest` → `transport.RoundTrip` → `resp.Write` loop with `httputil.ReverseProxy` served via a single-connection `http.Server`; all existing behaviors (credential injection, network/Keep policy, LLM gateway policy, response transformers, canonical logging) are preserved through `Rewrite`, `ModifyResponse`, and `ErrorHandler` hooks ([#22](https://github.com/majorcontext/gatekeeper/pull/22))
+- **Extracted `evaluateAndReplaceLLMResponse`** — LLM gateway policy evaluation logic moved from inline in the request loop to a standalone method for readability ([#22](https://github.com/majorcontext/gatekeeper/pull/22))
+
 ## v0.8.0 — 2026-04-22
 
 ### Added

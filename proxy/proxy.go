@@ -29,7 +29,6 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/subtle"
@@ -38,13 +37,16 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	keeplib "github.com/majorcontext/keep"
@@ -1746,6 +1748,121 @@ func (p *Proxy) handleConnectTunnel(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
+// Context keys for passing data between ReverseProxy hooks in the interception path.
+type interceptCredResultKey struct{}
+type interceptCredsKey struct{}
+type interceptReqStartKey struct{}
+type interceptLogURLKey struct{}
+type interceptPreInjHeadersKey struct{}
+type interceptReqBodyKey struct{}
+
+func reqStartFromContext(ctx context.Context) time.Time {
+	if t, ok := ctx.Value(interceptReqStartKey{}).(time.Time); ok {
+		return t
+	}
+	return time.Now()
+}
+
+// singleConnListener wraps a single net.Conn as a net.Listener.
+// Accept returns the connection once, then blocks until Close is called.
+// This keeps http.Server.Serve alive for the lifetime of the connection.
+type singleConnListener struct {
+	conn    net.Conn
+	connCh  chan net.Conn
+	closeCh chan struct{}
+}
+
+func newSingleConnListener(conn net.Conn) *singleConnListener {
+	ch := make(chan net.Conn, 1)
+	ch <- conn
+	return &singleConnListener{conn: conn, connCh: ch, closeCh: make(chan struct{})}
+}
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-l.connCh:
+		return conn, nil
+	case <-l.closeCh:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *singleConnListener) Close() error {
+	select {
+	case <-l.closeCh:
+	default:
+		close(l.closeCh)
+	}
+	return nil
+}
+
+func (l *singleConnListener) Addr() net.Addr {
+	return l.conn.LocalAddr()
+}
+
+// evaluateAndReplaceLLMResponse evaluates LLM gateway policy and replaces
+// the response in-place if denied. Returns whether a denial occurred and the reason.
+func (p *Proxy) evaluateAndReplaceLLMResponse(ctxReq *http.Request, req *http.Request, resp *http.Response, eng *keeplib.Engine) (denied bool, reason string) {
+	respBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, maxLLMResponseSize+1))
+	resp.Body.Close()
+	if readErr != nil {
+		p.logPolicy(ctxReq, "llm-gateway", "llm.read_error", "read-error", "Failed to read response body for policy evaluation")
+		errorBody := buildPolicyDeniedResponse("read-error", "Failed to read response body for policy evaluation.")
+		resp.StatusCode = http.StatusBadRequest
+		resp.Header = make(http.Header)
+		resp.Header.Set("Content-Type", "application/json")
+		resp.Header.Set("X-Moat-Blocked", "llm-policy")
+		resp.ContentLength = int64(len(errorBody))
+		resp.Body = io.NopCloser(bytes.NewReader(errorBody))
+		return true, "LLM policy read error"
+	}
+	if int64(len(respBodyBytes)) > maxLLMResponseSize {
+		p.logPolicy(ctxReq, "llm-gateway", "llm.response_too_large", "size-limit", "Response too large for policy evaluation")
+		errorBody := buildPolicyDeniedResponse("size-limit", "Response too large for policy evaluation.")
+		resp.StatusCode = http.StatusBadRequest
+		resp.Header = make(http.Header)
+		resp.Header.Set("Content-Type", "application/json")
+		resp.Header.Set("X-Moat-Blocked", "llm-policy")
+		resp.ContentLength = int64(len(errorBody))
+		resp.Body = io.NopCloser(bytes.NewReader(errorBody))
+		return true, "LLM policy response too large"
+	}
+	result := evaluateLLMResponse(eng, respBodyBytes, resp)
+	if result.Denied {
+		p.logPolicy(ctxReq, "llm-gateway", "llm.tool_use", result.Rule, result.Message)
+		errorBody := buildPolicyDeniedResponse(result.Rule, result.Message)
+		resp.StatusCode = http.StatusBadRequest
+		resp.Header = make(http.Header)
+		resp.Header.Set("Content-Type", "application/json")
+		resp.Header.Set("X-Moat-Blocked", "llm-policy")
+		resp.ContentLength = int64(len(errorBody))
+		resp.Body = io.NopCloser(bytes.NewReader(errorBody))
+		return true, "LLM policy denied: " + result.Rule + " " + result.Message
+	} else if result.Events != nil {
+		var buf bytes.Buffer
+		for _, ev := range result.Events {
+			if ev.ID != "" {
+				fmt.Fprintf(&buf, "id: %s\n", ev.ID)
+			}
+			if ev.Type != "" {
+				fmt.Fprintf(&buf, "event: %s\n", ev.Type)
+			}
+			lines := strings.Split(ev.Data, "\n")
+			for _, line := range lines {
+				fmt.Fprintf(&buf, "data: %s\n", line)
+			}
+			buf.WriteByte('\n')
+		}
+		resp.Header.Del("Content-Encoding")
+		resp.Body = io.NopCloser(&buf)
+		resp.ContentLength = int64(buf.Len())
+	} else {
+		resp.Body = io.NopCloser(bytes.NewReader(respBodyBytes))
+		resp.ContentLength = int64(len(respBodyBytes))
+	}
+	return false, ""
+}
+
 func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Request, host string) {
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
@@ -1758,7 +1875,16 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer clientConn.Close()
+
+	// Track whether the inner http.Server's connection was hijacked
+	// (e.g., for WebSocket upgrade). If hijacked, ReverseProxy owns the
+	// TLS conn and will close it; we must not close clientConn ourselves.
+	var hijacked atomic.Bool
+	defer func() {
+		if !hijacked.Load() {
+			clientConn.Close()
+		}
+	}()
 
 	_, _ = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 
@@ -1779,7 +1905,11 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			"subsystem", "proxy", "host", host, "error", err)
 		return
 	}
-	defer tlsClientConn.Close()
+	defer func() {
+		if !hijacked.Load() {
+			tlsClientConn.Close()
+		}
+	}()
 
 	transport := &http.Transport{
 		Proxy: nil,
@@ -1809,38 +1939,175 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	clientReader := bufio.NewReader(tlsClientConn)
-	for {
-		req, err := http.ReadRequest(clientReader)
-		if err != nil {
-			if err != io.EOF {
-				slog.Debug("failed to read request from intercepted connection",
-					"subsystem", "proxy", "host", host, "error", err)
+	// Create a reverse proxy that handles request forwarding, including
+	// WebSocket upgrades via the stdlib's built-in protocol switch support.
+	reverseProxy := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.URL.Scheme = "https"
+			connectHost := r.Host
+			if rc := getRunContext(r); rc != nil && rc.HostGatewayIP != "" && isHostGateway(rc, host) {
+				connectHost = rewriteHostPort(r.Host, rc.HostGatewayIP)
 			}
-			return
-		}
+			pr.Out.URL.Host = connectHost
+			pr.Out.Host = pr.In.Host
+			pr.Out.RequestURI = ""
+
+			// Credentials were resolved in the wrapping handler and passed via context.
+			creds, _ := pr.Out.Context().Value(interceptCredsKey{}).([]credentialHeader)
+
+			// Snapshot headers before credential injection so logs don't
+			// contain raw credential values (CLAUDE.md: never log credential values).
+			preInjectionHeaders := pr.Out.Header.Clone()
+
+			credResult := injectCredentials(pr.Out, creds, host, pr.Out.Method, pr.Out.URL.Path)
+
+			// Store credential result and pre-injection headers in context.
+			ctx := pr.Out.Context()
+			ctx = context.WithValue(ctx, interceptCredResultKey{}, credResult)
+			ctx = context.WithValue(ctx, interceptPreInjHeadersKey{}, preInjectionHeaders)
+			*pr.Out = *pr.Out.WithContext(ctx)
+
+			// Extra headers.
+			mergeExtraHeaders(pr.Out, r.Host, p.getExtraHeadersForRequest(r, r.Host))
+
+			// Strip proxy headers.
+			pr.Out.Header.Del("Proxy-Connection")
+			pr.Out.Header.Del("Proxy-Authorization")
+
+			// Remove configured headers (but not injected credential headers).
+			for _, headerName := range p.getRemoveHeadersForRequest(r, host) {
+				if credResult.InjectedHeaders[strings.ToLower(headerName)] {
+					continue
+				}
+				pr.Out.Header.Del(headerName)
+			}
+
+			// Capture URL before token substitution so logs don't contain real tokens.
+			logURL := pr.Out.URL.String()
+			ctx = context.WithValue(pr.Out.Context(), interceptLogURLKey{}, logURL)
+			*pr.Out = *pr.Out.WithContext(ctx)
+
+			// Token substitution.
+			if sub := p.getTokenSubstitutionForRequest(r, host); sub != nil {
+				p.applyTokenSubstitution(pr.Out, sub)
+			}
+
+			// Request ID.
+			if pr.Out.Header.Get("X-Request-Id") == "" {
+				pr.Out.Header.Set("X-Request-Id", newRequestID())
+			}
+		},
+		Transport: transport,
+		ModifyResponse: func(resp *http.Response) error {
+			req := resp.Request
+
+			// Track LLM policy denials for the canonical log line.
+			var llmDenied bool
+			var llmDenyReason string
+
+			// LLM gateway policy evaluation (Anthropic API only).
+			if resp.StatusCode == http.StatusOK && host == "api.anthropic.com" {
+				if rc := getRunContext(r); rc != nil && rc.KeepEngines != nil {
+					if eng, ok := rc.KeepEngines["llm-gateway"]; ok {
+						llmDenied, llmDenyReason = p.evaluateAndReplaceLLMResponse(r, req, resp, eng)
+					}
+				}
+			}
+
+			// Response transformers.
+			if transformers := p.getResponseTransformersForRequest(r, host); len(transformers) > 0 {
+				for _, transformer := range transformers {
+					if newRespInterface, transformed := transformer(req, resp); transformed {
+						if newResp, ok := newRespInterface.(*http.Response); ok {
+							*resp = *newResp
+						}
+						break
+					}
+				}
+			}
+
+			// Canonical log line.
+			credResult, _ := req.Context().Value(interceptCredResultKey{}).(credentialInjectionResult)
+			// Use pre-substitution URL so logs don't contain real tokens.
+			logURL, _ := req.Context().Value(interceptLogURLKey{}).(string)
+			if logURL == "" {
+				logURL = req.URL.String()
+			}
+			var respBody []byte
+			respBody, resp.Body = captureBody(resp.Body, resp.Header.Get("Content-Type"))
+
+			// Use pre-injection headers so credential values don't appear in logs.
+			preHeaders, _ := req.Context().Value(interceptPreInjHeadersKey{}).(http.Header)
+			if preHeaders == nil {
+				preHeaders = req.Header.Clone()
+			}
+			reqBody, _ := req.Context().Value(interceptReqBodyKey{}).([]byte)
+
+			p.logRequest(r, RequestLogData{
+				RequestID:       req.Header.Get("X-Request-Id"),
+				Method:          req.Method,
+				URL:             logURL,
+				Host:            host,
+				Path:            req.URL.Path,
+				RequestType:     "connect",
+				StatusCode:      resp.StatusCode,
+				Duration:        time.Since(reqStartFromContext(req.Context())),
+				RequestHeaders:  preHeaders,
+				ResponseHeaders: resp.Header.Clone(),
+				RequestBody:     reqBody,
+				ResponseBody:    respBody,
+				RequestSize:     req.ContentLength,
+				ResponseSize:    resp.ContentLength,
+				AuthInjected:    len(credResult.InjectedHeaders) > 0,
+				InjectedHeaders: credResult.InjectedHeaders,
+				Grants:          credResult.Grants,
+				Denied:          llmDenied,
+				DenyReason:      llmDenyReason,
+			})
+
+			return nil
+		},
+		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
+			rw.WriteHeader(http.StatusBadGateway)
+			credResult, _ := req.Context().Value(interceptCredResultKey{}).(credentialInjectionResult)
+			logURL, _ := req.Context().Value(interceptLogURLKey{}).(string)
+			if logURL == "" {
+				logURL = req.URL.String()
+			}
+			p.logRequest(r, RequestLogData{
+				RequestID:       req.Header.Get("X-Request-Id"),
+				Method:          req.Method,
+				URL:             logURL,
+				Host:            host,
+				Path:            req.URL.Path,
+				RequestType:     "connect",
+				StatusCode:      http.StatusBadGateway,
+				Duration:        time.Since(reqStartFromContext(req.Context())),
+				RequestSize:     req.ContentLength,
+				ResponseSize:    -1,
+				Err:             err,
+				AuthInjected:    len(credResult.InjectedHeaders) > 0,
+				InjectedHeaders: credResult.InjectedHeaders,
+				Grants:          credResult.Grants,
+			})
+		},
+	}
+
+	// Wrapping handler: policy checks and credential resolution before ReverseProxy.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		reqStart := time.Now()
 
 		innerReqID := req.Header.Get("X-Request-Id")
 		if innerReqID == "" {
 			innerReqID = newRequestID()
 		}
-		reqStart := time.Now()
-		req.URL.Scheme = "https"
-		// Rewrite synthetic host-gateway hostname to actual IP for forwarding.
-		connectHost := r.Host
-		if rc := getRunContext(r); rc != nil && rc.HostGatewayIP != "" && isHostGateway(rc, host) {
-			connectHost = rewriteHostPort(r.Host, rc.HostGatewayIP)
-		}
-		req.URL.Host = connectHost
-		req.RequestURI = ""
 
-		// Check request-level rules (method + path) for the inner HTTP request.
-		// The CONNECT request r carries the per-run context for rule lookup.
+		// Network policy check.
 		if !p.checkNetworkPolicyForRequest(r, host, connectPort, req.Method, req.URL.Path) {
 			p.logRequest(r, RequestLogData{
 				RequestID:    innerReqID,
 				Method:       req.Method,
-				URL:          req.URL.String(),
+				URL:          "https://" + r.Host + req.URL.RequestURI(),
 				Host:         host,
 				Path:         req.URL.Path,
 				RequestType:  "connect",
@@ -1852,34 +2119,24 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				DenyReason:   "Request blocked by network policy: " + req.Method + " " + host + req.URL.Path,
 			})
 			p.logPolicy(r, "network", "http.request", "", req.Method+" "+host+req.URL.Path)
-			body := "Moat: request blocked by network policy.\nHost: " + host + "\nTo allow this request, update network.rules in moat.yaml.\n"
-			blockedResp := &http.Response{
-				StatusCode:    http.StatusProxyAuthRequired,
-				ProtoMajor:    1,
-				ProtoMinor:    1,
-				Header:        make(http.Header),
-				ContentLength: int64(len(body)),
-				Body:          io.NopCloser(strings.NewReader(body)),
-			}
-			blockedResp.Header.Set("X-Moat-Blocked", "request-rule")
-			blockedResp.Header.Set("Content-Type", "text/plain")
-			_ = blockedResp.Write(tlsClientConn)
-			continue
+			w.Header().Set("X-Moat-Blocked", "request-rule")
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusProxyAuthRequired)
+			fmt.Fprintf(w, "Moat: request blocked by network policy.\nHost: %s\nTo allow this request, update network.rules in moat.yaml.\n", host)
+			return
 		}
 
-		// Evaluate Keep policy for the inner HTTP request.
-		// Uses the global "http" engine from network.keep_policy.
+		// Keep HTTP policy check.
 		if rc := getRunContext(r); rc != nil && rc.KeepEngines != nil {
-			scope := "http"
-			if eng, ok := rc.KeepEngines[scope]; ok {
+			if eng, ok := rc.KeepEngines["http"]; ok {
 				call := keeplib.NewHTTPCall(req.Method, host, req.URL.Path)
 				call.Context.Scope = "http-" + host
-				result, evalErr := keeplib.SafeEvaluate(eng, call, scope)
+				result, evalErr := keeplib.SafeEvaluate(eng, call, "http")
 				if evalErr != nil {
 					p.logRequest(r, RequestLogData{
 						RequestID:    innerReqID,
 						Method:       req.Method,
-						URL:          req.URL.String(),
+						URL:          "https://" + r.Host + req.URL.RequestURI(),
 						Host:         host,
 						Path:         req.URL.Path,
 						RequestType:  "connect",
@@ -1891,25 +2148,18 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 						DenyReason:   "Keep policy evaluation error",
 						Err:          evalErr,
 					})
-					p.logPolicy(r, scope, "http.request", "evaluation-error", "Policy evaluation failed")
-					msg := "Moat: request blocked — policy evaluation error.\nHost: " + host + "\n"
-					blockedResp := &http.Response{
-						StatusCode:    http.StatusForbidden,
-						ProtoMajor:    1,
-						ProtoMinor:    1,
-						Header:        make(http.Header),
-						ContentLength: int64(len(msg)),
-						Body:          io.NopCloser(strings.NewReader(msg)),
-					}
-					blockedResp.Header.Set("X-Moat-Blocked", "keep-policy")
-					blockedResp.Header.Set("Content-Type", "text/plain")
-					_ = blockedResp.Write(tlsClientConn)
-					continue
-				} else if result.Decision == keeplib.Deny {
+					p.logPolicy(r, "http", "http.request", "evaluation-error", "Policy evaluation failed")
+					w.Header().Set("X-Moat-Blocked", "keep-policy")
+					w.Header().Set("Content-Type", "text/plain")
+					w.WriteHeader(http.StatusForbidden)
+					fmt.Fprintf(w, "Moat: request blocked — policy evaluation error.\nHost: %s\n", host)
+					return
+				}
+				if result.Decision == keeplib.Deny {
 					p.logRequest(r, RequestLogData{
 						RequestID:    innerReqID,
 						Method:       req.Method,
-						URL:          req.URL.String(),
+						URL:          "https://" + r.Host + req.URL.RequestURI(),
 						Host:         host,
 						Path:         req.URL.Path,
 						RequestType:  "connect",
@@ -1920,49 +2170,33 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 						Denied:       true,
 						DenyReason:   "Keep policy denied: " + result.Rule + " " + result.Message,
 					})
-					p.logPolicy(r, scope, "http.request", result.Rule, result.Message)
-					msg := "Moat: request blocked by Keep policy.\nHost: " + host + "\n"
+					p.logPolicy(r, "http", "http.request", result.Rule, result.Message)
+					w.Header().Set("X-Moat-Blocked", "keep-policy")
+					w.Header().Set("Content-Type", "text/plain")
+					w.WriteHeader(http.StatusForbidden)
+					msg := fmt.Sprintf("Moat: request blocked by Keep policy.\nHost: %s\n", host)
 					if result.Message != "" {
 						msg += result.Message + "\n"
 					}
-					blockedResp := &http.Response{
-						StatusCode:    http.StatusForbidden,
-						ProtoMajor:    1,
-						ProtoMinor:    1,
-						Header:        make(http.Header),
-						ContentLength: int64(len(msg)),
-						Body:          io.NopCloser(strings.NewReader(msg)),
-					}
-					blockedResp.Header.Set("X-Moat-Blocked", "keep-policy")
-					blockedResp.Header.Set("Content-Type", "text/plain")
-					_ = blockedResp.Write(tlsClientConn)
-					continue
+					fmt.Fprint(w, msg)
+					return
 				}
 			}
 		}
 
-		// Inject MCP credentials if this is an MCP request.
-		// Use the CONNECT request r for context lookups since inner
-		// requests from the TLS stream don't carry the request context.
+		// MCP credential injection.
 		p.injectMCPCredentialsWithContext(r, req)
 
+		// Resolve credentials before forwarding so errors are caught early.
 		creds, credErr := p.getCredentialsForRequest(r, req, host)
 		if credErr != nil {
-			body := "credential resolution failed\n"
-			errResp := &http.Response{
-				StatusCode:    http.StatusBadGateway,
-				ProtoMajor:    1,
-				ProtoMinor:    1,
-				Header:        make(http.Header),
-				ContentLength: int64(len(body)),
-				Body:          io.NopCloser(strings.NewReader(body)),
-			}
-			errResp.Header.Set("Content-Type", "text/plain")
-			_ = errResp.Write(tlsClientConn)
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusBadGateway)
+			fmt.Fprint(w, "credential resolution failed\n")
 			p.logRequest(r, RequestLogData{
 				RequestID:    innerReqID,
 				Method:       req.Method,
-				URL:          req.URL.String(),
+				URL:          "https://" + r.Host + req.URL.RequestURI(),
 				Host:         host,
 				Path:         req.URL.Path,
 				RequestType:  "connect",
@@ -1972,207 +2206,38 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				ResponseSize: -1,
 				Err:          credErr,
 			})
-			continue
-		}
-
-		// Capture request body and headers after credential resolution
-		// so that resolver side effects (e.g., subject header stripping)
-		// are reflected and sensitive headers are not logged.
-		var reqBody []byte
-		reqBody, req.Body = captureBody(req.Body, req.Header.Get("Content-Type"))
-		originalReqHeaders := req.Header.Clone()
-
-		credResult := injectCredentials(req, creds, host, req.Method, req.URL.Path)
-
-		// Inject any additional headers configured for this host.
-		// Merges with existing values (comma-separated) to preserve client
-		// headers like anthropic-beta that support multiple flags.
-		mergeExtraHeaders(req, r.Host, p.getExtraHeadersForRequest(r, r.Host))
-		req.Header.Del("Proxy-Connection")
-		req.Header.Del("Proxy-Authorization")
-
-		// Remove headers that should be stripped for this host, but never
-		// remove a credential header the proxy just injected (see comment
-		// in handleHTTP for the multi-grant conflict scenario).
-		for _, headerName := range p.getRemoveHeadersForRequest(r, host) {
-			if credResult.InjectedHeaders[strings.ToLower(headerName)] {
-				continue
-			}
-			req.Header.Del(headerName)
-		}
-		// Apply token substitution if configured for this host.
-		// Capture the URL before substitution so logs don't contain real tokens.
-		logURL := req.URL.String()
-		if sub := p.getTokenSubstitutionForRequest(r, host); sub != nil {
-			p.applyTokenSubstitution(req, sub)
-		}
-
-		if req.Header.Get("X-Request-Id") == "" {
-			req.Header.Set("X-Request-Id", innerReqID)
-		}
-
-		resp, err := transport.RoundTrip(req)
-
-		// Track LLM policy denials for the canonical log line.
-		var llmDenied bool
-		var llmDenyReason string
-
-		// Evaluate LLM gateway policy on Anthropic API responses.
-		// NOTE: Only applies to the default Anthropic endpoint. Custom
-		// ANTHROPIC_BASE_URL endpoints bypass policy evaluation — this is
-		// mutually exclusive with llm-gateway (see config validation).
-		if resp != nil && resp.StatusCode == http.StatusOK && host == "api.anthropic.com" {
-			if rc := getRunContext(r); rc != nil && rc.KeepEngines != nil {
-				if eng, ok := rc.KeepEngines["llm-gateway"]; ok {
-					respBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, maxLLMResponseSize+1))
-					resp.Body.Close()
-					if readErr != nil {
-						p.logPolicy(r, "llm-gateway", "llm.read_error", "read-error", "Failed to read response body for policy evaluation")
-						llmDenied = true
-						llmDenyReason = "LLM policy read error"
-						errorBody := buildPolicyDeniedResponse("read-error", "Failed to read response body for policy evaluation.")
-						resp = &http.Response{
-							StatusCode:    http.StatusBadRequest,
-							ProtoMajor:    1,
-							ProtoMinor:    1,
-							Header:        make(http.Header),
-							ContentLength: int64(len(errorBody)),
-							Body:          io.NopCloser(bytes.NewReader(errorBody)),
-						}
-						resp.Header.Set("Content-Type", "application/json")
-						resp.Header.Set("X-Moat-Blocked", "llm-policy")
-					} else if int64(len(respBodyBytes)) > maxLLMResponseSize {
-						p.logPolicy(r, "llm-gateway", "llm.response_too_large", "size-limit", "Response too large for policy evaluation")
-						llmDenied = true
-						llmDenyReason = "LLM policy response too large"
-						errorBody := buildPolicyDeniedResponse("size-limit", "Response too large for policy evaluation.")
-						resp = &http.Response{
-							StatusCode:    http.StatusBadRequest,
-							ProtoMajor:    1,
-							ProtoMinor:    1,
-							Header:        make(http.Header),
-							ContentLength: int64(len(errorBody)),
-							Body:          io.NopCloser(bytes.NewReader(errorBody)),
-						}
-						resp.Header.Set("Content-Type", "application/json")
-						resp.Header.Set("X-Moat-Blocked", "llm-policy")
-					} else {
-						result := evaluateLLMResponse(eng, respBodyBytes, resp)
-						if result.Denied {
-							p.logPolicy(r, "llm-gateway", "llm.tool_use", result.Rule, result.Message)
-							llmDenied = true
-							llmDenyReason = "LLM policy denied: " + result.Rule + " " + result.Message
-							errorBody := buildPolicyDeniedResponse(result.Rule, result.Message)
-							resp = &http.Response{
-								StatusCode:    http.StatusBadRequest,
-								ProtoMajor:    1,
-								ProtoMinor:    1,
-								Header:        make(http.Header),
-								ContentLength: int64(len(errorBody)),
-								Body:          io.NopCloser(bytes.NewReader(errorBody)),
-							}
-							resp.Header.Set("Content-Type", "application/json")
-							resp.Header.Set("X-Moat-Blocked", "llm-policy")
-						} else if result.Events != nil {
-							// SSE response allowed — re-serialize evaluated events.
-							// Events were decompressed for evaluation, so the
-							// re-serialized body is plaintext — remove Content-Encoding.
-							var buf bytes.Buffer
-							for _, ev := range result.Events {
-								if ev.ID != "" {
-									fmt.Fprintf(&buf, "id: %s\n", ev.ID)
-								}
-								if ev.Type != "" {
-									fmt.Fprintf(&buf, "event: %s\n", ev.Type)
-								}
-								// Per SSE spec, multi-line data needs a `data:` prefix per line.
-								lines := strings.Split(ev.Data, "\n")
-								for _, line := range lines {
-									fmt.Fprintf(&buf, "data: %s\n", line)
-								}
-								buf.WriteByte('\n') // Event terminator.
-							}
-							resp.Header.Del("Content-Encoding")
-							resp.Body = io.NopCloser(&buf)
-							resp.ContentLength = int64(buf.Len())
-						} else {
-							// JSON response allowed — restore original body.
-							resp.Body = io.NopCloser(bytes.NewReader(respBodyBytes))
-							resp.ContentLength = int64(len(respBodyBytes))
-						}
-					}
-				}
-			}
-		}
-
-		// Capture response
-		var respBody []byte
-		var respHeaders http.Header
-		statusCode := http.StatusBadGateway
-		var responseSize int64 = -1
-		if resp != nil {
-			respHeaders = resp.Header.Clone()
-			statusCode = resp.StatusCode
-			responseSize = resp.ContentLength
-
-			// Apply response transformers BEFORE capturing body
-			// so transformer can read the original response body.
-			// Only the first transformer that returns true is applied (transformers are not chained).
-			if transformers := p.getResponseTransformersForRequest(r, host); len(transformers) > 0 {
-				for _, transformer := range transformers {
-					if newRespInterface, transformed := transformer(req, resp); transformed {
-						if newResp, ok := newRespInterface.(*http.Response); ok {
-							resp = newResp
-							statusCode = resp.StatusCode
-							respHeaders = resp.Header.Clone()
-						}
-						break // Only apply first matching transformer
-					}
-				}
-			}
-
-			// Capture body AFTER transformation
-			respBody, resp.Body = captureBody(resp.Body, resp.Header.Get("Content-Type"))
-		}
-
-		p.logRequest(r, RequestLogData{
-			RequestID:       innerReqID,
-			Method:          req.Method,
-			URL:             logURL,
-			Host:            host,
-			Path:            req.URL.Path,
-			RequestType:     "connect",
-			StatusCode:      statusCode,
-			Duration:        time.Since(reqStart),
-			Err:             err,
-			RequestHeaders:  originalReqHeaders,
-			ResponseHeaders: respHeaders,
-			RequestBody:     reqBody,
-			ResponseBody:    respBody,
-			RequestSize:     req.ContentLength,
-			ResponseSize:    responseSize,
-			InjectedHeaders: credResult.InjectedHeaders,
-			Grants:          credResult.Grants,
-			Denied:          llmDenied,
-			DenyReason:      llmDenyReason,
-		})
-
-		if err != nil {
-			errResp := &http.Response{
-				StatusCode: http.StatusBadGateway,
-				ProtoMajor: 1,
-				ProtoMinor: 1,
-				Header:     make(http.Header),
-			}
-			_ = errResp.Write(tlsClientConn)
-			continue
-		}
-
-		_ = resp.Write(tlsClientConn)
-		resp.Body.Close()
-
-		if resp.Close || req.Close {
 			return
 		}
+
+		// Capture request body for logging before ReverseProxy consumes it.
+		var reqBody []byte
+		reqBody, req.Body = captureBody(req.Body, req.Header.Get("Content-Type"))
+
+		// Propagate request ID so Rewrite preserves it (instead of generating a new one).
+		req.Header.Set("X-Request-Id", innerReqID)
+
+		// Pass resolved credentials, start time, and captured body to Rewrite via context.
+		ctx := req.Context()
+		ctx = context.WithValue(ctx, interceptReqStartKey{}, reqStart)
+		ctx = context.WithValue(ctx, interceptCredsKey{}, creds)
+		ctx = context.WithValue(ctx, interceptReqBodyKey{}, reqBody)
+		reverseProxy.ServeHTTP(w, req.WithContext(ctx))
+	})
+
+	// Serve on a single-connection listener wrapping the TLS connection.
+	ln := newSingleConnListener(tlsClientConn)
+	srv := &http.Server{
+		Handler:     handler,
+		IdleTimeout: 120 * time.Second,
+		ErrorLog:    log.New(io.Discard, "", 0), // Suppress server-level errors; handled in ErrorHandler.
+		ConnState: func(conn net.Conn, state http.ConnState) {
+			if state == http.StateHijacked {
+				hijacked.Store(true)
+			}
+			if state == http.StateClosed || state == http.StateHijacked {
+				ln.Close()
+			}
+		},
 	}
+	_ = srv.Serve(ln)
 }
