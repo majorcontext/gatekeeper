@@ -1848,6 +1848,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			return
 		}
 
+		innerReqID := newRequestID()
 		reqStart := time.Now()
 		req.URL.Scheme = "https"
 		// Rewrite synthetic host-gateway hostname to actual IP for forwarding.
@@ -1862,6 +1863,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		// The CONNECT request r carries the per-run context for rule lookup.
 		if !p.checkNetworkPolicyForRequest(r, host, connectPort, req.Method, req.URL.Path) {
 			p.logRequest(r, RequestLogData{
+				RequestID:    innerReqID,
 				Method:       req.Method,
 				URL:          req.URL.String(),
 				Host:         host,
@@ -1905,6 +1907,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 						"path", req.URL.Path,
 						"error", evalErr)
 					p.logRequest(r, RequestLogData{
+						RequestID:    innerReqID,
 						Method:       req.Method,
 						URL:          req.URL.String(),
 						Host:         host,
@@ -1933,6 +1936,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 					continue
 				} else if result.Decision == keeplib.Deny {
 					p.logRequest(r, RequestLogData{
+						RequestID:    innerReqID,
 						Method:       req.Method,
 						URL:          req.URL.String(),
 						Host:         host,
@@ -1987,6 +1991,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			errResp.Header.Set("Content-Type", "text/plain")
 			_ = errResp.Write(tlsClientConn)
 			p.logRequest(r, RequestLogData{
+				RequestID:    innerReqID,
 				Method:       req.Method,
 				URL:          req.URL.String(),
 				Host:         host,
@@ -2165,6 +2170,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		}
 
 		p.logRequest(r, RequestLogData{
+			RequestID:       innerReqID,
 			Method:          req.Method,
 			URL:             logURL,
 			Host:            host,
