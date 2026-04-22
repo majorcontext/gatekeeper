@@ -217,6 +217,7 @@ func New(ctx context.Context, cfg *Config) (*Server, error) {
 	p.SetLogger(func(data proxy.RequestLogData) {
 		durationMS := float64(data.Duration.Nanoseconds()) / 1e6
 		attrs := []slog.Attr{
+			slog.String("request_id", data.RequestID),
 			slog.String("http_method", data.Method),
 			slog.String("http_host", data.Host),
 			slog.String("http_path", data.Path),
@@ -236,7 +237,9 @@ func New(ctx context.Context, cfg *Config) (*Server, error) {
 			slices.Sort(headerNames)
 			attrs = append(attrs, slog.String("injected_headers", strings.Join(headerNames, ",")))
 			if len(data.Grants) > 0 {
-				attrs = append(attrs, slog.String("grants", strings.Join(data.Grants, ",")))
+				sortedGrants := slices.Clone(data.Grants)
+				slices.Sort(sortedGrants)
+				attrs = append(attrs, slog.String("grants", strings.Join(sortedGrants, ",")))
 			}
 		}
 		if data.Denied {
@@ -275,6 +278,7 @@ func New(ctx context.Context, cfg *Config) (*Server, error) {
 			span := trace.SpanFromContext(data.Ctx)
 			if span.SpanContext().IsValid() {
 				spanAttrs := []attribute.KeyValue{
+					attribute.String("request_id", data.RequestID),
 					attribute.Float64("duration_ms", durationMS),
 					attribute.Bool("credential_injected", data.AuthInjected),
 					attribute.String("proxy.request.type", data.RequestType),
@@ -292,7 +296,9 @@ func New(ctx context.Context, cfg *Config) (*Server, error) {
 					spanAttrs = append(spanAttrs, attribute.StringSlice("injected_headers", headerNames))
 				}
 				if len(data.Grants) > 0 {
-					spanAttrs = append(spanAttrs, attribute.StringSlice("grants", data.Grants))
+					sortedGrants := slices.Clone(data.Grants)
+					slices.Sort(sortedGrants)
+					spanAttrs = append(spanAttrs, attribute.StringSlice("grants", sortedGrants))
 				}
 				if data.Denied {
 					spanAttrs = append(spanAttrs, attribute.Bool("denied", true))

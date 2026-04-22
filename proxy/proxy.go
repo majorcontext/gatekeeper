@@ -48,12 +48,38 @@ import (
 	"time"
 
 	keeplib "github.com/majorcontext/keep"
+	"go.jetify.com/typeid"
 )
 
 // contextKey is the type for request-scoped context values.
 type contextKey int
 
-const runContextKey contextKey = iota
+const (
+	runContextKey contextKey = iota
+	requestIDKey
+)
+
+// newRequestID generates a TypeID with prefix "req" (e.g., "req_01h455vb4pex5vsknk084sn02q").
+func newRequestID() string {
+	tid, err := typeid.WithPrefix("req")
+	if err != nil {
+		return "req_unknown"
+	}
+	return tid.String()
+}
+
+// withRequestID returns a new context with the given request ID.
+func withRequestID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, requestIDKey, id)
+}
+
+// RequestIDFromContext extracts the request ID from a context, or empty string.
+func RequestIDFromContext(ctx context.Context) string {
+	if id, ok := ctx.Value(requestIDKey).(string); ok {
+		return id
+	}
+	return ""
+}
 
 // ResponseTransformer transforms HTTP responses before body capture.
 // Cast to *http.Request and *http.Response in the transformer implementation.
@@ -109,6 +135,7 @@ const MaxBodySize = 8 * 1024
 // RequestLogData contains all data for a logged request.
 // Designed for canonical log lines: one wide structured entry per request.
 type RequestLogData struct {
+	RequestID       string // Unique request identifier (from X-Request-Id or generated)
 	Method          string
 	URL             string
 	Host            string // Target hostname (extracted from URL or CONNECT)
@@ -245,6 +272,9 @@ func (p *Proxy) logRequest(ctxReq *http.Request, data RequestLogData) {
 			data.RunID = rc.RunID
 		}
 		data.Ctx = ctxReq.Context()
+		if data.RequestID == "" {
+			data.RequestID = RequestIDFromContext(ctxReq.Context())
+		}
 	}
 	data.AuthInjected = len(data.InjectedHeaders) > 0
 	p.logger(data)
@@ -1233,6 +1263,14 @@ func (p *Proxy) handleDirectAWSCredentials(w http.ResponseWriter, r *http.Reques
 
 // ServeHTTP handles proxy requests.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Assign a request ID: use X-Request-Id from the caller if present, otherwise generate one.
+	reqID := r.Header.Get("X-Request-Id")
+	if reqID == "" {
+		reqID = newRequestID()
+	}
+	r = r.WithContext(withRequestID(r.Context(), reqID))
+	w.Header().Set("X-Request-Id", reqID)
+
 	// Relay endpoints are accessed directly (via NO_PROXY bypass), not through
 	// the proxy mechanism, so they appear as direct HTTP requests (r.URL.Host is
 	// empty). We check r.URL.Host == "" to distinguish direct requests from

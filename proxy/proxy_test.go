@@ -929,6 +929,125 @@ func TestProxy_CanonicalLogLine_NoCredentials(t *testing.T) {
 	}
 }
 
+func TestProxy_RequestID_Generated(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+
+	var logged RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		logged = data
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+		},
+	}
+
+	resp, err := client.Get(backend.URL + "/test")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if logged.RequestID == "" {
+		t.Fatal("RequestID should be generated when X-Request-Id is not set")
+	}
+	if !strings.HasPrefix(logged.RequestID, "req_") {
+		t.Errorf("RequestID = %q, want prefix req_", logged.RequestID)
+	}
+	if respID := resp.Header.Get("X-Request-Id"); respID != logged.RequestID {
+		t.Errorf("response X-Request-Id = %q, want %q", respID, logged.RequestID)
+	}
+}
+
+func TestProxy_RequestID_FromHeader(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+
+	var logged RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		logged = data
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+		},
+	}
+
+	req, _ := http.NewRequest("GET", backend.URL+"/test", nil)
+	req.Header.Set("X-Request-Id", "req_caller-provided-id")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if logged.RequestID != "req_caller-provided-id" {
+		t.Errorf("RequestID = %q, want %q", logged.RequestID, "req_caller-provided-id")
+	}
+	if respID := resp.Header.Get("X-Request-Id"); respID != "req_caller-provided-id" {
+		t.Errorf("response X-Request-Id = %q, want %q", respID, "req_caller-provided-id")
+	}
+}
+
+func TestProxy_RequestID_Unique(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+
+	var ids []string
+	var mu sync.Mutex
+	p.SetLogger(func(data RequestLogData) {
+		mu.Lock()
+		ids = append(ids, data.RequestID)
+		mu.Unlock()
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+		},
+	}
+
+	for i := 0; i < 10; i++ {
+		resp, err := client.Get(backend.URL + "/test")
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		resp.Body.Close()
+	}
+
+	seen := make(map[string]bool)
+	for _, id := range ids {
+		if seen[id] {
+			t.Errorf("duplicate RequestID: %s", id)
+		}
+		seen[id] = true
+	}
+}
+
 func mustParseURL(s string) *url.URL {
 	u, err := url.Parse(s)
 	if err != nil {
