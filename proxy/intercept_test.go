@@ -129,6 +129,10 @@ func TestIntercept_CredentialInjectionCanonicalLog(t *testing.T) {
 	if logged.RequestID == "" {
 		t.Error("expected non-empty RequestID")
 	}
+	// Verify credential value is NOT present in logged request headers.
+	if v := logged.RequestHeaders.Get("Authorization"); v != "" {
+		t.Errorf("logged RequestHeaders contains injected Authorization %q; credential values must not appear in logs", v)
+	}
 }
 
 func TestIntercept_MultiRequestKeepalive(t *testing.T) {

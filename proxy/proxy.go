@@ -2192,15 +2192,17 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			w.WriteHeader(http.StatusBadGateway)
 			fmt.Fprint(w, "credential resolution failed\n")
 			p.logRequest(r, RequestLogData{
-				RequestID:   innerReqID,
-				Method:      req.Method,
-				URL:         "https://" + r.Host + req.URL.RequestURI(),
-				Host:        host,
-				Path:        req.URL.Path,
-				RequestType: "connect",
-				StatusCode:  http.StatusBadGateway,
-				Duration:    time.Since(reqStart),
-				Err:         credErr,
+				RequestID:    innerReqID,
+				Method:       req.Method,
+				URL:          "https://" + r.Host + req.URL.RequestURI(),
+				Host:         host,
+				Path:         req.URL.Path,
+				RequestType:  "connect",
+				StatusCode:   http.StatusBadGateway,
+				Duration:     time.Since(reqStart),
+				RequestSize:  req.ContentLength,
+				ResponseSize: -1,
+				Err:          credErr,
 			})
 			return
 		}
