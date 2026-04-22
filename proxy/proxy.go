@@ -1435,6 +1435,18 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("dynamic credential resolution failed",
 			"subsystem", "proxy", "host", host, "error", err)
 		http.Error(w, "credential resolution failed", http.StatusBadGateway)
+		p.logRequest(r, RequestLogData{
+			Method:       r.Method,
+			URL:          r.URL.String(),
+			Host:         host,
+			Path:         r.URL.Path,
+			RequestType:  "http",
+			StatusCode:   http.StatusBadGateway,
+			Duration:     time.Since(start),
+			RequestSize:  r.ContentLength,
+			ResponseSize: -1,
+			Err:          err,
+		})
 		return
 	}
 
@@ -1983,9 +1995,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			p.applyTokenSubstitution(req, sub)
 		}
 
-		start := time.Now()
 		resp, err := transport.RoundTrip(req)
-		duration := time.Since(start)
 
 		// Track LLM policy denials for the canonical log line.
 		var llmDenied bool
@@ -2123,7 +2133,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			Path:            req.URL.Path,
 			RequestType:     "connect",
 			StatusCode:      statusCode,
-			Duration:        duration,
+			Duration:        time.Since(reqStart),
 			Err:             err,
 			RequestHeaders:  originalReqHeaders,
 			ResponseHeaders: respHeaders,
