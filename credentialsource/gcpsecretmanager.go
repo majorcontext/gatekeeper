@@ -3,6 +3,8 @@ package credentialsource
 import (
 	"context"
 	"fmt"
+	"io"
+	"time"
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
@@ -19,6 +21,7 @@ type gcpSMSource struct {
 }
 
 // NewGCPSecretManagerSource creates a CredentialSource backed by GCP Secret Manager.
+// The returned source implements io.Closer to release the underlying gRPC connection.
 func NewGCPSecretManagerSource(project, secret, version string) (CredentialSource, error) {
 	client, err := newRealGCPSMClient()
 	if err != nil {
@@ -41,17 +44,31 @@ func (s *gcpSMSource) Fetch(ctx context.Context) (string, error) {
 
 func (s *gcpSMSource) Type() string { return "gcp-secretmanager" }
 
+// Close releases the underlying client connection if it implements io.Closer.
+func (s *gcpSMSource) Close() error {
+	if c, ok := s.client.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
+}
+
 // realGCPSMClient wraps the GCP Secret Manager client.
 type realGCPSMClient struct {
 	client *secretmanager.Client
 }
 
 func newRealGCPSMClient() (*realGCPSMClient, error) {
-	client, err := secretmanager.NewClient(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, err := secretmanager.NewClient(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return &realGCPSMClient{client: client}, nil
+}
+
+func (c *realGCPSMClient) Close() error {
+	return c.client.Close()
 }
 
 func (c *realGCPSMClient) AccessSecretVersion(ctx context.Context, resourceName string) (string, error) {

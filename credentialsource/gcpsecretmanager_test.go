@@ -67,3 +67,36 @@ func TestGCPSecretManagerSourceDefaultVersion(t *testing.T) {
 		t.Fatalf("resourceName = %q, want %q (empty version should default to latest)", client.lastResource, wantResource)
 	}
 }
+
+func TestGCPSecretManagerSourceCloseNonCloser(t *testing.T) {
+	client := &mockGCPSMClient{value: "v"}
+	src := newGCPSecretManagerSourceWithClient("p", "s", "latest", client)
+
+	// Mock doesn't implement io.Closer — Close should be a no-op.
+	if err := src.(*gcpSMSource).Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+}
+
+type mockClosableGCPSMClient struct {
+	mockGCPSMClient
+	closed bool
+}
+
+func (m *mockClosableGCPSMClient) Close() error {
+	m.closed = true
+	return nil
+}
+
+func TestGCPSecretManagerSourceCloseCloser(t *testing.T) {
+	client := &mockClosableGCPSMClient{}
+	client.value = "v"
+	src := newGCPSecretManagerSourceWithClient("p", "s", "latest", client)
+
+	if err := src.(*gcpSMSource).Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	if !client.closed {
+		t.Fatal("expected Close() to be called on underlying client")
+	}
+}
