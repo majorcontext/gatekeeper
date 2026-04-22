@@ -1894,6 +1894,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 						ResponseSize: -1,
 						Denied:       true,
 						DenyReason:   "Keep policy evaluation error",
+						Err:          evalErr,
 					})
 					p.logPolicy(r, scope, "http.request", "evaluation-error", "Policy evaluation failed")
 					msg := "Moat: request blocked — policy evaluation error.\nHost: " + host + "\n"
