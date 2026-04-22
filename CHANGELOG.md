@@ -4,6 +4,23 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.6.0 — 2026-04-21
+
+v0.6 adds canonical log lines and request ID tracking. Every proxied request now emits a single wide structured log entry at completion with all context (method, host, path, status, duration, credential injection, policy decisions, sizes) and a unique K-sortable request ID.
+
+### Added
+
+- **Canonical log lines** — one wide structured `slog` entry per request at completion containing `http_method`, `http_host`, `http_path`, `http_status`, `duration_ms`, `proxy_type`, `credential_injected`, `injected_headers`, `grants`, `denied`, `deny_reason`, `request_size`, `response_size`, and `error`; dynamic log levels (ERROR for 5xx/transport, WARN for denials/4xx, INFO otherwise) ([#14](https://github.com/majorcontext/gatekeeper/pull/14))
+- **Request ID tracking** — every request gets a unique `req_`-prefixed [TypeID](https://github.com/jetify-com/typeid) (UUIDv7-based, K-sortable); extracted from the caller's `X-Request-Id` header if present, otherwise generated; stored in request context, logged in canonical log lines as `request_id`, attached to OTel spans, and echoed back in the `X-Request-Id` response header ([#14](https://github.com/majorcontext/gatekeeper/pull/14))
+- **`RequestIDFromContext` exported function** — extract the request ID from a `context.Context` for downstream consumers (e.g., moat's daemon layer) ([#14](https://github.com/majorcontext/gatekeeper/pull/14))
+
+### Changed
+
+- **`RequestLogData` struct-based API** — `logRequest` refactored from 11 positional parameters to a `RequestLogData` struct; new fields: `RequestID`, `Host`, `Path`, `RequestType`, `RequestSize`, `ResponseSize`, `Grants`, `Denied`, `DenyReason` ([#14](https://github.com/majorcontext/gatekeeper/pull/14))
+- **`injectCredentials` returns `credentialInjectionResult`** — new return type bundles `InjectedHeaders` and `Grants` (grant names) together, replacing the bare `map[string]bool` return ([#14](https://github.com/majorcontext/gatekeeper/pull/14))
+- **OTel span enrichment** — `request.complete` span events now include `request_id`, `grants`, `denied`, `deny_reason`, and `proxy.request.type` attributes ([#14](https://github.com/majorcontext/gatekeeper/pull/14))
+- **Deterministic field ordering** — `grants` and `injected_headers` are sorted before logging and OTel emission, making grep-based queries stable regardless of map iteration order ([#14](https://github.com/majorcontext/gatekeeper/pull/14))
+
 ## v0.5.2 — 2026-04-21
 
 ### Added

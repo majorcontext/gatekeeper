@@ -111,13 +111,17 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	injectedHeaders := injectCredentials(proxyReq, creds, host, r.Method, rest)
+	credResult := injectCredentials(proxyReq, creds, host, r.Method, rest)
 	mergeExtraHeaders(proxyReq, host, p.getExtraHeadersForRequest(r, host))
 	for _, headerName := range p.getRemoveHeadersForRequest(r, host) {
-		if injectedHeaders[strings.ToLower(headerName)] {
+		if credResult.InjectedHeaders[strings.ToLower(headerName)] {
 			continue
 		}
 		proxyReq.Header.Del(headerName)
+	}
+
+	if proxyReq.Header.Get("X-Request-Id") == "" {
+		proxyReq.Header.Set("X-Request-Id", RequestIDFromContext(r.Context()))
 	}
 
 	// Forward to target
