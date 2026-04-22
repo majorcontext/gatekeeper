@@ -165,6 +165,10 @@ type Server struct {
 	pendingRefreshes []pendingRefresh
 	refreshCancel    context.CancelFunc
 
+	// resolveSource overrides ResolveSource for testing. When non-nil,
+	// loadCredentials calls this instead of ResolveSource.
+	resolveSource func(SourceConfig) (credentialsource.CredentialSource, error)
+
 	mu      sync.Mutex
 	started bool
 }
@@ -410,24 +414,30 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 				val = ensureAuthScheme(val, cred.Prefix, cred.Format)
 			}
 			s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
-			if rs, ok := fs.src.(credentialsource.RefreshingSource); ok {
-				if pr, exists := refreshMap[cred.Source]; exists {
-					pr.creds = append(pr.creds, cred)
-				} else {
-					refreshMap[cred.Source] = &pendingRefresh{src: rs, creds: []CredentialConfig{cred}}
-				}
+			if _, ok := fs.src.(credentialsource.RefreshingSource); ok {
+				refreshMap[cred.Source].creds = append(refreshMap[cred.Source].creds, cred)
 			}
 			continue
 		}
 
-		src, resolver, err := ResolveCredentialSource(cred)
-		if err != nil {
-			return fmt.Errorf("credential for %s: %w", cred.Host, err)
-		}
-
-		if resolver != nil {
-			s.proxy.SetCredentialResolver(cred.Host, resolver)
-			continue
+		var src credentialsource.CredentialSource
+		if s.resolveSource != nil {
+			var err error
+			src, err = s.resolveSource(cred.Source)
+			if err != nil {
+				return fmt.Errorf("credential for %s: %w", cred.Host, err)
+			}
+		} else {
+			var resolver proxy.CredentialResolver
+			var err error
+			src, resolver, err = ResolveCredentialSource(cred)
+			if err != nil {
+				return fmt.Errorf("credential for %s: %w", cred.Host, err)
+			}
+			if resolver != nil {
+				s.proxy.SetCredentialResolver(cred.Host, resolver)
+				continue
+			}
 		}
 
 		fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
