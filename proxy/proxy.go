@@ -46,6 +46,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	keeplib "github.com/majorcontext/keep"
@@ -1749,8 +1750,9 @@ func (p *Proxy) handleConnectTunnel(w http.ResponseWriter, r *http.Request) {
 
 // Context keys for passing data between ReverseProxy hooks in the interception path.
 type interceptCredResultKey struct{}
-type interceptCredErrKey struct{}
+type interceptCredsKey struct{}
 type interceptReqStartKey struct{}
+type interceptLogURLKey struct{}
 
 func reqStartFromContext(ctx context.Context) time.Time {
 	if t, ok := ctx.Value(interceptReqStartKey{}).(time.Time); ok {
@@ -1761,28 +1763,34 @@ func reqStartFromContext(ctx context.Context) time.Time {
 
 // singleConnListener wraps a single net.Conn as a net.Listener.
 // Accept returns the connection once, then blocks until Close is called.
+// This keeps http.Server.Serve alive for the lifetime of the connection.
 type singleConnListener struct {
-	conn net.Conn
-	once sync.Once
-	ch   chan net.Conn
+	conn    net.Conn
+	connCh  chan net.Conn
+	closeCh chan struct{}
 }
 
 func newSingleConnListener(conn net.Conn) *singleConnListener {
 	ch := make(chan net.Conn, 1)
 	ch <- conn
-	return &singleConnListener{conn: conn, ch: ch}
+	return &singleConnListener{conn: conn, connCh: ch, closeCh: make(chan struct{})}
 }
 
 func (l *singleConnListener) Accept() (net.Conn, error) {
-	conn, ok := <-l.ch
-	if !ok {
-		return nil, io.EOF
+	select {
+	case conn := <-l.connCh:
+		return conn, nil
+	case <-l.closeCh:
+		return nil, net.ErrClosed
 	}
-	return conn, nil
 }
 
 func (l *singleConnListener) Close() error {
-	l.once.Do(func() { close(l.ch) })
+	select {
+	case <-l.closeCh:
+	default:
+		close(l.closeCh)
+	}
 	return nil
 }
 
@@ -1863,7 +1871,16 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer clientConn.Close()
+
+	// Track whether the inner http.Server's connection was hijacked
+	// (e.g., for WebSocket upgrade). If hijacked, ReverseProxy owns the
+	// TLS conn and will close it; we must not close clientConn ourselves.
+	var hijacked atomic.Bool
+	defer func() {
+		if !hijacked.Load() {
+			clientConn.Close()
+		}
+	}()
 
 	_, _ = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 
@@ -1884,7 +1901,11 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			"subsystem", "proxy", "host", host, "error", err)
 		return
 	}
-	defer tlsClientConn.Close()
+	defer func() {
+		if !hijacked.Load() {
+			tlsClientConn.Close()
+		}
+	}()
 
 	transport := &http.Transport{
 		Proxy: nil,
@@ -1918,11 +1939,6 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 	// WebSocket upgrades via the stdlib's built-in protocol switch support.
 	reverseProxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			// Preserve the original Proxy-Authorization from In before
-			// ReverseProxy strips hop-by-hop headers.
-			// token-exchange subject_from: proxy-auth needs this.
-			proxyAuth := pr.In.Header.Get("Proxy-Authorization")
-
 			pr.Out.URL.Scheme = "https"
 			connectHost := r.Host
 			if rc := getRunContext(r); rc != nil && rc.HostGatewayIP != "" && isHostGateway(rc, host) {
@@ -1932,21 +1948,8 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			pr.Out.Host = pr.In.Host
 			pr.Out.RequestURI = ""
 
-			// Restore Proxy-Authorization so credential resolver can read it.
-			if proxyAuth != "" {
-				pr.Out.Header.Set("Proxy-Authorization", proxyAuth)
-			}
-
-			// MCP credential injection.
-			p.injectMCPCredentialsWithContext(r, pr.Out)
-
-			// Credential injection.
-			creds, credErr := p.getCredentialsForRequest(r, pr.Out, host)
-			if credErr != nil {
-				// Store error in context for ErrorHandler to pick up.
-				*pr.Out = *pr.Out.WithContext(context.WithValue(pr.Out.Context(), interceptCredErrKey{}, credErr))
-				return
-			}
+			// Credentials were resolved in the wrapping handler and passed via context.
+			creds, _ := pr.Out.Context().Value(interceptCredsKey{}).([]credentialHeader)
 			credResult := injectCredentials(pr.Out, creds, host, pr.Out.Method, pr.Out.URL.Path)
 
 			// Store credential result in context for ModifyResponse/logging.
@@ -1967,6 +1970,11 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				}
 				pr.Out.Header.Del(headerName)
 			}
+
+			// Capture URL before token substitution so logs don't contain real tokens.
+			logURL := pr.Out.URL.String()
+			ctx = context.WithValue(pr.Out.Context(), interceptLogURLKey{}, logURL)
+			*pr.Out = *pr.Out.WithContext(ctx)
 
 			// Token substitution.
 			if sub := p.getTokenSubstitutionForRequest(r, host); sub != nil {
@@ -2005,13 +2013,18 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 
 			// Canonical log line.
 			credResult, _ := req.Context().Value(interceptCredResultKey{}).(credentialInjectionResult)
+			// Use pre-substitution URL so logs don't contain real tokens.
+			logURL, _ := req.Context().Value(interceptLogURLKey{}).(string)
+			if logURL == "" {
+				logURL = req.URL.String()
+			}
 			var respBody []byte
 			respBody, resp.Body = captureBody(resp.Body, resp.Header.Get("Content-Type"))
 
 			p.logRequest(r, RequestLogData{
 				RequestID:       req.Header.Get("X-Request-Id"),
 				Method:          req.Method,
-				URL:             req.URL.String(),
+				URL:             logURL,
 				Host:            host,
 				Path:            req.URL.Path,
 				RequestType:     "connect",
@@ -2030,34 +2043,21 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			return nil
 		},
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
-			// Check for credential resolution error from Rewrite.
-			if credErr, ok := req.Context().Value(interceptCredErrKey{}).(error); ok {
-				rw.Header().Set("Content-Type", "text/plain")
-				rw.WriteHeader(http.StatusBadGateway)
-				fmt.Fprint(rw, "credential resolution failed\n")
-				p.logRequest(r, RequestLogData{
-					RequestID:   req.Header.Get("X-Request-Id"),
-					Method:      req.Method,
-					URL:         req.URL.String(),
-					Host:        host,
-					Path:        req.URL.Path,
-					RequestType: "connect",
-					StatusCode:  http.StatusBadGateway,
-					Err:         credErr,
-				})
-				return
-			}
-
 			rw.WriteHeader(http.StatusBadGateway)
 			credResult, _ := req.Context().Value(interceptCredResultKey{}).(credentialInjectionResult)
+			logURL, _ := req.Context().Value(interceptLogURLKey{}).(string)
+			if logURL == "" {
+				logURL = req.URL.String()
+			}
 			p.logRequest(r, RequestLogData{
 				RequestID:       req.Header.Get("X-Request-Id"),
 				Method:          req.Method,
-				URL:             req.URL.String(),
+				URL:             logURL,
 				Host:            host,
 				Path:            req.URL.Path,
 				RequestType:     "connect",
 				StatusCode:      http.StatusBadGateway,
+				Duration:        time.Since(reqStartFromContext(req.Context())),
 				Err:             err,
 				AuthInjected:    len(credResult.InjectedHeaders) > 0,
 				InjectedHeaders: credResult.InjectedHeaders,
@@ -2066,8 +2066,10 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		},
 	}
 
-	// Wrapping handler: policy checks before ReverseProxy.
+	// Wrapping handler: policy checks and credential resolution before ReverseProxy.
 	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		reqStart := time.Now()
+
 		innerReqID := req.Header.Get("X-Request-Id")
 		if innerReqID == "" {
 			innerReqID = newRequestID()
@@ -2083,6 +2085,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				Path:         req.URL.Path,
 				RequestType:  "connect",
 				StatusCode:   http.StatusProxyAuthRequired,
+				Duration:     time.Since(reqStart),
 				RequestSize:  req.ContentLength,
 				ResponseSize: -1,
 				Denied:       true,
@@ -2111,6 +2114,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 						Path:         req.URL.Path,
 						RequestType:  "connect",
 						StatusCode:   http.StatusForbidden,
+						Duration:     time.Since(reqStart),
 						RequestSize:  req.ContentLength,
 						ResponseSize: -1,
 						Denied:       true,
@@ -2133,6 +2137,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 						Path:         req.URL.Path,
 						RequestType:  "connect",
 						StatusCode:   http.StatusForbidden,
+						Duration:     time.Since(reqStart),
 						RequestSize:  req.ContentLength,
 						ResponseSize: -1,
 						Denied:       true,
@@ -2152,16 +2157,50 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			}
 		}
 
-		// Store request start time in context for duration calculation.
-		ctx := context.WithValue(req.Context(), interceptReqStartKey{}, time.Now())
+		// MCP credential injection.
+		p.injectMCPCredentialsWithContext(r, req)
+
+		// Resolve credentials before forwarding so errors are caught early.
+		creds, credErr := p.getCredentialsForRequest(r, req, host)
+		if credErr != nil {
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusBadGateway)
+			fmt.Fprint(w, "credential resolution failed\n")
+			p.logRequest(r, RequestLogData{
+				RequestID:   innerReqID,
+				Method:      req.Method,
+				URL:         "https://" + r.Host + req.URL.Path,
+				Host:        host,
+				Path:        req.URL.Path,
+				RequestType: "connect",
+				StatusCode:  http.StatusBadGateway,
+				Duration:    time.Since(reqStart),
+				Err:         credErr,
+			})
+			return
+		}
+
+		// Pass resolved credentials and start time to Rewrite via context.
+		ctx := req.Context()
+		ctx = context.WithValue(ctx, interceptReqStartKey{}, reqStart)
+		ctx = context.WithValue(ctx, interceptCredsKey{}, creds)
 		reverseProxy.ServeHTTP(w, req.WithContext(ctx))
 	})
 
 	// Serve on a single-connection listener wrapping the TLS connection.
+	ln := newSingleConnListener(tlsClientConn)
 	srv := &http.Server{
 		Handler:     handler,
 		IdleTimeout: 120 * time.Second,
 		ErrorLog:    log.New(io.Discard, "", 0), // Suppress server-level errors; handled in ErrorHandler.
+		ConnState: func(conn net.Conn, state http.ConnState) {
+			if state == http.StateHijacked {
+				hijacked.Store(true)
+			}
+			if state == http.StateClosed || state == http.StateHijacked {
+				ln.Close()
+			}
+		},
 	}
-	_ = srv.Serve(newSingleConnListener(tlsClientConn))
+	_ = srv.Serve(ln)
 }
