@@ -402,6 +402,24 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 			return fmt.Errorf("credential for %s: format %q is only supported with the Authorization header", cred.Host, cred.Format)
 		}
 
+		// Reuse a previously fetched source with the same config, avoiding
+		// redundant source construction (e.g., os.ReadFile for github-app keys).
+		if fs, ok := fetched[cred.Source]; ok {
+			val := fs.val
+			if strings.EqualFold(header, "Authorization") {
+				val = ensureAuthScheme(val, cred.Prefix, cred.Format)
+			}
+			s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
+			if rs, ok := fs.src.(credentialsource.RefreshingSource); ok {
+				if pr, exists := refreshMap[cred.Source]; exists {
+					pr.creds = append(pr.creds, cred)
+				} else {
+					refreshMap[cred.Source] = &pendingRefresh{src: rs, creds: []CredentialConfig{cred}}
+				}
+			}
+			continue
+		}
+
 		src, resolver, err := ResolveCredentialSource(cred)
 		if err != nil {
 			return fmt.Errorf("credential for %s: %w", cred.Host, err)
@@ -412,20 +430,14 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 			continue
 		}
 
-		// Reuse a previously fetched source with the same config.
-		fs, ok := fetched[cred.Source]
-		if !ok {
-			fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			val, fetchErr := src.Fetch(fetchCtx)
-			cancel()
-			if fetchErr != nil {
-				return fmt.Errorf("credential for %s: fetch failed: %w", cred.Host, fetchErr)
-			}
-			fs = &fetchedSource{src: src, val: val}
-			fetched[cred.Source] = fs
+		fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		val, fetchErr := src.Fetch(fetchCtx)
+		cancel()
+		if fetchErr != nil {
+			return fmt.Errorf("credential for %s: fetch failed: %w", cred.Host, fetchErr)
 		}
+		fetched[cred.Source] = &fetchedSource{src: src, val: val}
 
-		val := fs.val
 		// For Authorization headers, ensure the value includes an auth
 		// scheme prefix. In the CLI flow, providers handle this (e.g.,
 		// GitHub provider prepends "Bearer "). The gatekeeper bypasses
@@ -436,12 +448,8 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 
 		s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
 
-		if rs, ok := fs.src.(credentialsource.RefreshingSource); ok {
-			if pr, exists := refreshMap[cred.Source]; exists {
-				pr.creds = append(pr.creds, cred)
-			} else {
-				refreshMap[cred.Source] = &pendingRefresh{src: rs, creds: []CredentialConfig{cred}}
-			}
+		if rs, ok := src.(credentialsource.RefreshingSource); ok {
+			refreshMap[cred.Source] = &pendingRefresh{src: rs, creds: []CredentialConfig{cred}}
 		}
 	}
 
@@ -492,12 +500,14 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 				}
 				jitter := time.Duration(rand.Int64N(int64(backoff) / 4))
 				backoff += jitter
-				var hosts []string
+				var hosts, grants []string
 				for _, c := range creds {
 					hosts = append(hosts, c.Host)
+					grants = append(grants, c.Grant)
 				}
 				slog.Warn("credential refresh failed, retrying",
 					"hosts", strings.Join(hosts, ","),
+					"grants", strings.Join(grants, ","),
 					"backoff", backoff.String(),
 					"error", err)
 				continue
