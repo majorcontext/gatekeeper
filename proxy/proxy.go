@@ -1831,7 +1831,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				RequestType:  "connect",
 				StatusCode:   http.StatusProxyAuthRequired,
 				Duration:     time.Since(reqStart),
-				RequestSize:  -1,
+				RequestSize:  req.ContentLength,
 				ResponseSize: -1,
 				Denied:       true,
 				DenyReason:   "Request blocked by network policy: " + req.Method + " " + host + req.URL.Path,
