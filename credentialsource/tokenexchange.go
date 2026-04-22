@@ -171,6 +171,9 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorTo
 		// This is intentional: a short deadline from one caller shouldn't cancel
 		// the STS call for all singleflight waiters. The 30s http.Client timeout
 		// still bounds the call.
+		//
+		// The winning goroutine's requestID is forwarded to the STS call.
+		// Callers coalesced by singleflight do not each get a correlated STS entry.
 		result, err := s.Exchange(context.WithoutCancel(ctx), subjectToken, actorToken, requestID)
 		if err != nil {
 			return nil, err
