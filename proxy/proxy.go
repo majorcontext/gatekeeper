@@ -1952,8 +1952,6 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 
 		creds, credErr := p.getCredentialsForRequest(r, req, host)
 		if credErr != nil {
-			slog.Warn("dynamic credential resolution failed",
-				"subsystem", "proxy", "host", host, "error", credErr)
 			body := "credential resolution failed\n"
 			errResp := &http.Response{
 				StatusCode:    http.StatusBadGateway,
