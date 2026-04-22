@@ -1753,6 +1753,8 @@ type interceptCredResultKey struct{}
 type interceptCredsKey struct{}
 type interceptReqStartKey struct{}
 type interceptLogURLKey struct{}
+type interceptPreInjHeadersKey struct{}
+type interceptReqBodyKey struct{}
 
 func reqStartFromContext(ctx context.Context) time.Time {
 	if t, ok := ctx.Value(interceptReqStartKey{}).(time.Time); ok {
@@ -1799,8 +1801,8 @@ func (l *singleConnListener) Addr() net.Addr {
 }
 
 // evaluateAndReplaceLLMResponse evaluates LLM gateway policy and replaces
-// the response in-place if denied. Called from ModifyResponse.
-func (p *Proxy) evaluateAndReplaceLLMResponse(ctxReq *http.Request, req *http.Request, resp *http.Response, eng *keeplib.Engine) {
+// the response in-place if denied. Returns whether a denial occurred and the reason.
+func (p *Proxy) evaluateAndReplaceLLMResponse(ctxReq *http.Request, req *http.Request, resp *http.Response, eng *keeplib.Engine) (denied bool, reason string) {
 	respBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, maxLLMResponseSize+1))
 	resp.Body.Close()
 	if readErr != nil {
@@ -1812,7 +1814,7 @@ func (p *Proxy) evaluateAndReplaceLLMResponse(ctxReq *http.Request, req *http.Re
 		resp.Header.Set("X-Moat-Blocked", "llm-policy")
 		resp.ContentLength = int64(len(errorBody))
 		resp.Body = io.NopCloser(bytes.NewReader(errorBody))
-		return
+		return true, "LLM policy read error"
 	}
 	if int64(len(respBodyBytes)) > maxLLMResponseSize {
 		p.logPolicy(ctxReq, "llm-gateway", "llm.response_too_large", "size-limit", "Response too large for policy evaluation")
@@ -1823,7 +1825,7 @@ func (p *Proxy) evaluateAndReplaceLLMResponse(ctxReq *http.Request, req *http.Re
 		resp.Header.Set("X-Moat-Blocked", "llm-policy")
 		resp.ContentLength = int64(len(errorBody))
 		resp.Body = io.NopCloser(bytes.NewReader(errorBody))
-		return
+		return true, "LLM policy response too large"
 	}
 	result := evaluateLLMResponse(eng, respBodyBytes, resp)
 	if result.Denied {
@@ -1835,6 +1837,7 @@ func (p *Proxy) evaluateAndReplaceLLMResponse(ctxReq *http.Request, req *http.Re
 		resp.Header.Set("X-Moat-Blocked", "llm-policy")
 		resp.ContentLength = int64(len(errorBody))
 		resp.Body = io.NopCloser(bytes.NewReader(errorBody))
+		return true, "LLM policy denied: " + result.Rule + " " + result.Message
 	} else if result.Events != nil {
 		var buf bytes.Buffer
 		for _, ev := range result.Events {
@@ -1857,6 +1860,7 @@ func (p *Proxy) evaluateAndReplaceLLMResponse(ctxReq *http.Request, req *http.Re
 		resp.Body = io.NopCloser(bytes.NewReader(respBodyBytes))
 		resp.ContentLength = int64(len(respBodyBytes))
 	}
+	return false, ""
 }
 
 func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Request, host string) {
@@ -1950,10 +1954,17 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 
 			// Credentials were resolved in the wrapping handler and passed via context.
 			creds, _ := pr.Out.Context().Value(interceptCredsKey{}).([]credentialHeader)
+
+			// Snapshot headers before credential injection so logs don't
+			// contain raw credential values (CLAUDE.md: never log credential values).
+			preInjectionHeaders := pr.Out.Header.Clone()
+
 			credResult := injectCredentials(pr.Out, creds, host, pr.Out.Method, pr.Out.URL.Path)
 
-			// Store credential result in context for ModifyResponse/logging.
-			ctx := context.WithValue(pr.Out.Context(), interceptCredResultKey{}, credResult)
+			// Store credential result and pre-injection headers in context.
+			ctx := pr.Out.Context()
+			ctx = context.WithValue(ctx, interceptCredResultKey{}, credResult)
+			ctx = context.WithValue(ctx, interceptPreInjHeadersKey{}, preInjectionHeaders)
 			*pr.Out = *pr.Out.WithContext(ctx)
 
 			// Extra headers.
@@ -1990,11 +2001,15 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		ModifyResponse: func(resp *http.Response) error {
 			req := resp.Request
 
+			// Track LLM policy denials for the canonical log line.
+			var llmDenied bool
+			var llmDenyReason string
+
 			// LLM gateway policy evaluation (Anthropic API only).
 			if resp.StatusCode == http.StatusOK && host == "api.anthropic.com" {
 				if rc := getRunContext(r); rc != nil && rc.KeepEngines != nil {
 					if eng, ok := rc.KeepEngines["llm-gateway"]; ok {
-						p.evaluateAndReplaceLLMResponse(r, req, resp, eng)
+						llmDenied, llmDenyReason = p.evaluateAndReplaceLLMResponse(r, req, resp, eng)
 					}
 				}
 			}
@@ -2021,6 +2036,13 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			var respBody []byte
 			respBody, resp.Body = captureBody(resp.Body, resp.Header.Get("Content-Type"))
 
+			// Use pre-injection headers so credential values don't appear in logs.
+			preHeaders, _ := req.Context().Value(interceptPreInjHeadersKey{}).(http.Header)
+			if preHeaders == nil {
+				preHeaders = req.Header.Clone()
+			}
+			reqBody, _ := req.Context().Value(interceptReqBodyKey{}).([]byte)
+
 			p.logRequest(r, RequestLogData{
 				RequestID:       req.Header.Get("X-Request-Id"),
 				Method:          req.Method,
@@ -2030,14 +2052,17 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				RequestType:     "connect",
 				StatusCode:      resp.StatusCode,
 				Duration:        time.Since(reqStartFromContext(req.Context())),
-				RequestHeaders:  req.Header.Clone(),
+				RequestHeaders:  preHeaders,
 				ResponseHeaders: resp.Header.Clone(),
+				RequestBody:     reqBody,
 				ResponseBody:    respBody,
 				RequestSize:     req.ContentLength,
 				ResponseSize:    resp.ContentLength,
 				AuthInjected:    len(credResult.InjectedHeaders) > 0,
 				InjectedHeaders: credResult.InjectedHeaders,
 				Grants:          credResult.Grants,
+				Denied:          llmDenied,
+				DenyReason:      llmDenyReason,
 			})
 
 			return nil
@@ -2080,7 +2105,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			p.logRequest(r, RequestLogData{
 				RequestID:    innerReqID,
 				Method:       req.Method,
-				URL:          "https://" + r.Host + req.URL.Path,
+				URL:          "https://" + r.Host + req.URL.RequestURI(),
 				Host:         host,
 				Path:         req.URL.Path,
 				RequestType:  "connect",
@@ -2109,7 +2134,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 					p.logRequest(r, RequestLogData{
 						RequestID:    innerReqID,
 						Method:       req.Method,
-						URL:          "https://" + r.Host + req.URL.Path,
+						URL:          "https://" + r.Host + req.URL.RequestURI(),
 						Host:         host,
 						Path:         req.URL.Path,
 						RequestType:  "connect",
@@ -2132,7 +2157,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 					p.logRequest(r, RequestLogData{
 						RequestID:    innerReqID,
 						Method:       req.Method,
-						URL:          "https://" + r.Host + req.URL.Path,
+						URL:          "https://" + r.Host + req.URL.RequestURI(),
 						Host:         host,
 						Path:         req.URL.Path,
 						RequestType:  "connect",
@@ -2169,7 +2194,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			p.logRequest(r, RequestLogData{
 				RequestID:   innerReqID,
 				Method:      req.Method,
-				URL:         "https://" + r.Host + req.URL.Path,
+				URL:         "https://" + r.Host + req.URL.RequestURI(),
 				Host:        host,
 				Path:        req.URL.Path,
 				RequestType: "connect",
@@ -2180,10 +2205,15 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			return
 		}
 
-		// Pass resolved credentials and start time to Rewrite via context.
+		// Capture request body for logging before ReverseProxy consumes it.
+		var reqBody []byte
+		reqBody, req.Body = captureBody(req.Body, req.Header.Get("Content-Type"))
+
+		// Pass resolved credentials, start time, and captured body to Rewrite via context.
 		ctx := req.Context()
 		ctx = context.WithValue(ctx, interceptReqStartKey{}, reqStart)
 		ctx = context.WithValue(ctx, interceptCredsKey{}, creds)
+		ctx = context.WithValue(ctx, interceptReqBodyKey{}, reqBody)
 		reverseProxy.ServeHTTP(w, req.WithContext(ctx))
 	})
 
