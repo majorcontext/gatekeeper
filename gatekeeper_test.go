@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/majorcontext/gatekeeper/credentialsource"
 	"github.com/majorcontext/gatekeeper/proxy"
 
 	"go.opentelemetry.io/otel"
@@ -1198,7 +1199,7 @@ func TestStartCredentialRefresh_CancelStopsGoroutine(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	srv.startCredentialRefresh(ctx, mock, cred)
+	srv.startCredentialRefresh(ctx, mock, []CredentialConfig{cred})
 
 	// Cancel immediately — goroutine should exit without fetching.
 	cancel()
@@ -1206,6 +1207,64 @@ func TestStartCredentialRefresh_CancelStopsGoroutine(t *testing.T) {
 
 	if count := mock.fetchCount(); count != 0 {
 		t.Errorf("fetch called %d times after immediate cancel, want 0", count)
+	}
+}
+
+func TestLoadCredentials_DedupSharedEnvSource(t *testing.T) {
+	t.Setenv("GK_TEST_DEDUP_TOKEN", "ghs_shared_123")
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		Credentials: []CredentialConfig{
+			{Host: "api.github.com", Source: SourceConfig{Type: "env", Var: "GK_TEST_DEDUP_TOKEN"}, Grant: "gh-api"},
+			{Host: "github.com", Source: SourceConfig{Type: "env", Var: "GK_TEST_DEDUP_TOKEN"}, Grant: "gh-web"},
+		},
+	}
+
+	srv, err := New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Env sources don't implement RefreshingSource, so no refresh goroutines.
+	if len(srv.pendingRefreshes) != 0 {
+		t.Errorf("pendingRefreshes = %d, want 0 (env sources are not refreshing)", len(srv.pendingRefreshes))
+	}
+}
+
+func TestLoadCredentials_DedupSharedRefreshingSource(t *testing.T) {
+	mock := &mockRefreshSource{token: "ghs_shared", ttl: 1 * time.Hour}
+
+	// Create server without credentials, then call loadCredentials with
+	// the resolveSource override so we can inject a mock RefreshingSource.
+	srv, err := New(context.Background(), &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.resolveSource = func(_ SourceConfig) (credentialsource.CredentialSource, error) {
+		return mock, nil
+	}
+
+	cfg := &Config{
+		Credentials: []CredentialConfig{
+			{Host: "api.github.com", Source: SourceConfig{Type: "mock"}, Grant: "gh-api"},
+			{Host: "github.com", Source: SourceConfig{Type: "mock"}, Grant: "gh-web"},
+		},
+	}
+	if err := srv.loadCredentials(context.Background(), cfg); err != nil {
+		t.Fatalf("loadCredentials: %v", err)
+	}
+
+	if mock.fetchCount() != 1 {
+		t.Errorf("Fetch calls = %d, want 1 (second cred should reuse cached value)", mock.fetchCount())
+	}
+	if len(srv.pendingRefreshes) != 1 {
+		t.Fatalf("pendingRefreshes = %d, want 1", len(srv.pendingRefreshes))
+	}
+	if len(srv.pendingRefreshes[0].creds) != 2 {
+		t.Errorf("creds in pendingRefresh = %d, want 2", len(srv.pendingRefreshes[0].creds))
 	}
 }
 
