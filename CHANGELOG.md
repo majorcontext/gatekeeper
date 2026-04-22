@@ -4,6 +4,25 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.7.0 — 2026-04-22
+
+v0.7 improves cross-service observability and eliminates redundant credential fetches.
+
+### Added
+
+- **X-Request-Id forwarding to STS** — the `TokenExchangeSource` now accepts a `requestID` parameter on `Exchange` and `Resolve`; when non-empty, it is forwarded as `X-Request-Id` to the STS endpoint, enabling end-to-end request correlation across proxy → STS → upstream ([#17](https://github.com/majorcontext/gatekeeper/pull/17))
+- **X-Request-Id forwarding in MCP relay** — MCP relay requests now include the proxy-generated `X-Request-Id` header when the upstream request doesn't already carry one, correlating relay traffic with the originating proxy request ([#17](https://github.com/majorcontext/gatekeeper/pull/17))
+
+### Changed
+
+- **`TokenExchangeSource.Exchange` signature** — added `requestID string` parameter; callers must pass `""` when no request ID is available ([#17](https://github.com/majorcontext/gatekeeper/pull/17))
+- **`TokenExchangeSource.Resolve` signature** — added `requestID string` parameter; the winning singleflight goroutine's request ID is forwarded to the STS call ([#17](https://github.com/majorcontext/gatekeeper/pull/17))
+
+### Fixed
+
+- **Deduplicated credential sources sharing the same config** — when multiple credential entries share the same `SourceConfig` (e.g., `api.github.com` and `github.com` both using the same `github-app`), a single fetch is now made at startup and a single background refresh goroutine is registered; the token is applied to all hosts that share the source; deduplication is generic across all source types via the comparable `SourceConfig` struct ([#18](https://github.com/majorcontext/gatekeeper/pull/18))
+- **`refreshInterval` simplified** — replaced manual min-floor with `max()` builtin ([#18](https://github.com/majorcontext/gatekeeper/pull/18))
+
 ## v0.6.1 — 2026-04-21
 
 ### Added
