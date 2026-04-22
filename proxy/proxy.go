@@ -2083,6 +2083,8 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				RequestType:     "connect",
 				StatusCode:      http.StatusBadGateway,
 				Duration:        time.Since(reqStartFromContext(req.Context())),
+				RequestSize:     req.ContentLength,
+				ResponseSize:    -1,
 				Err:             err,
 				AuthInjected:    len(credResult.InjectedHeaders) > 0,
 				InjectedHeaders: credResult.InjectedHeaders,
@@ -2210,6 +2212,9 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		// Capture request body for logging before ReverseProxy consumes it.
 		var reqBody []byte
 		reqBody, req.Body = captureBody(req.Body, req.Header.Get("Content-Type"))
+
+		// Propagate request ID so Rewrite preserves it (instead of generating a new one).
+		req.Header.Set("X-Request-Id", innerReqID)
 
 		// Pass resolved credentials, start time, and captured body to Rewrite via context.
 		ctx := req.Context()
