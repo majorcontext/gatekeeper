@@ -1,10 +1,13 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -468,5 +471,136 @@ func TestIntercept_HTTPMethods(t *testing.T) {
 				t.Errorf("method = %q, want %q", receivedMethod, method)
 			}
 		})
+	}
+}
+
+func TestIntercept_WebSocketUpgrade(t *testing.T) {
+	// Backend that accepts WebSocket upgrades and echoes raw bytes.
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") != "websocket" {
+			http.Error(w, "expected websocket upgrade", 400)
+			return
+		}
+
+		w.Header().Set("Upgrade", "websocket")
+		w.Header().Set("Connection", "Upgrade")
+		w.WriteHeader(http.StatusSwitchingProtocols)
+
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			return
+		}
+		conn, brw, err := hijacker.Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		brw.Flush()
+
+		// Echo: read up to 1024 bytes, write them back.
+		buf := make([]byte, 1024)
+		n, err := conn.Read(buf)
+		if err != nil {
+			return
+		}
+		conn.Write(buf[:n])
+	}))
+	defer backend.Close()
+
+	ca, err := generateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	upstreamCAs := x509.NewCertPool()
+	upstreamCAs.AddCert(backend.Certificate())
+
+	p := NewProxy()
+	p.SetCA(ca)
+	p.SetUpstreamCAs(upstreamCAs)
+
+	backendHost := mustParseURL(backend.URL).Hostname()
+	p.SetCredential(backendHost, "Bearer ws-token")
+
+	var logged RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		logged = data
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	// Dial through the proxy using raw CONNECT.
+	proxyURL := mustParseURL(proxyServer.URL)
+	proxyConn, err := net.Dial("tcp", proxyURL.Host)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer proxyConn.Close()
+
+	// Send CONNECT.
+	backendAddr := mustParseURL(backend.URL).Host
+	fmt.Fprintf(proxyConn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", backendAddr, backendAddr)
+	br := bufio.NewReader(proxyConn)
+	connectResp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	if connectResp.StatusCode != 200 {
+		t.Fatalf("CONNECT status = %d, want 200", connectResp.StatusCode)
+	}
+
+	// TLS handshake with the proxy's interception cert.
+	clientCAs := x509.NewCertPool()
+	clientCAs.AppendCertsFromPEM(ca.certPEM)
+	tlsConn := tls.Client(proxyConn, &tls.Config{
+		RootCAs:    clientCAs,
+		ServerName: backendHost,
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	defer tlsConn.Close()
+
+	// Send WebSocket upgrade request.
+	upgradeReq := "GET /ws HTTP/1.1\r\n" +
+		"Host: " + backendAddr + "\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+		"Sec-WebSocket-Version: 13\r\n" +
+		"\r\n"
+	if _, err := tlsConn.Write([]byte(upgradeReq)); err != nil {
+		t.Fatalf("write upgrade request: %v", err)
+	}
+
+	// Read the 101 response.
+	tlsBr := bufio.NewReader(tlsConn)
+	upgradeResp, err := http.ReadResponse(tlsBr, nil)
+	if err != nil {
+		t.Fatalf("read upgrade response: %v", err)
+	}
+	if upgradeResp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade status = %d, want 101", upgradeResp.StatusCode)
+	}
+
+	// Send a raw message through the upgraded connection.
+	testMsg := []byte("hello websocket")
+	if _, err := tlsConn.Write(testMsg); err != nil {
+		t.Fatalf("write message: %v", err)
+	}
+
+	// Read echoed message back.
+	echoBuf := make([]byte, len(testMsg))
+	if _, err := io.ReadFull(tlsBr, echoBuf); err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if string(echoBuf) != string(testMsg) {
+		t.Errorf("echo = %q, want %q", echoBuf, testMsg)
+	}
+
+	// Verify credential was injected on the upgrade request.
+	if !logged.AuthInjected {
+		t.Error("expected credential injection on upgrade request")
 	}
 }
