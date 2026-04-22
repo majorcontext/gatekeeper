@@ -1591,6 +1591,10 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		p.applyTokenSubstitution(outReq, sub)
 	}
 
+	if outReq.Header.Get("X-Request-Id") == "" {
+		outReq.Header.Set("X-Request-Id", RequestIDFromContext(r.Context()))
+	}
+
 	// Forward request
 	resp, err := httpTransport.RoundTrip(outReq)
 	duration := time.Since(start)
@@ -2039,6 +2043,10 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		logURL := req.URL.String()
 		if sub := p.getTokenSubstitutionForRequest(r, host); sub != nil {
 			p.applyTokenSubstitution(req, sub)
+		}
+
+		if req.Header.Get("X-Request-Id") == "" {
+			req.Header.Set("X-Request-Id", innerReqID)
 		}
 
 		resp, err := transport.RoundTrip(req)

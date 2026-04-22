@@ -120,6 +120,10 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 		proxyReq.Header.Del(headerName)
 	}
 
+	if proxyReq.Header.Get("X-Request-Id") == "" {
+		proxyReq.Header.Set("X-Request-Id", RequestIDFromContext(r.Context()))
+	}
+
 	// Forward to target
 	resp, err := relayClient.Do(proxyReq)
 	if err != nil {

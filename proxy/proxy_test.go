@@ -1048,6 +1048,76 @@ func TestProxy_RequestID_Unique(t *testing.T) {
 	}
 }
 
+func TestProxy_RequestID_ForwardedToUpstream(t *testing.T) {
+	var upstreamReqID string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamReqID = r.Header.Get("X-Request-Id")
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+
+	var logged RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		logged = data
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+		},
+	}
+
+	resp, err := client.Get(backend.URL + "/test")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if upstreamReqID == "" {
+		t.Fatal("upstream did not receive X-Request-Id header")
+	}
+	if upstreamReqID != logged.RequestID {
+		t.Errorf("upstream X-Request-Id = %q, want %q (logged)", upstreamReqID, logged.RequestID)
+	}
+}
+
+func TestProxy_RequestID_PreservesClientHeader(t *testing.T) {
+	var upstreamReqID string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamReqID = r.Header.Get("X-Request-Id")
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+		},
+	}
+
+	req, _ := http.NewRequest("GET", backend.URL+"/test", nil)
+	req.Header.Set("X-Request-Id", "client-provided-id")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if upstreamReqID != "client-provided-id" {
+		t.Errorf("upstream X-Request-Id = %q, want %q", upstreamReqID, "client-provided-id")
+	}
+}
+
 func mustParseURL(s string) *url.URL {
 	u, err := url.Parse(s)
 	if err != nil {
