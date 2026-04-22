@@ -142,11 +142,11 @@ func (h *healthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.next.ServeHTTP(w, r)
 }
 
-// pendingRefresh captures a RefreshingSource and its credential config so the
-// refresh goroutine can be started later in Start().
+// pendingRefresh captures a RefreshingSource and all credential configs that
+// share it, so a single refresh goroutine updates every host.
 type pendingRefresh struct {
-	src  credentialsource.RefreshingSource
-	cred CredentialConfig
+	src   credentialsource.RefreshingSource
+	creds []CredentialConfig
 }
 
 // Server is the Gate Keeper server. It manages a TLS-intercepting proxy
@@ -370,7 +370,20 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 }
 
 // loadCredentials resolves each credential from config and sets it on the proxy.
+//
+// Sources are deduped by SourceConfig: when multiple credentials share the same
+// source (e.g., two hosts using the same github-app), a single Fetch is made at
+// startup and a single background refresh goroutine is registered. The token is
+// applied to all hosts that share the source.
 func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
+	// Dedup sources: same SourceConfig → one Fetch, one refresh goroutine.
+	type fetchedSource struct {
+		src credentialsource.CredentialSource
+		val string
+	}
+	fetched := make(map[SourceConfig]*fetchedSource)
+	refreshMap := make(map[SourceConfig]*pendingRefresh)
+
 	for _, cred := range cfg.Credentials {
 		if cred.Host == "" {
 			return fmt.Errorf("credential %q: host is required", cred.Grant)
@@ -399,13 +412,20 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 			continue
 		}
 
-		fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		val, err := src.Fetch(fetchCtx)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("credential for %s: fetch failed: %w", cred.Host, err)
+		// Reuse a previously fetched source with the same config.
+		fs, ok := fetched[cred.Source]
+		if !ok {
+			fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			val, fetchErr := src.Fetch(fetchCtx)
+			cancel()
+			if fetchErr != nil {
+				return fmt.Errorf("credential for %s: fetch failed: %w", cred.Host, fetchErr)
+			}
+			fs = &fetchedSource{src: src, val: val}
+			fetched[cred.Source] = fs
 		}
 
+		val := fs.val
 		// For Authorization headers, ensure the value includes an auth
 		// scheme prefix. In the CLI flow, providers handle this (e.g.,
 		// GitHub provider prepends "Bearer "). The gatekeeper bypasses
@@ -415,21 +435,28 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 		}
 
 		s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
-		if rs, ok := src.(credentialsource.RefreshingSource); ok {
-			s.pendingRefreshes = append(s.pendingRefreshes, pendingRefresh{src: rs, cred: cred})
+
+		if rs, ok := fs.src.(credentialsource.RefreshingSource); ok {
+			if pr, exists := refreshMap[cred.Source]; exists {
+				pr.creds = append(pr.creds, cred)
+			} else {
+				refreshMap[cred.Source] = &pendingRefresh{src: rs, creds: []CredentialConfig{cred}}
+			}
 		}
+	}
+
+	for _, pr := range refreshMap {
+		s.pendingRefreshes = append(s.pendingRefreshes, *pr)
 	}
 	return nil
 }
 
 // startCredentialRefresh starts a background goroutine that periodically
-// re-fetches a credential from a RefreshingSource and hot-swaps it on the proxy.
-func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsource.RefreshingSource, cred CredentialConfig) {
-	header := cred.Header
-	if header == "" {
-		header = "Authorization"
-	}
-
+// re-fetches a credential from a RefreshingSource and hot-swaps it on the
+// proxy for every host in creds. When multiple hosts share a source (e.g.,
+// api.github.com and github.com both using the same github-app), a single
+// goroutine refreshes the token and applies it to all of them.
+func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsource.RefreshingSource, creds []CredentialConfig) {
 	go func() {
 		backoff := time.Duration(0)
 		const maxBackoff = 60 * time.Second
@@ -451,7 +478,7 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 			}
 
 			fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			val, err := src.Fetch(fetchCtx)
+			rawVal, err := src.Fetch(fetchCtx)
 			cancel()
 
 			if err != nil {
@@ -465,35 +492,41 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 				}
 				jitter := time.Duration(rand.Int64N(int64(backoff) / 4))
 				backoff += jitter
+				var hosts []string
+				for _, c := range creds {
+					hosts = append(hosts, c.Host)
+				}
 				slog.Warn("credential refresh failed, retrying",
-					"host", cred.Host,
-					"grant", cred.Grant,
+					"hosts", strings.Join(hosts, ","),
 					"backoff", backoff.String(),
 					"error", err)
 				continue
 			}
 
 			backoff = 0
-			if strings.EqualFold(header, "Authorization") {
-				val = ensureAuthScheme(val, cred.Prefix, cred.Format)
-			}
-			s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
 			ttl := src.TTL()
-			slog.Debug("credential refreshed",
-				"host", cred.Host,
-				"grant", cred.Grant,
-				"ttl", ttl.String())
+			for _, cred := range creds {
+				header := cred.Header
+				if header == "" {
+					header = "Authorization"
+				}
+				val := rawVal
+				if strings.EqualFold(header, "Authorization") {
+					val = ensureAuthScheme(val, cred.Prefix, cred.Format)
+				}
+				s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
+				slog.Debug("credential refreshed",
+					"host", cred.Host,
+					"grant", cred.Grant,
+					"ttl", ttl.String())
+			}
 		}
 	}()
 }
 
 // refreshInterval returns 75% of TTL, floored at 30 seconds.
 func refreshInterval(ttl time.Duration) time.Duration {
-	interval := ttl * 3 / 4
-	if interval < 30*time.Second {
-		interval = 30 * time.Second
-	}
-	return interval
+	return max(ttl*3/4, 30*time.Second)
 }
 
 // ensureAuthScheme ensures a credential value has an auth scheme prefix
@@ -605,7 +638,7 @@ func (s *Server) Start(ctx context.Context) error {
 	refreshCtx, refreshCancel := context.WithCancel(context.Background())
 	s.refreshCancel = refreshCancel
 	for _, pr := range s.pendingRefreshes {
-		s.startCredentialRefresh(refreshCtx, pr.src, pr.cred)
+		s.startCredentialRefresh(refreshCtx, pr.src, pr.creds)
 	}
 	s.pendingRefreshes = nil
 

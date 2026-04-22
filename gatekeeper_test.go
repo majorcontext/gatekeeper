@@ -1198,7 +1198,7 @@ func TestStartCredentialRefresh_CancelStopsGoroutine(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	srv.startCredentialRefresh(ctx, mock, cred)
+	srv.startCredentialRefresh(ctx, mock, []CredentialConfig{cred})
 
 	// Cancel immediately — goroutine should exit without fetching.
 	cancel()
@@ -1206,6 +1206,28 @@ func TestStartCredentialRefresh_CancelStopsGoroutine(t *testing.T) {
 
 	if count := mock.fetchCount(); count != 0 {
 		t.Errorf("fetch called %d times after immediate cancel, want 0", count)
+	}
+}
+
+func TestLoadCredentials_DedupSharedEnvSource(t *testing.T) {
+	t.Setenv("GK_TEST_DEDUP_TOKEN", "ghs_shared_123")
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		Credentials: []CredentialConfig{
+			{Host: "api.github.com", Source: SourceConfig{Type: "env", Var: "GK_TEST_DEDUP_TOKEN"}, Grant: "gh-api"},
+			{Host: "github.com", Source: SourceConfig{Type: "env", Var: "GK_TEST_DEDUP_TOKEN"}, Grant: "gh-web"},
+		},
+	}
+
+	srv, err := New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Env sources don't implement RefreshingSource, so no refresh goroutines.
+	if len(srv.pendingRefreshes) != 0 {
+		t.Errorf("pendingRefreshes = %d, want 0 (env sources are not refreshing)", len(srv.pendingRefreshes))
 	}
 }
 
