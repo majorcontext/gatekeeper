@@ -4,6 +4,17 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.6.1 — 2026-04-21
+
+### Added
+
+- **Build version in startup log and OTel resource** — `cmd/gatekeeper` now has a `version` variable set via `-ldflags -X main.version=<tag>` at build time (defaults to `"dev"`); the version appears in the `"gatekeeper listening"` startup log line and as `service.version` on all OTel spans, metrics, and logs ([#15](https://github.com/majorcontext/gatekeeper/pull/15))
+- **`VERSION` Docker build arg** — the Dockerfile accepts a `VERSION` build arg passed through to `-ldflags`; the release workflow passes the git tag automatically ([#15](https://github.com/majorcontext/gatekeeper/pull/15))
+
+### Changed
+
+- **`gatekeeper.New()` signature** — added `version string` parameter; callers must pass the build version (or `""` if unknown); this replaces the previously exported `Server.Version` field to prevent data races on concurrent access ([#15](https://github.com/majorcontext/gatekeeper/pull/15))
+
 ## v0.6.0 — 2026-04-21
 
 v0.6 adds canonical log lines and request ID tracking. Every proxied request now emits a single wide structured log entry at completion with all context (method, host, path, status, duration, credential injection, policy decisions, sizes) and a unique K-sortable request ID.
