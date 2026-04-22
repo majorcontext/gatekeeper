@@ -7,11 +7,13 @@ import (
 )
 
 type mockGCPSMClient struct {
-	value string
-	err   error
+	value        string
+	err          error
+	lastResource string
 }
 
-func (m *mockGCPSMClient) AccessSecretVersion(_ context.Context, _ string) (string, error) {
+func (m *mockGCPSMClient) AccessSecretVersion(_ context.Context, resourceName string) (string, error) {
+	m.lastResource = resourceName
 	return m.value, m.err
 }
 
@@ -29,6 +31,10 @@ func TestGCPSecretManagerSource(t *testing.T) {
 	}
 	if val != "gcp-secret-123" {
 		t.Fatalf("Fetch() = %q, want %q", val, "gcp-secret-123")
+	}
+	wantResource := "projects/my-project/secrets/my-secret/versions/latest"
+	if client.lastResource != wantResource {
+		t.Fatalf("resourceName = %q, want %q", client.lastResource, wantResource)
 	}
 }
 
@@ -55,5 +61,9 @@ func TestGCPSecretManagerSourceDefaultVersion(t *testing.T) {
 	}
 	if val != "versioned-secret" {
 		t.Fatalf("Fetch() = %q, want %q", val, "versioned-secret")
+	}
+	wantResource := "projects/my-project/secrets/my-secret/versions/latest"
+	if client.lastResource != wantResource {
+		t.Fatalf("resourceName = %q, want %q (empty version should default to latest)", client.lastResource, wantResource)
 	}
 }
