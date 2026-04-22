@@ -19,13 +19,12 @@ import (
 // backend server. The proxy is configured to trust the backend's TLS cert and
 // the returned client trusts the proxy's interception CA.
 type interceptTestSetup struct {
-	Proxy           *Proxy
-	ProxyServer     *httptest.Server
-	Backend         *httptest.Server
-	Client          *http.Client
-	CA              *CA
-	BackendHost     string // hostname only (e.g., 127.0.0.1) — for credential matching
-	BackendHostPort string // host:port (e.g., 127.0.0.1:12345) — for extra/remove header matching
+	Proxy       *Proxy
+	ProxyServer *httptest.Server
+	Backend     *httptest.Server
+	Client      *http.Client
+	CA          *CA
+	BackendHost string // hostname only (e.g., 127.0.0.1) — for credential and header matching
 }
 
 func newInterceptTestSetup(t *testing.T, backendHandler http.Handler) *interceptTestSetup {
@@ -59,8 +58,7 @@ func newInterceptTestSetup(t *testing.T, backendHandler http.Handler) *intercept
 		},
 	}
 
-	backendHost := mustParseURL(backend.URL).Host     // host:port for extra header matching (uses r.Host)
-	backendHostname := mustParseURL(backend.URL).Hostname() // hostname only for credential matching
+	backendHostname := mustParseURL(backend.URL).Hostname()
 
 	t.Cleanup(func() {
 		proxyServer.Close()
@@ -68,13 +66,12 @@ func newInterceptTestSetup(t *testing.T, backendHandler http.Handler) *intercept
 	})
 
 	return &interceptTestSetup{
-		Proxy:           p,
-		ProxyServer:     proxyServer,
-		Backend:         backend,
-		Client:          client,
-		CA:              ca,
-		BackendHost:     backendHostname,
-		BackendHostPort: backendHost,
+		Proxy:       p,
+		ProxyServer: proxyServer,
+		Backend:     backend,
+		Client:      client,
+		CA:          ca,
+		BackendHost: backendHostname,
 	}
 }
 
@@ -175,17 +172,17 @@ func TestIntercept_NetworkPolicyDenial(t *testing.T) {
 		logged = data
 	})
 
-	// The CONNECT itself will be denied before TLS interception.
+	// Strict policy denies the CONNECT request itself with 407.
+	// Go's transport returns this as an error (non-200 CONNECT response).
 	resp, err := setup.Client.Get(setup.Backend.URL + "/blocked")
 	if err == nil {
 		resp.Body.Close()
-		// Under strict policy with no allows, CONNECT is denied with 407.
-		if resp.StatusCode != http.StatusProxyAuthRequired {
-			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusProxyAuthRequired)
-		}
+		t.Fatal("expected transport error from denied CONNECT, got nil")
 	}
-	// The client may get a transport error if CONNECT is blocked.
-	// Either way, the request should be denied.
+	// Verify the error message references the 407 status text.
+	if !strings.Contains(err.Error(), "407") && !strings.Contains(err.Error(), "Proxy Authentication Required") {
+		t.Errorf("expected 407/Proxy Authentication Required in error, got: %v", err)
+	}
 	if !logged.Denied {
 		t.Error("expected Denied=true in log")
 	}
@@ -308,7 +305,10 @@ func TestIntercept_RemoveHeaders(t *testing.T) {
 
 	setup.Proxy.RemoveRequestHeader(setup.BackendHost, "X-Api-Key")
 
-	req, _ := http.NewRequest("GET", setup.Backend.URL+"/test", nil)
+	req, err := http.NewRequest("GET", setup.Backend.URL+"/test", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
 	req.Header.Set("X-Api-Key", "stale-key")
 	resp, err := setup.Client.Do(req)
 	if err != nil {
@@ -460,7 +460,10 @@ func TestIntercept_HTTPMethods(t *testing.T) {
 				w.Write([]byte("ok"))
 			}))
 
-			req, _ := http.NewRequest(method, setup.Backend.URL+"/method", nil)
+			req, err := http.NewRequest(method, setup.Backend.URL+"/method", nil)
+			if err != nil {
+				t.Fatalf("NewRequest: %v", err)
+			}
 			resp, err := setup.Client.Do(req)
 			if err != nil {
 				t.Fatalf("request: %v", err)
