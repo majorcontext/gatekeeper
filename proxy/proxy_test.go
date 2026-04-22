@@ -2933,28 +2933,6 @@ func TestIsHostGatewayAliases(t *testing.T) {
 	}
 }
 
-// TestRedactURLUserinfo verifies that the proxy's per-run auth token in URL
-// userinfo is masked before it reaches debug logs.
-func TestRedactURLUserinfo(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-	}{
-		{"http://moat:secrettoken@host:1234/path", "http://***@host:1234/path"},
-		{"https://user:pw@example.com/", "https://***@example.com/"},
-		{"http://example.com/path", "http://example.com/path"},
-		{"", ""},
-		{"not-a-url", "not-a-url"},
-		// Userinfo only inside the authority; an @ in a path must be left alone.
-		{"http://example.com/a@b", "http://example.com/a@b"},
-	}
-	for _, tc := range cases {
-		if got := redactURLUserinfo(tc.in); got != tc.want {
-			t.Errorf("redactURLUserinfo(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
 // TestRewriteURLHost verifies that URL host rewriting preserves port, path,
 // query, and fragment and emits a valid URL for IPv6 loopback aliases. The
 // naive strings.Replace approach used prior to this helper produced

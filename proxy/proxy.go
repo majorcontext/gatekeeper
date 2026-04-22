@@ -1028,29 +1028,6 @@ func (p *Proxy) getResponseTransformersForRequest(r *http.Request, host string) 
 	return p.getResponseTransformers(host)
 }
 
-// redactURLUserinfo removes userinfo (user:password@) from a URL-ish string
-// before logging. The proxy URL carries a per-run auth token in the userinfo
-// component (http://moat:TOKEN@host:port/...) and logging it verbatim would
-// expose the token in debug output. Returns the input unchanged if there is
-// no '@' before the first '/'.
-func redactURLUserinfo(s string) string {
-	schemeEnd := strings.Index(s, "://")
-	if schemeEnd < 0 {
-		return s
-	}
-	rest := s[schemeEnd+3:]
-	slash := strings.IndexByte(rest, '/')
-	authority := rest
-	if slash >= 0 {
-		authority = rest[:slash]
-	}
-	at := strings.IndexByte(authority, '@')
-	if at < 0 {
-		return s
-	}
-	return s[:schemeEnd+3] + "***@" + rest[at+1:]
-}
-
 // rewriteURLHost replaces the host in rawURL with newHost, preserving scheme,
 // port, path, query, and fragment. Falls back to the original string on parse
 // failure. Uses url.Parse rather than strings.Replace so bracketed IPv6 hosts
@@ -1631,16 +1608,6 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err != nil {
-		// Redact proxy userinfo from logged URLs so the per-run auth token
-		// never lands in debug logs verbatim.
-		slog.Warn("proxy forward failed",
-			"subsystem", "proxy",
-			"method", r.Method,
-			"in_url", redactURLUserinfo(r.URL.String()),
-			"out_url", redactURLUserinfo(outURL),
-			"error", err.Error())
-		// Don't echo the upstream error verbatim to the container — it can
-		// leak internal hostnames/IPs and is rarely useful to the agent.
 		http.Error(w, "moat proxy: upstream request failed", http.StatusBadGateway)
 		return
 	}
@@ -1855,7 +1822,10 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			return
 		}
 
-		innerReqID := newRequestID()
+		innerReqID := req.Header.Get("X-Request-Id")
+		if innerReqID == "" {
+			innerReqID = newRequestID()
+		}
 		reqStart := time.Now()
 		req.URL.Scheme = "https"
 		// Rewrite synthetic host-gateway hostname to actual IP for forwarding.
