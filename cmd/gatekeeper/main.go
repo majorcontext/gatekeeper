@@ -39,6 +39,7 @@ func initOTel(ctx context.Context) (shutdown func(context.Context) error, err er
 		}
 	}()
 
+	// WithFromEnv() last so OTEL_RESOURCE_ATTRIBUTES can override at deploy time.
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
 			semconv.ServiceName("gatekeeper"),
@@ -127,12 +128,11 @@ func main() {
 		}
 	}()
 
-	srv, err := gatekeeper.New(ctx, cfg)
+	srv, err := gatekeeper.New(ctx, cfg, version)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating server: %v\n", err)
 		os.Exit(1)
 	}
-	srv.Version = version
 
 	if err := srv.Start(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

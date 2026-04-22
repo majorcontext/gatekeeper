@@ -92,7 +92,7 @@ func TestServerStartStop(t *testing.T) {
 		},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestServerHealthEndpoint(t *testing.T) {
 	cfg := &Config{
 		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
 	}
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestStaticCredentialsNoContextResolver(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestDefaultHeader(t *testing.T) {
 	}
 
 	// Should succeed — header defaults to "Authorization" when omitted.
-	_, err := New(context.Background(), cfg)
+	_, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestMissingHost(t *testing.T) {
 		},
 	}
 
-	_, err := New(context.Background(), cfg)
+	_, err := New(context.Background(), cfg, "")
 	if err == nil {
 		t.Fatal("expected error for credential without host")
 	}
@@ -237,7 +237,7 @@ func TestAuthToken(t *testing.T) {
 		},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestDefaultProxyHost(t *testing.T) {
 		Proxy: ProxyConfig{Port: 0}, // no host specified
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestTLSCALoading(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New with TLS: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestTLSCAMissingCert(t *testing.T) {
 		},
 	}
 
-	_, err := New(context.Background(), cfg)
+	_, err := New(context.Background(), cfg, "")
 	if err == nil {
 		t.Fatal("expected error for missing CA cert")
 	}
@@ -392,7 +392,7 @@ func TestTLSCAPartialConfig(t *testing.T) {
 		},
 	}
 
-	_, err := New(context.Background(), cfg)
+	_, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New with partial TLS should succeed (no interception): %v", err)
 	}
@@ -446,7 +446,7 @@ func TestTLSCAWithECKey(t *testing.T) {
 		},
 	}
 
-	_, err = New(context.Background(), cfg)
+	_, err = New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New with EC CA: %v", err)
 	}
@@ -490,7 +490,7 @@ func TestHTTPSCredentialInjection(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -546,7 +546,7 @@ func TestTLSCAInvalidPEM(t *testing.T) {
 		},
 	}
 
-	_, err := New(context.Background(), cfg)
+	_, err := New(context.Background(), cfg, "")
 	if err == nil {
 		t.Fatal("expected error for invalid PEM")
 	}
@@ -579,7 +579,7 @@ func TestHTTPCredentialInjection(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -641,7 +641,7 @@ func TestHTTPSCustomHeaderInjection(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -694,7 +694,7 @@ func TestStrictNetworkPolicy(t *testing.T) {
 		},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -765,7 +765,7 @@ func TestMultipleCredentialsSameHost(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -814,7 +814,7 @@ func TestAuthSchemeAutoDetectionThroughProxy(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -863,7 +863,7 @@ func TestBasicFormatCredentialInjection(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -926,7 +926,7 @@ func TestBasicFormatHTTPSCredentialInjection(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -972,7 +972,7 @@ func TestBasicFormatValidation(t *testing.T) {
 				},
 			},
 		}
-		_, err := New(context.Background(), cfg)
+		_, err := New(context.Background(), cfg, "")
 		if err == nil {
 			t.Fatal("expected error for unknown format")
 		}
@@ -1000,7 +1000,7 @@ func TestBasicFormatValidation(t *testing.T) {
 				},
 			},
 		}
-		_, err := New(context.Background(), cfg)
+		_, err := New(context.Background(), cfg, "")
 		if err != nil {
 			t.Fatalf("format: basic should be accepted for token-exchange: %v", err)
 		}
@@ -1018,7 +1018,7 @@ func TestBasicFormatValidation(t *testing.T) {
 				},
 			},
 		}
-		_, err := New(context.Background(), cfg)
+		_, err := New(context.Background(), cfg, "")
 		if err == nil {
 			t.Fatal("expected error for basic format with non-Authorization header")
 		}
@@ -1088,7 +1088,7 @@ func TestOTelSpanEventsViaHTTPRequest(t *testing.T) {
 	cfg := &Config{
 		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
 	}
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1182,7 +1182,7 @@ func TestStartCredentialRefresh_CancelStopsGoroutine(t *testing.T) {
 	cfg := &Config{
 		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
 	}
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1295,7 +1295,7 @@ func TestHTTPSTokenExchangeEndToEnd(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1419,7 +1419,7 @@ func TestHTTPSTokenExchangeNoSubject(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1532,7 +1532,7 @@ func TestHTTPSTokenExchangeProxyAuthSubject(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1655,7 +1655,7 @@ func TestHTTPSTokenExchangeActorToken(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1773,7 +1773,7 @@ func TestHTTPSTokenExchangeActorTokenWithAuthToken(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1880,7 +1880,7 @@ func TestHTTPSTokenExchangeBasicFormat(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1984,7 +1984,7 @@ func TestHTTPTokenExchangeRelay(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -2085,7 +2085,7 @@ func TestHTTPTokenExchangeProxyAuthRelay(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -2181,7 +2181,7 @@ func TestHTTPSTokenExchangeFallbackToStatic(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg)
+	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
