@@ -1666,6 +1666,8 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	start := time.Now()
+
 	// Check network policy before establishing tunnel
 	if !p.checkNetworkPolicyForRequest(r, host, port, "CONNECT", "") {
 		rc := getRunContext(r)
@@ -1681,6 +1683,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 			Host:         host,
 			RequestType:  "connect",
 			StatusCode:   http.StatusProxyAuthRequired,
+			Duration:     time.Since(start),
 			RequestSize:  -1,
 			ResponseSize: -1,
 			Denied:       true,
