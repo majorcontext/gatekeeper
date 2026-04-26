@@ -39,7 +39,7 @@ var mcpRelayClient = &http.Client{
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Minute,
 		IdleConnTimeout:       90 * time.Second,
 	},
 }

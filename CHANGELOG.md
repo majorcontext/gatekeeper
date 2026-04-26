@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.9.1 — 2026-04-26
+
+### Fixed
+
+- **Increased response header timeout from 30s to 5m** — LLM inference (especially extended thinking models like Claude 3.7 Sonnet) can take well over 30 seconds before the first response byte; the previous 30s `ResponseHeaderTimeout` caused read timeouts on slow-to-start completions; the new 5-minute default covers extended thinking while still catching genuinely dead connections; applies to all transport paths (CONNECT interception, HTTP relay, MCP relay)
+
 ## v0.9.0 — 2026-04-22
 
 ### Added
