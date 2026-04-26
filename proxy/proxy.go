@@ -126,7 +126,7 @@ var httpTransport = &http.Transport{
 		KeepAlive: 30 * time.Second,
 	}).DialContext,
 	TLSHandshakeTimeout:   10 * time.Second,
-	ResponseHeaderTimeout: 30 * time.Second,
+	ResponseHeaderTimeout: 5 * time.Minute,
 	IdleConnTimeout:       90 * time.Second,
 }
 
@@ -1922,7 +1922,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			RootCAs:    p.upstreamCAs, // nil means system roots
 		},
 		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Minute,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		// Note: Do NOT set ForceAttemptHTTP2 here. This transport forwards
