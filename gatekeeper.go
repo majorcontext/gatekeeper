@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/majorcontext/gatekeeper/credentialsource"
 	"github.com/majorcontext/gatekeeper/proxy"
@@ -238,6 +239,9 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 		if data.RunID != "" {
 			attrs = append(attrs, slog.String("run_id", data.RunID))
 		}
+		if data.UserID != "" {
+			attrs = append(attrs, slog.String("user_id", data.UserID))
+		}
 		if data.AuthInjected {
 			attrs = append(attrs, slog.Bool("credential_injected", true))
 			var headerNames []string
@@ -264,6 +268,23 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 		}
 		if data.Err != nil {
 			attrs = append(attrs, slog.String("error", data.Err.Error()))
+		}
+
+		// Append captured request headers as structured log attributes.
+		if data.RequestHeaders != nil {
+			for _, h := range cfg.Log.CaptureHeaders {
+				if v := data.RequestHeaders.Get(h); v != "" {
+					if len(v) > 256 {
+						// Truncate at a valid UTF-8 boundary to avoid splitting multi-byte characters.
+						v = v[:256]
+						for len(v) > 0 && !utf8.ValidString(v) {
+							v = v[:len(v)-1]
+						}
+					}
+					key := strings.ReplaceAll(strings.ToLower(h), "-", "_")
+					attrs = append(attrs, slog.String(key, v))
+				}
+			}
 		}
 
 		level := slog.LevelInfo
@@ -296,6 +317,9 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 				}
 				if data.RunID != "" {
 					spanAttrs = append(spanAttrs, attribute.String("run_id", data.RunID))
+				}
+				if data.UserID != "" {
+					spanAttrs = append(spanAttrs, attribute.String("user_id", data.UserID))
 				}
 				var headerNames []string
 				for name := range data.InjectedHeaders {
@@ -364,6 +388,13 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 		if cred.Source.ActorTokenFrom != "" {
 			p.SetDelegateAuth(true)
 			break
+		}
+	}
+
+	// Configure capture headers if specified.
+	if len(cfg.Log.CaptureHeaders) > 0 {
+		if err := p.SetCaptureHeaders(cfg.Log.CaptureHeaders); err != nil {
+			return nil, fmt.Errorf("capture_headers: %w", err)
 		}
 	}
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -1124,6 +1125,10 @@ func mustParseURL(s string) *url.URL {
 		panic(err)
 	}
 	return u
+}
+
+func basicAuth(user, pass string) string {
+	return base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
 }
 
 // TestProxy_SetCredentialHeader tests custom header injection (e.g., x-api-key for Anthropic).
@@ -3405,5 +3410,213 @@ func TestProxy_CredentialResolverNoMatch(t *testing.T) {
 
 	if receivedAuth != "" {
 		t.Errorf("Authorization should be empty for non-matching host, got %q", receivedAuth)
+	}
+}
+
+func TestExtractProxyUsername(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{"basic auth", "Basic " + basicAuth("alice", "secret"), "alice"},
+		{"empty username", "Basic " + basicAuth("", "secret"), ""},
+		{"bearer token", "Bearer some-token", ""},
+		{"no header", "", ""},
+		{"invalid base64", "Basic !!!invalid!!!", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _ := http.NewRequest("GET", "http://example.com", nil)
+			if tt.header != "" {
+				r.Header.Set("Proxy-Authorization", tt.header)
+			}
+			got := extractProxyUsername(r)
+			if got != tt.want {
+				t.Errorf("extractProxyUsername() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProxy_CanonicalLogLine_UserID_ContextResolver(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		if token == "my-token" {
+			return &RunContextData{Policy: "permissive"}, true
+		}
+		return nil, false
+	})
+
+	var logged RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		logged = data
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	proxyURL := mustParseURL(proxyServer.URL)
+	proxyURL.User = url.UserPassword("alice", "my-token")
+
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+
+	resp, err := client.Get(backend.URL + "/test")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if logged.UserID != "alice" {
+		t.Errorf("UserID = %q, want %q", logged.UserID, "alice")
+	}
+}
+
+func TestProxy_CanonicalLogLine_UserID_StaticAuthToken(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	p.SetAuthToken("secret-token")
+
+	var logged RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		logged = data
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	proxyURL := mustParseURL(proxyServer.URL)
+	proxyURL.User = url.UserPassword("bob", "secret-token")
+
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+
+	resp, err := client.Get(backend.URL + "/test")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if logged.UserID != "bob" {
+		t.Errorf("UserID = %q, want %q", logged.UserID, "bob")
+	}
+}
+
+func TestProxy_CanonicalLogLine_UserID_BearerNoUsername(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		if token == "bearer-token" {
+			return &RunContextData{Policy: "permissive"}, true
+		}
+		return nil, false
+	})
+
+	var logged RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		logged = data
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	proxyURL := mustParseURL(proxyServer.URL)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+
+	req, _ := http.NewRequest("GET", backend.URL+"/test", nil)
+	req.Header.Set("Proxy-Authorization", "Bearer bearer-token")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if logged.UserID != "" {
+		t.Errorf("UserID = %q, want empty (Bearer has no username)", logged.UserID)
+	}
+}
+
+func TestProxy_CaptureHeaders_StrippedBeforeForwarding(t *testing.T) {
+	var receivedHeaders http.Header
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	p.SetCaptureHeaders([]string{"X-Workspace-Slug", "X-Request-Source"})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxyServer.URL))}}
+
+	req, _ := http.NewRequest("GET", backend.URL+"/test", nil)
+	req.Header.Set("X-Workspace-Slug", "sneaky-plum")
+	req.Header.Set("X-Request-Source", "agent")
+	req.Header.Set("X-Other", "keep-this")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if receivedHeaders.Get("X-Workspace-Slug") != "" {
+		t.Error("X-Workspace-Slug should be stripped before forwarding")
+	}
+	if receivedHeaders.Get("X-Request-Source") != "" {
+		t.Error("X-Request-Source should be stripped before forwarding")
+	}
+	if receivedHeaders.Get("X-Other") != "keep-this" {
+		t.Errorf("X-Other = %q, want keep-this (non-capture headers should pass through)", receivedHeaders.Get("X-Other"))
+	}
+}
+
+func TestProxy_CaptureHeaders_AvailableInLogData(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	p.SetCaptureHeaders([]string{"X-Workspace-Slug"})
+
+	var logged RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		logged = data
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxyServer.URL))}}
+
+	req, _ := http.NewRequest("GET", backend.URL+"/test", nil)
+	req.Header.Set("X-Workspace-Slug", "sneaky-plum")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	// RequestHeaders should contain the original headers (before stripping)
+	if logged.RequestHeaders == nil {
+		t.Fatal("RequestHeaders is nil")
+	}
+	if got := logged.RequestHeaders.Get("X-Workspace-Slug"); got != "sneaky-plum" {
+		t.Errorf("RequestHeaders[X-Workspace-Slug] = %q, want sneaky-plum", got)
 	}
 }

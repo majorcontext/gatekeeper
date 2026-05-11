@@ -1,9 +1,13 @@
 package gatekeeper
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/majorcontext/gatekeeper/proxy"
 )
 
 func TestParseConfig_Full(t *testing.T) {
@@ -165,5 +169,81 @@ func TestLoadConfig_NotFound(t *testing.T) {
 	_, err := LoadConfig("/nonexistent/config.yaml")
 	if err == nil {
 		t.Fatal("expected error for missing file")
+	}
+}
+
+func TestParseConfig_CaptureHeaders(t *testing.T) {
+	yaml := `
+log:
+  capture_headers:
+    - X-Workspace-Slug
+    - X-Request-Source
+`
+	cfg, err := ParseConfig([]byte(yaml))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if len(cfg.Log.CaptureHeaders) != 2 {
+		t.Fatalf("CaptureHeaders len = %d, want 2", len(cfg.Log.CaptureHeaders))
+	}
+	if cfg.Log.CaptureHeaders[0] != "X-Workspace-Slug" {
+		t.Errorf("CaptureHeaders[0] = %q, want X-Workspace-Slug", cfg.Log.CaptureHeaders[0])
+	}
+}
+
+func TestValidateCaptureHeaders_MaxExceeded(t *testing.T) {
+	headers := make([]string, 11)
+	for i := range headers {
+		headers[i] = fmt.Sprintf("X-Header-%d", i)
+	}
+	err := proxy.ValidateCaptureHeaders(headers)
+	if err == nil {
+		t.Fatal("expected error for >10 headers")
+	}
+	if !strings.Contains(err.Error(), "max 10") {
+		t.Errorf("error = %q, want mention of max 10", err.Error())
+	}
+}
+
+func TestValidateCaptureHeaders_SensitiveRejected(t *testing.T) {
+	tests := []string{"Authorization", "proxy-authorization", "Cookie"}
+	for _, h := range tests {
+		t.Run(h, func(t *testing.T) {
+			err := proxy.ValidateCaptureHeaders([]string{h})
+			if err == nil {
+				t.Fatalf("expected error for sensitive header %q", h)
+			}
+			if !strings.Contains(err.Error(), "sensitive") {
+				t.Errorf("error = %q, want mention of sensitive", err.Error())
+			}
+		})
+	}
+}
+
+func TestValidateCaptureHeaders_Valid(t *testing.T) {
+	err := proxy.ValidateCaptureHeaders([]string{"X-Workspace-Slug", "X-Request-Source"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateCaptureHeaders_Empty(t *testing.T) {
+	err := proxy.ValidateCaptureHeaders(nil)
+	if err != nil {
+		t.Fatalf("unexpected error for nil: %v", err)
+	}
+	err = proxy.ValidateCaptureHeaders([]string{})
+	if err != nil {
+		t.Fatalf("unexpected error for empty: %v", err)
+	}
+}
+
+func TestValidateCaptureHeaders_Duplicate(t *testing.T) {
+	err := proxy.ValidateCaptureHeaders([]string{"X-Workspace-Slug", "x-workspace-slug"})
+	if err == nil {
+		t.Fatal("expected error for duplicate headers")
+	}
+	if !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("error = %q, want mention of duplicate", err.Error())
 	}
 }

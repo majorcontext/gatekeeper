@@ -59,6 +59,7 @@ type contextKey int
 const (
 	runContextKey contextKey = iota
 	requestIDKey
+	userIDKey
 )
 
 // newRequestID generates a TypeID with prefix "req" (e.g., "req_01h455vb4pex5vsknk084sn02q").
@@ -78,6 +79,19 @@ func withRequestID(ctx context.Context, id string) context.Context {
 // RequestIDFromContext extracts the request ID from a context, or empty string.
 func RequestIDFromContext(ctx context.Context) string {
 	if id, ok := ctx.Value(requestIDKey).(string); ok {
+		return id
+	}
+	return ""
+}
+
+// withUserID returns a new context with the given user ID.
+func withUserID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, userIDKey, id)
+}
+
+// UserIDFromContext extracts the user ID from a context, or empty string.
+func UserIDFromContext(ctx context.Context) string {
+	if id, ok := ctx.Value(userIDKey).(string); ok {
 		return id
 	}
 	return ""
@@ -158,6 +172,7 @@ type RequestLogData struct {
 	Denied          bool            // True if request was denied by network/keep policy
 	DenyReason      string          // Why the request was denied (e.g., "network_policy", "keep_policy")
 	RunID           string          // Run ID from per-run context (daemon mode)
+	UserID          string          // User ID from proxy auth username
 	Ctx             context.Context // Request context (for OTel span extraction, may be nil)
 }
 
@@ -263,8 +278,8 @@ func FilterHeaders(headers http.Header, injectedHeaders map[string]bool) map[str
 // logRequest is a helper that logs request data if a logger is configured.
 // The ctxReq parameter provides the RunContextData (from CONNECT or HTTP request context)
 // for extracting the RunID; it may be nil when context is unavailable.
-// The data struct is passed by value; this method enriches it with RunID and Ctx
-// from ctxReq before forwarding to the logger callback.
+// The data struct is passed by value; this method enriches it with RunID, UserID,
+// and Ctx from ctxReq before forwarding to the logger callback.
 func (p *Proxy) logRequest(ctxReq *http.Request, data RequestLogData) {
 	if p.logger == nil {
 		return
@@ -272,6 +287,9 @@ func (p *Proxy) logRequest(ctxReq *http.Request, data RequestLogData) {
 	if ctxReq != nil {
 		if rc := getRunContext(ctxReq); rc != nil {
 			data.RunID = rc.RunID
+		}
+		if uid := UserIDFromContext(ctxReq.Context()); uid != "" {
+			data.UserID = uid
 		}
 		data.Ctx = ctxReq.Context()
 		if data.RequestID == "" {
@@ -408,6 +426,7 @@ type Proxy struct {
 	contextResolver      ContextResolver               // optional per-run credential resolver
 	policyLogger         PolicyLogger                  // optional policy decision logger
 	upstreamCAs          *x509.CertPool                // optional CA pool for upstream TLS verification
+	captureHeaders       []string                      // headers to capture in logs and strip before forwarding
 }
 
 // NewProxy creates a new auth proxy.
@@ -501,6 +520,45 @@ func (p *Proxy) SetCredentialStore(store CredentialStore) {
 // When set, the proxy can resolve auth tokens to per-run credential data.
 func (p *Proxy) SetContextResolver(resolver ContextResolver) {
 	p.contextResolver = resolver
+}
+
+// SetCaptureHeaders configures headers to capture in request logs and strip
+// before forwarding upstream. Header matching is case-insensitive.
+// Returns an error if any header is sensitive (Authorization, Proxy-Authorization, Cookie),
+// if there are more than 10 headers, or if duplicates are present.
+func (p *Proxy) SetCaptureHeaders(headers []string) error {
+	if err := ValidateCaptureHeaders(headers); err != nil {
+		return err
+	}
+	p.captureHeaders = headers
+	return nil
+}
+
+// sensitiveHeaders are headers that must never be captured, even if configured.
+var sensitiveHeaders = map[string]bool{
+	"authorization":       true,
+	"proxy-authorization": true,
+	"cookie":              true,
+}
+
+// ValidateCaptureHeaders checks a capture headers list for validity.
+// Rejects sensitive headers, more than 10 entries, and case-insensitive duplicates.
+func ValidateCaptureHeaders(headers []string) error {
+	if len(headers) > 10 {
+		return fmt.Errorf("capture_headers: max 10 headers allowed, got %d", len(headers))
+	}
+	seen := make(map[string]bool, len(headers))
+	for _, h := range headers {
+		lower := strings.ToLower(h)
+		if sensitiveHeaders[lower] {
+			return fmt.Errorf("capture_headers: %q is a sensitive header and cannot be captured", h)
+		}
+		if seen[lower] {
+			return fmt.Errorf("capture_headers: duplicate header %q", h)
+		}
+		seen[lower] = true
+	}
+	return nil
 }
 
 // ResolveContext looks up per-run context data by auth token.
@@ -1296,15 +1354,26 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ctx := context.WithValue(r.Context(), runContextKey, rc)
+		if uid := extractProxyUsername(r); uid != "" {
+			ctx = withUserID(ctx, uid)
+		}
 		r = r.WithContext(ctx)
 	} else if p.delegateAuth {
 		if !hasBasicProxyAuth(r) {
 			writeProxyAuthRequired(w, "Proxy authentication required")
 			return
 		}
+		if uid := extractProxyUsername(r); uid != "" {
+			r = r.WithContext(withUserID(r.Context(), uid))
+		}
 	} else if p.authToken != "" && !p.checkAuth(r) {
 		writeProxyAuthRequired(w, "Proxy authentication required")
 		return
+	} else if p.authToken != "" {
+		// Auth passed — extract username if present.
+		if uid := extractProxyUsername(r); uid != "" {
+			r = r.WithContext(withUserID(r.Context(), uid))
+		}
 	}
 
 	// Handle AWS credential endpoint
@@ -1388,6 +1457,25 @@ func extractProxyToken(r *http.Request) (string, bool) {
 	return "", false
 }
 
+// extractProxyUsername extracts the username from a Basic Proxy-Authorization header.
+// For HTTP_PROXY=http://user:token@host, this returns "user".
+// Returns empty string for Bearer auth or if no valid username is found.
+func extractProxyUsername(r *http.Request) string {
+	auth := r.Header.Get("Proxy-Authorization")
+	if auth == "" || !strings.HasPrefix(auth, "Basic ") {
+		return ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(auth[6:])
+	if err != nil {
+		return ""
+	}
+	parts := strings.SplitN(string(decoded), ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	return parts[0]
+}
+
 // checkAuth validates the Proxy-Authorization header against the required token.
 // Accepts both Basic auth (from HTTP_PROXY=http://moat:token@host) and Bearer format.
 // Uses constant-time comparison to prevent timing attacks.
@@ -1451,16 +1539,17 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "credential resolution failed", http.StatusBadGateway)
 		p.logRequest(r, RequestLogData{
-			Method:       r.Method,
-			URL:          r.URL.String(),
-			Host:         host,
-			Path:         r.URL.Path,
-			RequestType:  "http",
-			StatusCode:   http.StatusBadGateway,
-			Duration:     time.Since(start),
-			RequestSize:  r.ContentLength,
-			ResponseSize: -1,
-			Err:          err,
+			Method:         r.Method,
+			URL:            r.URL.String(),
+			Host:           host,
+			Path:           r.URL.Path,
+			RequestType:    "http",
+			StatusCode:     http.StatusBadGateway,
+			Duration:       time.Since(start),
+			RequestHeaders: r.Header.Clone(),
+			RequestSize:    r.ContentLength,
+			ResponseSize:   -1,
+			Err:            err,
 		})
 		return
 	}
@@ -1561,6 +1650,16 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		outReq.Header.Del(headerName)
 	}
+
+	// Strip capture headers — they're metadata for the proxy, not the destination.
+	// Skip headers that were just injected as credentials.
+	for _, headerName := range p.captureHeaders {
+		if credResult.InjectedHeaders[strings.ToLower(headerName)] {
+			continue
+		}
+		outReq.Header.Del(headerName)
+	}
+
 	// Apply token substitution if configured.
 	// Substitution targets outReq (not r), so r.URL.String() used for logging
 	// below still contains the placeholder, not the real token.
@@ -1982,6 +2081,15 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				pr.Out.Header.Del(headerName)
 			}
 
+			// Strip capture headers — they're metadata for the proxy, not the destination.
+			// Skip headers that were just injected as credentials.
+			for _, headerName := range p.captureHeaders {
+				if credResult.InjectedHeaders[strings.ToLower(headerName)] {
+					continue
+				}
+				pr.Out.Header.Del(headerName)
+			}
+
 			// Capture URL before token substitution so logs don't contain real tokens.
 			logURL := pr.Out.URL.String()
 			ctx = context.WithValue(pr.Out.Context(), interceptLogURLKey{}, logURL)
@@ -2074,6 +2182,10 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			if logURL == "" {
 				logURL = req.URL.String()
 			}
+			preHeaders, _ := req.Context().Value(interceptPreInjHeadersKey{}).(http.Header)
+			if preHeaders == nil {
+				preHeaders = req.Header.Clone()
+			}
 			p.logRequest(r, RequestLogData{
 				RequestID:       req.Header.Get("X-Request-Id"),
 				Method:          req.Method,
@@ -2083,6 +2195,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				RequestType:     "connect",
 				StatusCode:      http.StatusBadGateway,
 				Duration:        time.Since(reqStartFromContext(req.Context())),
+				RequestHeaders:  preHeaders,
 				RequestSize:     req.ContentLength,
 				ResponseSize:    -1,
 				Err:             err,
@@ -2105,18 +2218,19 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		// Network policy check.
 		if !p.checkNetworkPolicyForRequest(r, host, connectPort, req.Method, req.URL.Path) {
 			p.logRequest(r, RequestLogData{
-				RequestID:    innerReqID,
-				Method:       req.Method,
-				URL:          "https://" + r.Host + req.URL.RequestURI(),
-				Host:         host,
-				Path:         req.URL.Path,
-				RequestType:  "connect",
-				StatusCode:   http.StatusProxyAuthRequired,
-				Duration:     time.Since(reqStart),
-				RequestSize:  req.ContentLength,
-				ResponseSize: -1,
-				Denied:       true,
-				DenyReason:   "Request blocked by network policy: " + req.Method + " " + host + req.URL.Path,
+				RequestID:      innerReqID,
+				Method:         req.Method,
+				URL:            "https://" + r.Host + req.URL.RequestURI(),
+				Host:           host,
+				Path:           req.URL.Path,
+				RequestType:    "connect",
+				StatusCode:     http.StatusProxyAuthRequired,
+				Duration:       time.Since(reqStart),
+				RequestHeaders: req.Header.Clone(),
+				RequestSize:    req.ContentLength,
+				ResponseSize:   -1,
+				Denied:         true,
+				DenyReason:     "Request blocked by network policy: " + req.Method + " " + host + req.URL.Path,
 			})
 			p.logPolicy(r, "network", "http.request", "", req.Method+" "+host+req.URL.Path)
 			w.Header().Set("X-Moat-Blocked", "request-rule")
@@ -2134,19 +2248,20 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				result, evalErr := keeplib.SafeEvaluate(eng, call, "http")
 				if evalErr != nil {
 					p.logRequest(r, RequestLogData{
-						RequestID:    innerReqID,
-						Method:       req.Method,
-						URL:          "https://" + r.Host + req.URL.RequestURI(),
-						Host:         host,
-						Path:         req.URL.Path,
-						RequestType:  "connect",
-						StatusCode:   http.StatusForbidden,
-						Duration:     time.Since(reqStart),
-						RequestSize:  req.ContentLength,
-						ResponseSize: -1,
-						Denied:       true,
-						DenyReason:   "Keep policy evaluation error",
-						Err:          evalErr,
+						RequestID:      innerReqID,
+						Method:         req.Method,
+						URL:            "https://" + r.Host + req.URL.RequestURI(),
+						Host:           host,
+						Path:           req.URL.Path,
+						RequestType:    "connect",
+						StatusCode:     http.StatusForbidden,
+						Duration:       time.Since(reqStart),
+						RequestHeaders: req.Header.Clone(),
+						RequestSize:    req.ContentLength,
+						ResponseSize:   -1,
+						Denied:         true,
+						DenyReason:     "Keep policy evaluation error",
+						Err:            evalErr,
 					})
 					p.logPolicy(r, "http", "http.request", "evaluation-error", "Policy evaluation failed")
 					w.Header().Set("X-Moat-Blocked", "keep-policy")
@@ -2157,18 +2272,19 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				}
 				if result.Decision == keeplib.Deny {
 					p.logRequest(r, RequestLogData{
-						RequestID:    innerReqID,
-						Method:       req.Method,
-						URL:          "https://" + r.Host + req.URL.RequestURI(),
-						Host:         host,
-						Path:         req.URL.Path,
-						RequestType:  "connect",
-						StatusCode:   http.StatusForbidden,
-						Duration:     time.Since(reqStart),
-						RequestSize:  req.ContentLength,
-						ResponseSize: -1,
-						Denied:       true,
-						DenyReason:   "Keep policy denied: " + result.Rule + " " + result.Message,
+						RequestID:      innerReqID,
+						Method:         req.Method,
+						URL:            "https://" + r.Host + req.URL.RequestURI(),
+						Host:           host,
+						Path:           req.URL.Path,
+						RequestType:    "connect",
+						StatusCode:     http.StatusForbidden,
+						Duration:       time.Since(reqStart),
+						RequestHeaders: req.Header.Clone(),
+						RequestSize:    req.ContentLength,
+						ResponseSize:   -1,
+						Denied:         true,
+						DenyReason:     "Keep policy denied: " + result.Rule + " " + result.Message,
 					})
 					p.logPolicy(r, "http", "http.request", result.Rule, result.Message)
 					w.Header().Set("X-Moat-Blocked", "keep-policy")
@@ -2194,17 +2310,18 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			w.WriteHeader(http.StatusBadGateway)
 			fmt.Fprint(w, "credential resolution failed\n")
 			p.logRequest(r, RequestLogData{
-				RequestID:    innerReqID,
-				Method:       req.Method,
-				URL:          "https://" + r.Host + req.URL.RequestURI(),
-				Host:         host,
-				Path:         req.URL.Path,
-				RequestType:  "connect",
-				StatusCode:   http.StatusBadGateway,
-				Duration:     time.Since(reqStart),
-				RequestSize:  req.ContentLength,
-				ResponseSize: -1,
-				Err:          credErr,
+				RequestID:      innerReqID,
+				Method:         req.Method,
+				URL:            "https://" + r.Host + req.URL.RequestURI(),
+				Host:           host,
+				Path:           req.URL.Path,
+				RequestType:    "connect",
+				StatusCode:     http.StatusBadGateway,
+				Duration:       time.Since(reqStart),
+				RequestHeaders: req.Header.Clone(),
+				RequestSize:    req.ContentLength,
+				ResponseSize:   -1,
+				Err:            credErr,
 			})
 			return
 		}

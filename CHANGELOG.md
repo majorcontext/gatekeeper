@@ -4,6 +4,13 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.10.0 — 2026-05-11
+
+### Added
+
+- **`capture_headers` log config** — new `log.capture_headers` field captures specified request headers as structured attributes in the canonical `"request"` log entry; matched headers are stripped before forwarding upstream; header names are logged as lowercase with hyphens converted to underscores (e.g., `X-Workspace-Slug` → `x_workspace_slug`); values are truncated at 256 characters; sensitive headers (`Authorization`, `Proxy-Authorization`, `Cookie`) are rejected at startup; max 10 headers allowed
+- **User ID in canonical request log** — the proxy auth username (from `HTTP_PROXY=http://user:token@host`) is now logged as `user_id` in the canonical request log entry and included in OTel span attributes
+
 ## v0.9.1 — 2026-04-26
 
 ### Fixed
