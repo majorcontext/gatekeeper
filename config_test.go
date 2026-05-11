@@ -1,6 +1,7 @@
 package gatekeeper
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -191,7 +192,7 @@ log:
 func TestValidateCaptureHeaders_MaxExceeded(t *testing.T) {
 	headers := make([]string, 11)
 	for i := range headers {
-		headers[i] = "X-Header-" + string(rune('A'+i))
+		headers[i] = fmt.Sprintf("X-Header-%d", i)
 	}
 	err := validateCaptureHeaders(headers)
 	if err == nil {
@@ -232,5 +233,15 @@ func TestValidateCaptureHeaders_Empty(t *testing.T) {
 	err = validateCaptureHeaders([]string{})
 	if err != nil {
 		t.Fatalf("unexpected error for empty: %v", err)
+	}
+}
+
+func TestValidateCaptureHeaders_Duplicate(t *testing.T) {
+	err := validateCaptureHeaders([]string{"X-Workspace-Slug", "x-workspace-slug"})
+	if err == nil {
+		t.Fatal("expected error for duplicate headers")
+	}
+	if !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("error = %q, want mention of duplicate", err.Error())
 	}
 }

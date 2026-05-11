@@ -1618,7 +1618,11 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Strip capture headers — they're metadata for the proxy, not the destination.
+	// Skip headers that were just injected as credentials.
 	for _, headerName := range p.captureHeaders {
+		if credResult.InjectedHeaders[strings.ToLower(headerName)] {
+			continue
+		}
 		outReq.Header.Del(headerName)
 	}
 
@@ -2044,7 +2048,11 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			}
 
 			// Strip capture headers — they're metadata for the proxy, not the destination.
+			// Skip headers that were just injected as credentials.
 			for _, headerName := range p.captureHeaders {
+				if credResult.InjectedHeaders[strings.ToLower(headerName)] {
+					continue
+				}
 				pr.Out.Header.Del(headerName)
 			}
 

@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/majorcontext/gatekeeper/credentialsource"
 	"github.com/majorcontext/gatekeeper/proxy"
@@ -162,10 +163,16 @@ func validateCaptureHeaders(headers []string) error {
 	if len(headers) > 10 {
 		return fmt.Errorf("capture_headers: max 10 headers allowed, got %d", len(headers))
 	}
+	seen := make(map[string]bool, len(headers))
 	for _, h := range headers {
-		if sensitiveHeaders[strings.ToLower(h)] {
+		lower := strings.ToLower(h)
+		if sensitiveHeaders[lower] {
 			return fmt.Errorf("capture_headers: %q is a sensitive header and cannot be captured", h)
 		}
+		if seen[lower] {
+			return fmt.Errorf("capture_headers: duplicate header %q", h)
+		}
+		seen[lower] = true
 	}
 	return nil
 }
@@ -299,7 +306,11 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 			for _, h := range cfg.Log.CaptureHeaders {
 				if v := data.RequestHeaders.Get(h); v != "" {
 					if len(v) > 256 {
+						// Truncate at a valid UTF-8 boundary to avoid splitting multi-byte characters.
 						v = v[:256]
+						for len(v) > 0 && !utf8.Valid([]byte(v)) {
+							v = v[:len(v)-1]
+						}
 					}
 					key := strings.ReplaceAll(strings.ToLower(h), "-", "_")
 					attrs = append(attrs, slog.String(key, v))

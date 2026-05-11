@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -609,5 +610,117 @@ func TestIntercept_WebSocketUpgrade(t *testing.T) {
 	// Verify credential was injected on the upgrade request.
 	if !logged.AuthInjected {
 		t.Error("expected credential injection on upgrade request")
+	}
+}
+
+func TestIntercept_CaptureHeaders_StrippedBeforeForwarding(t *testing.T) {
+	var receivedHeaders http.Header
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeaders = r.Header.Clone()
+		w.Write([]byte("ok"))
+	}))
+
+	setup.Proxy.SetCaptureHeaders([]string{"X-Workspace-Slug", "X-Request-Source"})
+
+	var logged RequestLogData
+	setup.Proxy.SetLogger(func(data RequestLogData) {
+		logged = data
+	})
+
+	req, _ := http.NewRequest("GET", setup.Backend.URL+"/test", nil)
+	req.Header.Set("X-Workspace-Slug", "sneaky-plum")
+	req.Header.Set("X-Request-Source", "agent")
+	req.Header.Set("X-Other", "keep-this")
+
+	resp, err := setup.Client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body)
+
+	// Verify capture headers were stripped before forwarding.
+	if receivedHeaders.Get("X-Workspace-Slug") != "" {
+		t.Error("X-Workspace-Slug should be stripped before forwarding (CONNECT path)")
+	}
+	if receivedHeaders.Get("X-Request-Source") != "" {
+		t.Error("X-Request-Source should be stripped before forwarding (CONNECT path)")
+	}
+	if receivedHeaders.Get("X-Other") != "keep-this" {
+		t.Errorf("X-Other = %q, want keep-this (non-capture headers should pass through)", receivedHeaders.Get("X-Other"))
+	}
+
+	// Verify capture headers are preserved in log data (from pre-strip snapshot).
+	if logged.RequestHeaders == nil {
+		t.Fatal("RequestHeaders is nil")
+	}
+	if got := logged.RequestHeaders.Get("X-Workspace-Slug"); got != "sneaky-plum" {
+		t.Errorf("logged RequestHeaders[X-Workspace-Slug] = %q, want sneaky-plum", got)
+	}
+}
+
+func TestIntercept_CaptureHeaders_PreservesInjectedCredential(t *testing.T) {
+	var receivedAPIKey string
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAPIKey = r.Header.Get("X-Api-Key")
+		w.Write([]byte("ok"))
+	}))
+
+	// Configure both a credential injection and a capture header for the same header name.
+	setup.Proxy.SetCredentialHeader(setup.BackendHost, "X-Api-Key", "secret-key-123")
+	setup.Proxy.SetCaptureHeaders([]string{"X-Api-Key"})
+
+	resp, err := setup.Client.Get(setup.Backend.URL + "/test")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body)
+
+	// The injected credential must survive the capture header stripping.
+	if receivedAPIKey != "secret-key-123" {
+		t.Errorf("X-Api-Key = %q, want %q (injected credential should not be stripped)", receivedAPIKey, "secret-key-123")
+	}
+}
+
+func TestIntercept_UserID_ContextResolver(t *testing.T) {
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+
+	setup.Proxy.SetContextResolver(func(token string) (*RunContextData, bool) {
+		if token == "my-token" {
+			return &RunContextData{Policy: "permissive"}, true
+		}
+		return nil, false
+	})
+
+	var logged RequestLogData
+	setup.Proxy.SetLogger(func(data RequestLogData) {
+		logged = data
+	})
+
+	// Rebuild the client with proxy auth credentials (user:token).
+	proxyURL := mustParseURL(setup.ProxyServer.URL)
+	proxyURL.User = url.UserPassword("alice", "my-token")
+
+	clientCAs := x509.NewCertPool()
+	clientCAs.AppendCertsFromPEM(setup.CA.certPEM)
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: clientCAs},
+		},
+	}
+
+	resp, err := client.Get(setup.Backend.URL + "/test")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body)
+
+	if logged.UserID != "alice" {
+		t.Errorf("UserID = %q, want %q (CONNECT path)", logged.UserID, "alice")
 	}
 }
