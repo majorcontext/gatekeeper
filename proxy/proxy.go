@@ -59,6 +59,7 @@ type contextKey int
 const (
 	runContextKey contextKey = iota
 	requestIDKey
+	userIDKey
 )
 
 // newRequestID generates a TypeID with prefix "req" (e.g., "req_01h455vb4pex5vsknk084sn02q").
@@ -78,6 +79,19 @@ func withRequestID(ctx context.Context, id string) context.Context {
 // RequestIDFromContext extracts the request ID from a context, or empty string.
 func RequestIDFromContext(ctx context.Context) string {
 	if id, ok := ctx.Value(requestIDKey).(string); ok {
+		return id
+	}
+	return ""
+}
+
+// withUserID returns a new context with the given user ID.
+func withUserID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, userIDKey, id)
+}
+
+// UserIDFromContext extracts the user ID from a context, or empty string.
+func UserIDFromContext(ctx context.Context) string {
+	if id, ok := ctx.Value(userIDKey).(string); ok {
 		return id
 	}
 	return ""
@@ -158,6 +172,7 @@ type RequestLogData struct {
 	Denied          bool            // True if request was denied by network/keep policy
 	DenyReason      string          // Why the request was denied (e.g., "network_policy", "keep_policy")
 	RunID           string          // Run ID from per-run context (daemon mode)
+	UserID          string          // User ID from proxy auth username
 	Ctx             context.Context // Request context (for OTel span extraction, may be nil)
 }
 
@@ -263,8 +278,8 @@ func FilterHeaders(headers http.Header, injectedHeaders map[string]bool) map[str
 // logRequest is a helper that logs request data if a logger is configured.
 // The ctxReq parameter provides the RunContextData (from CONNECT or HTTP request context)
 // for extracting the RunID; it may be nil when context is unavailable.
-// The data struct is passed by value; this method enriches it with RunID and Ctx
-// from ctxReq before forwarding to the logger callback.
+// The data struct is passed by value; this method enriches it with RunID, UserID,
+// and Ctx from ctxReq before forwarding to the logger callback.
 func (p *Proxy) logRequest(ctxReq *http.Request, data RequestLogData) {
 	if p.logger == nil {
 		return
@@ -272,6 +287,9 @@ func (p *Proxy) logRequest(ctxReq *http.Request, data RequestLogData) {
 	if ctxReq != nil {
 		if rc := getRunContext(ctxReq); rc != nil {
 			data.RunID = rc.RunID
+		}
+		if uid := UserIDFromContext(ctxReq.Context()); uid != "" {
+			data.UserID = uid
 		}
 		data.Ctx = ctxReq.Context()
 		if data.RequestID == "" {
@@ -408,6 +426,7 @@ type Proxy struct {
 	contextResolver      ContextResolver               // optional per-run credential resolver
 	policyLogger         PolicyLogger                  // optional policy decision logger
 	upstreamCAs          *x509.CertPool                // optional CA pool for upstream TLS verification
+	captureHeaders       []string                      // headers to capture in logs and strip before forwarding
 }
 
 // NewProxy creates a new auth proxy.
@@ -501,6 +520,12 @@ func (p *Proxy) SetCredentialStore(store CredentialStore) {
 // When set, the proxy can resolve auth tokens to per-run credential data.
 func (p *Proxy) SetContextResolver(resolver ContextResolver) {
 	p.contextResolver = resolver
+}
+
+// SetCaptureHeaders configures headers to capture in request logs and strip
+// before forwarding upstream. Header matching is case-insensitive.
+func (p *Proxy) SetCaptureHeaders(headers []string) {
+	p.captureHeaders = headers
 }
 
 // ResolveContext looks up per-run context data by auth token.
@@ -1296,15 +1321,26 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ctx := context.WithValue(r.Context(), runContextKey, rc)
+		if uid := extractProxyUsername(r); uid != "" {
+			ctx = withUserID(ctx, uid)
+		}
 		r = r.WithContext(ctx)
 	} else if p.delegateAuth {
 		if !hasBasicProxyAuth(r) {
 			writeProxyAuthRequired(w, "Proxy authentication required")
 			return
 		}
+		if uid := extractProxyUsername(r); uid != "" {
+			r = r.WithContext(withUserID(r.Context(), uid))
+		}
 	} else if p.authToken != "" && !p.checkAuth(r) {
 		writeProxyAuthRequired(w, "Proxy authentication required")
 		return
+	} else if p.authToken != "" {
+		// Auth passed — extract username if present.
+		if uid := extractProxyUsername(r); uid != "" {
+			r = r.WithContext(withUserID(r.Context(), uid))
+		}
 	}
 
 	// Handle AWS credential endpoint
@@ -1386,6 +1422,25 @@ func extractProxyToken(r *http.Request) (string, bool) {
 	}
 
 	return "", false
+}
+
+// extractProxyUsername extracts the username from a Basic Proxy-Authorization header.
+// For HTTP_PROXY=http://user:token@host, this returns "user".
+// Returns empty string for Bearer auth or if no valid username is found.
+func extractProxyUsername(r *http.Request) string {
+	auth := r.Header.Get("Proxy-Authorization")
+	if auth == "" || !strings.HasPrefix(auth, "Basic ") {
+		return ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(auth[6:])
+	if err != nil {
+		return ""
+	}
+	parts := strings.SplitN(string(decoded), ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	return parts[0]
 }
 
 // checkAuth validates the Proxy-Authorization header against the required token.
@@ -1561,6 +1616,12 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		outReq.Header.Del(headerName)
 	}
+
+	// Strip capture headers — they're metadata for the proxy, not the destination.
+	for _, headerName := range p.captureHeaders {
+		outReq.Header.Del(headerName)
+	}
+
 	// Apply token substitution if configured.
 	// Substitution targets outReq (not r), so r.URL.String() used for logging
 	// below still contains the placeholder, not the real token.
@@ -1979,6 +2040,11 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				if credResult.InjectedHeaders[strings.ToLower(headerName)] {
 					continue
 				}
+				pr.Out.Header.Del(headerName)
+			}
+
+			// Strip capture headers — they're metadata for the proxy, not the destination.
+			for _, headerName := range p.captureHeaders {
 				pr.Out.Header.Del(headerName)
 			}
 

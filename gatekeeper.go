@@ -150,6 +150,26 @@ type pendingRefresh struct {
 	creds []CredentialConfig
 }
 
+// sensitiveHeaders are headers that must never be captured, even if configured.
+var sensitiveHeaders = map[string]bool{
+	"authorization":       true,
+	"proxy-authorization": true,
+	"cookie":              true,
+}
+
+// validateCaptureHeaders checks the capture_headers config for validity.
+func validateCaptureHeaders(headers []string) error {
+	if len(headers) > 10 {
+		return fmt.Errorf("capture_headers: max 10 headers allowed, got %d", len(headers))
+	}
+	for _, h := range headers {
+		if sensitiveHeaders[strings.ToLower(h)] {
+			return fmt.Errorf("capture_headers: %q is a sensitive header and cannot be captured", h)
+		}
+	}
+	return nil
+}
+
 // Server is the Gate Keeper server. It manages a TLS-intercepting proxy
 // with statically configured credentials.
 type Server struct {
@@ -183,6 +203,11 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 	// Configure structured logging before anything else.
 	logCleanup, err := configureLogging(cfg.Log)
 	if err != nil {
+		return nil, err
+	}
+
+	// Validate capture_headers config.
+	if err := validateCaptureHeaders(cfg.Log.CaptureHeaders); err != nil {
 		return nil, err
 	}
 
@@ -238,6 +263,9 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 		if data.RunID != "" {
 			attrs = append(attrs, slog.String("run_id", data.RunID))
 		}
+		if data.UserID != "" {
+			attrs = append(attrs, slog.String("user_id", data.UserID))
+		}
 		if data.AuthInjected {
 			attrs = append(attrs, slog.Bool("credential_injected", true))
 			var headerNames []string
@@ -264,6 +292,19 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 		}
 		if data.Err != nil {
 			attrs = append(attrs, slog.String("error", data.Err.Error()))
+		}
+
+		// Append captured request headers as structured log attributes.
+		if data.RequestHeaders != nil {
+			for _, h := range cfg.Log.CaptureHeaders {
+				if v := data.RequestHeaders.Get(h); v != "" {
+					if len(v) > 256 {
+						v = v[:256]
+					}
+					key := strings.ReplaceAll(strings.ToLower(h), "-", "_")
+					attrs = append(attrs, slog.String(key, v))
+				}
+			}
 		}
 
 		level := slog.LevelInfo
@@ -296,6 +337,9 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 				}
 				if data.RunID != "" {
 					spanAttrs = append(spanAttrs, attribute.String("run_id", data.RunID))
+				}
+				if data.UserID != "" {
+					spanAttrs = append(spanAttrs, attribute.String("user_id", data.UserID))
 				}
 				var headerNames []string
 				for name := range data.InjectedHeaders {
@@ -365,6 +409,11 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 			p.SetDelegateAuth(true)
 			break
 		}
+	}
+
+	// Configure capture headers if specified.
+	if len(cfg.Log.CaptureHeaders) > 0 {
+		p.SetCaptureHeaders(cfg.Log.CaptureHeaders)
 	}
 
 	// Configure network policy if specified.
