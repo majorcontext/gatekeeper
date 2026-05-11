@@ -524,8 +524,41 @@ func (p *Proxy) SetContextResolver(resolver ContextResolver) {
 
 // SetCaptureHeaders configures headers to capture in request logs and strip
 // before forwarding upstream. Header matching is case-insensitive.
-func (p *Proxy) SetCaptureHeaders(headers []string) {
+// Returns an error if any header is sensitive (Authorization, Proxy-Authorization, Cookie),
+// if there are more than 10 headers, or if duplicates are present.
+func (p *Proxy) SetCaptureHeaders(headers []string) error {
+	if err := ValidateCaptureHeaders(headers); err != nil {
+		return err
+	}
 	p.captureHeaders = headers
+	return nil
+}
+
+// sensitiveHeaders are headers that must never be captured, even if configured.
+var sensitiveHeaders = map[string]bool{
+	"authorization":       true,
+	"proxy-authorization": true,
+	"cookie":              true,
+}
+
+// ValidateCaptureHeaders checks a capture headers list for validity.
+// Rejects sensitive headers, more than 10 entries, and case-insensitive duplicates.
+func ValidateCaptureHeaders(headers []string) error {
+	if len(headers) > 10 {
+		return fmt.Errorf("capture_headers: max 10 headers allowed, got %d", len(headers))
+	}
+	seen := make(map[string]bool, len(headers))
+	for _, h := range headers {
+		lower := strings.ToLower(h)
+		if sensitiveHeaders[lower] {
+			return fmt.Errorf("capture_headers: %q is a sensitive header and cannot be captured", h)
+		}
+		if seen[lower] {
+			return fmt.Errorf("capture_headers: duplicate header %q", h)
+		}
+		seen[lower] = true
+	}
+	return nil
 }
 
 // ResolveContext looks up per-run context data by auth token.

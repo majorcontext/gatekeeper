@@ -151,30 +151,9 @@ type pendingRefresh struct {
 	creds []CredentialConfig
 }
 
-// sensitiveHeaders are headers that must never be captured, even if configured.
-var sensitiveHeaders = map[string]bool{
-	"authorization":       true,
-	"proxy-authorization": true,
-	"cookie":              true,
-}
-
 // validateCaptureHeaders checks the capture_headers config for validity.
 func validateCaptureHeaders(headers []string) error {
-	if len(headers) > 10 {
-		return fmt.Errorf("capture_headers: max 10 headers allowed, got %d", len(headers))
-	}
-	seen := make(map[string]bool, len(headers))
-	for _, h := range headers {
-		lower := strings.ToLower(h)
-		if sensitiveHeaders[lower] {
-			return fmt.Errorf("capture_headers: %q is a sensitive header and cannot be captured", h)
-		}
-		if seen[lower] {
-			return fmt.Errorf("capture_headers: duplicate header %q", h)
-		}
-		seen[lower] = true
-	}
-	return nil
+	return proxy.ValidateCaptureHeaders(headers)
 }
 
 // Server is the Gate Keeper server. It manages a TLS-intercepting proxy
@@ -308,7 +287,7 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 					if len(v) > 256 {
 						// Truncate at a valid UTF-8 boundary to avoid splitting multi-byte characters.
 						v = v[:256]
-						for len(v) > 0 && !utf8.Valid([]byte(v)) {
+						for len(v) > 0 && !utf8.ValidString(v) {
 							v = v[:len(v)-1]
 						}
 					}
@@ -424,7 +403,9 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 
 	// Configure capture headers if specified.
 	if len(cfg.Log.CaptureHeaders) > 0 {
-		p.SetCaptureHeaders(cfg.Log.CaptureHeaders)
+		if err := p.SetCaptureHeaders(cfg.Log.CaptureHeaders); err != nil {
+			return nil, fmt.Errorf("capture_headers: %w", err)
+		}
 	}
 
 	// Configure network policy if specified.
