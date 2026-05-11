@@ -1539,16 +1539,17 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "credential resolution failed", http.StatusBadGateway)
 		p.logRequest(r, RequestLogData{
-			Method:       r.Method,
-			URL:          r.URL.String(),
-			Host:         host,
-			Path:         r.URL.Path,
-			RequestType:  "http",
-			StatusCode:   http.StatusBadGateway,
-			Duration:     time.Since(start),
-			RequestSize:  r.ContentLength,
-			ResponseSize: -1,
-			Err:          err,
+			Method:         r.Method,
+			URL:            r.URL.String(),
+			Host:           host,
+			Path:           r.URL.Path,
+			RequestType:    "http",
+			StatusCode:     http.StatusBadGateway,
+			Duration:       time.Since(start),
+			RequestHeaders: r.Header.Clone(),
+			RequestSize:    r.ContentLength,
+			ResponseSize:   -1,
+			Err:            err,
 		})
 		return
 	}

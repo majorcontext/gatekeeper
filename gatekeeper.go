@@ -151,11 +151,6 @@ type pendingRefresh struct {
 	creds []CredentialConfig
 }
 
-// validateCaptureHeaders checks the capture_headers config for validity.
-func validateCaptureHeaders(headers []string) error {
-	return proxy.ValidateCaptureHeaders(headers)
-}
-
 // Server is the Gate Keeper server. It manages a TLS-intercepting proxy
 // with statically configured credentials.
 type Server struct {
@@ -189,11 +184,6 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 	// Configure structured logging before anything else.
 	logCleanup, err := configureLogging(cfg.Log)
 	if err != nil {
-		return nil, err
-	}
-
-	// Validate capture_headers config.
-	if err := validateCaptureHeaders(cfg.Log.CaptureHeaders); err != nil {
 		return nil, err
 	}
 

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/majorcontext/gatekeeper/proxy"
 )
 
 func TestParseConfig_Full(t *testing.T) {
@@ -194,7 +196,7 @@ func TestValidateCaptureHeaders_MaxExceeded(t *testing.T) {
 	for i := range headers {
 		headers[i] = fmt.Sprintf("X-Header-%d", i)
 	}
-	err := validateCaptureHeaders(headers)
+	err := proxy.ValidateCaptureHeaders(headers)
 	if err == nil {
 		t.Fatal("expected error for >10 headers")
 	}
@@ -207,7 +209,7 @@ func TestValidateCaptureHeaders_SensitiveRejected(t *testing.T) {
 	tests := []string{"Authorization", "proxy-authorization", "Cookie"}
 	for _, h := range tests {
 		t.Run(h, func(t *testing.T) {
-			err := validateCaptureHeaders([]string{h})
+			err := proxy.ValidateCaptureHeaders([]string{h})
 			if err == nil {
 				t.Fatalf("expected error for sensitive header %q", h)
 			}
@@ -219,25 +221,25 @@ func TestValidateCaptureHeaders_SensitiveRejected(t *testing.T) {
 }
 
 func TestValidateCaptureHeaders_Valid(t *testing.T) {
-	err := validateCaptureHeaders([]string{"X-Workspace-Slug", "X-Request-Source"})
+	err := proxy.ValidateCaptureHeaders([]string{"X-Workspace-Slug", "X-Request-Source"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
 func TestValidateCaptureHeaders_Empty(t *testing.T) {
-	err := validateCaptureHeaders(nil)
+	err := proxy.ValidateCaptureHeaders(nil)
 	if err != nil {
 		t.Fatalf("unexpected error for nil: %v", err)
 	}
-	err = validateCaptureHeaders([]string{})
+	err = proxy.ValidateCaptureHeaders([]string{})
 	if err != nil {
 		t.Fatalf("unexpected error for empty: %v", err)
 	}
 }
 
 func TestValidateCaptureHeaders_Duplicate(t *testing.T) {
-	err := validateCaptureHeaders([]string{"X-Workspace-Slug", "x-workspace-slug"})
+	err := proxy.ValidateCaptureHeaders([]string{"X-Workspace-Slug", "x-workspace-slug"})
 	if err == nil {
 		t.Fatal("expected error for duplicate headers")
 	}
