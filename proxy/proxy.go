@@ -2181,6 +2181,10 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			if logURL == "" {
 				logURL = req.URL.String()
 			}
+			preHeaders, _ := req.Context().Value(interceptPreInjHeadersKey{}).(http.Header)
+			if preHeaders == nil {
+				preHeaders = req.Header.Clone()
+			}
 			p.logRequest(r, RequestLogData{
 				RequestID:       req.Header.Get("X-Request-Id"),
 				Method:          req.Method,
@@ -2190,6 +2194,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				RequestType:     "connect",
 				StatusCode:      http.StatusBadGateway,
 				Duration:        time.Since(reqStartFromContext(req.Context())),
+				RequestHeaders:  preHeaders,
 				RequestSize:     req.ContentLength,
 				ResponseSize:    -1,
 				Err:             err,
@@ -2212,18 +2217,19 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		// Network policy check.
 		if !p.checkNetworkPolicyForRequest(r, host, connectPort, req.Method, req.URL.Path) {
 			p.logRequest(r, RequestLogData{
-				RequestID:    innerReqID,
-				Method:       req.Method,
-				URL:          "https://" + r.Host + req.URL.RequestURI(),
-				Host:         host,
-				Path:         req.URL.Path,
-				RequestType:  "connect",
-				StatusCode:   http.StatusProxyAuthRequired,
-				Duration:     time.Since(reqStart),
-				RequestSize:  req.ContentLength,
-				ResponseSize: -1,
-				Denied:       true,
-				DenyReason:   "Request blocked by network policy: " + req.Method + " " + host + req.URL.Path,
+				RequestID:      innerReqID,
+				Method:         req.Method,
+				URL:            "https://" + r.Host + req.URL.RequestURI(),
+				Host:           host,
+				Path:           req.URL.Path,
+				RequestType:    "connect",
+				StatusCode:     http.StatusProxyAuthRequired,
+				Duration:       time.Since(reqStart),
+				RequestHeaders: req.Header.Clone(),
+				RequestSize:    req.ContentLength,
+				ResponseSize:   -1,
+				Denied:         true,
+				DenyReason:     "Request blocked by network policy: " + req.Method + " " + host + req.URL.Path,
 			})
 			p.logPolicy(r, "network", "http.request", "", req.Method+" "+host+req.URL.Path)
 			w.Header().Set("X-Moat-Blocked", "request-rule")
@@ -2241,19 +2247,20 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				result, evalErr := keeplib.SafeEvaluate(eng, call, "http")
 				if evalErr != nil {
 					p.logRequest(r, RequestLogData{
-						RequestID:    innerReqID,
-						Method:       req.Method,
-						URL:          "https://" + r.Host + req.URL.RequestURI(),
-						Host:         host,
-						Path:         req.URL.Path,
-						RequestType:  "connect",
-						StatusCode:   http.StatusForbidden,
-						Duration:     time.Since(reqStart),
-						RequestSize:  req.ContentLength,
-						ResponseSize: -1,
-						Denied:       true,
-						DenyReason:   "Keep policy evaluation error",
-						Err:          evalErr,
+						RequestID:      innerReqID,
+						Method:         req.Method,
+						URL:            "https://" + r.Host + req.URL.RequestURI(),
+						Host:           host,
+						Path:           req.URL.Path,
+						RequestType:    "connect",
+						StatusCode:     http.StatusForbidden,
+						Duration:       time.Since(reqStart),
+						RequestHeaders: req.Header.Clone(),
+						RequestSize:    req.ContentLength,
+						ResponseSize:   -1,
+						Denied:         true,
+						DenyReason:     "Keep policy evaluation error",
+						Err:            evalErr,
 					})
 					p.logPolicy(r, "http", "http.request", "evaluation-error", "Policy evaluation failed")
 					w.Header().Set("X-Moat-Blocked", "keep-policy")
@@ -2264,18 +2271,19 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				}
 				if result.Decision == keeplib.Deny {
 					p.logRequest(r, RequestLogData{
-						RequestID:    innerReqID,
-						Method:       req.Method,
-						URL:          "https://" + r.Host + req.URL.RequestURI(),
-						Host:         host,
-						Path:         req.URL.Path,
-						RequestType:  "connect",
-						StatusCode:   http.StatusForbidden,
-						Duration:     time.Since(reqStart),
-						RequestSize:  req.ContentLength,
-						ResponseSize: -1,
-						Denied:       true,
-						DenyReason:   "Keep policy denied: " + result.Rule + " " + result.Message,
+						RequestID:      innerReqID,
+						Method:         req.Method,
+						URL:            "https://" + r.Host + req.URL.RequestURI(),
+						Host:           host,
+						Path:           req.URL.Path,
+						RequestType:    "connect",
+						StatusCode:     http.StatusForbidden,
+						Duration:       time.Since(reqStart),
+						RequestHeaders: req.Header.Clone(),
+						RequestSize:    req.ContentLength,
+						ResponseSize:   -1,
+						Denied:         true,
+						DenyReason:     "Keep policy denied: " + result.Rule + " " + result.Message,
 					})
 					p.logPolicy(r, "http", "http.request", result.Rule, result.Message)
 					w.Header().Set("X-Moat-Blocked", "keep-policy")
@@ -2301,17 +2309,18 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			w.WriteHeader(http.StatusBadGateway)
 			fmt.Fprint(w, "credential resolution failed\n")
 			p.logRequest(r, RequestLogData{
-				RequestID:    innerReqID,
-				Method:       req.Method,
-				URL:          "https://" + r.Host + req.URL.RequestURI(),
-				Host:         host,
-				Path:         req.URL.Path,
-				RequestType:  "connect",
-				StatusCode:   http.StatusBadGateway,
-				Duration:     time.Since(reqStart),
-				RequestSize:  req.ContentLength,
-				ResponseSize: -1,
-				Err:          credErr,
+				RequestID:      innerReqID,
+				Method:         req.Method,
+				URL:            "https://" + r.Host + req.URL.RequestURI(),
+				Host:           host,
+				Path:           req.URL.Path,
+				RequestType:    "connect",
+				StatusCode:     http.StatusBadGateway,
+				Duration:       time.Since(reqStart),
+				RequestHeaders: req.Header.Clone(),
+				RequestSize:    req.ContentLength,
+				ResponseSize:   -1,
+				Err:            credErr,
 			})
 			return
 		}
