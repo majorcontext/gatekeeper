@@ -88,7 +88,7 @@ Both entries share the same `github-app` source. Gatekeeper makes one API call t
 Some credential flows require per-request context — for example, RFC 8693 token exchange, where the proxy exchanges a caller's identity token for a scoped access token. These flows use `CredentialResolver` instead of `CredentialSource`:
 
 ```go
-type CredentialResolver func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error)
+type CredentialResolver func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]CredentialHeader, error)
 ```
 
 Unlike static sources (fetched once at startup), resolvers are called on every request. They receive both the proxy-level request (`proxyReq`, carrying `Proxy-Authorization`) and the application-level request (`innerReq`, which the resolver may inspect and modify). This enables patterns like extracting a subject identity header from the request, exchanging it for an access token, and stripping the identity header before forwarding.
