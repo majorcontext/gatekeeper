@@ -35,9 +35,14 @@ import (
 
 func main() {
 	// Load CA for TLS interception.
-	certPEM, _ := os.ReadFile("ca.crt")
-	keyPEM, _ := os.ReadFile("ca.key")
-	ca, err := proxy.LoadCA(certPEM, keyPEM)
+	certPEM, err := os.ReadFile("ca.crt")
+	if err != nil {
+		log.Fatal(err)
+	}
+	keyPEM, err := os.ReadFile("ca.key")
+	if err != nil {
+		log.Fatal(err)
+	}
 	if err != nil {
 		log.Fatal(err)
 	}
