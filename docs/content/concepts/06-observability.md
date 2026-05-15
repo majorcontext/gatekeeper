@@ -93,4 +93,4 @@ Four metrics instruments are registered under the `gatekeeper` meter:
 
 ## Configuration
 
-OTel is configured entirely via standard `OTEL_*` environment variables. There are no YAML knobs for tracing, metrics, or logs. The CLI entry point (`cmd/gatekeeper/main.go`) creates OTLP HTTP exporters for traces, metrics, and logs and registers them as global providers. When no `OTEL_*` variables are set, the no-op provider is used and instrumentation has zero overhead.
+OTel is configured entirely via standard `OTEL_*` environment variables. There are no YAML knobs for tracing, metrics, or logs. The CLI entry point (`cmd/gatekeeper/main.go`) always creates OTLP HTTP exporters for traces, metrics, and logs and registers them as global providers. When no `OTEL_EXPORTER_OTLP_ENDPOINT` is set, exporters default to `localhost:4318` — gatekeeper will attempt to connect to a local collector even with no `OTEL_*` variables configured.
