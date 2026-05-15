@@ -87,6 +87,12 @@ p.SetContextResolver(func(token string) (*proxy.RunContextData, bool) {
 	if !ok {
 		return nil, false
 	}
+	// AllowedHosts is []proxy.HostPattern — build it from raw strings
+	// via proxy.ParseHostPattern.
+	allowedHosts := make([]proxy.HostPattern, len(run.AllowedHosts))
+	for i, h := range run.AllowedHosts {
+		allowedHosts[i] = proxy.ParseHostPattern(h)
+	}
 	return &proxy.RunContextData{
 		RunID: run.ID,
 		Credentials: map[string][]proxy.CredentialHeader{
@@ -95,7 +101,7 @@ p.SetContextResolver(func(token string) (*proxy.RunContextData, bool) {
 			},
 		},
 		Policy:       "strict",
-		AllowedHosts: run.AllowedHosts, // []proxy.HostPattern; build from strings with proxy.ParseHostPattern
+		AllowedHosts: allowedHosts,
 	}, true
 })
 ```
