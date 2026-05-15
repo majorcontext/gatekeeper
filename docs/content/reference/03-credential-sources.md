@@ -19,8 +19,8 @@ Each credential entry in gatekeeper.yaml includes a `source` block that determin
 | `github-app` | Generate GitHub App installation token | Yes (auto-refresh before expiry) |
 | `token-exchange` | RFC 8693 token exchange | Yes (per-request, cached with TTL) |
 
-Sources marked **Refresh: Yes** implement background credential refresh. Gatekeeper re-fetches the credential at 75% of the token's TTL (minimum 30 seconds) and hot-swaps it on the proxy without downtime.
 Sources marked **Refresh: Yes** have credentials that expire. `github-app` implements background credential refresh — gatekeeper re-fetches at 75% of TTL (minimum 30 seconds) and hot-swaps without downtime. `token-exchange` uses per-request lazy caching: on cache miss, gatekeeper calls the STS and caches the result for the token's TTL.
+
 ---
 
 ## env
