@@ -43,6 +43,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	ca, err := proxy.LoadCA(certPEM, keyPEM)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -94,7 +95,7 @@ p.SetContextResolver(func(token string) (*proxy.RunContextData, bool) {
 			},
 		},
 		Policy:       "strict",
-		AllowedHosts: run.AllowedHosts,
+		AllowedHosts: run.AllowedHosts, // []proxy.HostPattern; build from strings with proxy.ParseHostPattern
 	}, true
 })
 ```
