@@ -187,7 +187,7 @@ Auth scheme prefix prepended to the credential value.
 ```yaml
 credentials:
   - host: api.github.com
-    prefix: "token "
+    prefix: "token"
 ```
 
 - **Type:** `string`
