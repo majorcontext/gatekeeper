@@ -1,5 +1,5 @@
 ---
-title: "WebSocket Support"
+title: "WebSockets"
 description: "WebSocket connections work through Gatekeeper with credential injection on the HTTP upgrade request and transparent frame tunneling."
 keywords: ["gatekeeper", "WebSocket", "upgrade request", "bidirectional tunneling"]
 ---

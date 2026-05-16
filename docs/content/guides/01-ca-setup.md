@@ -1,5 +1,5 @@
 ---
-title: "CA Certificate Setup"
+title: "CA Setup"
 description: "Generate a Certificate Authority for TLS interception and configure trust on macOS, Linux, and per-tool environments."
 keywords: ["gatekeeper", "CA certificate", "TLS setup", "certificate trust"]
 ---

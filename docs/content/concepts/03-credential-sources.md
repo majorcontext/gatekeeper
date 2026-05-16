@@ -1,5 +1,5 @@
 ---
-title: "Credential Sources"
+title: "Sources"
 description: "How Gatekeeper resolves credentials from pluggable backends including environment variables, secret managers, and token exchange."
 keywords: ["gatekeeper", "credential sources", "background refresh", "credential resolver"]
 ---
