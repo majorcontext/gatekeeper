@@ -1,5 +1,5 @@
 ---
-title: "AWS Secrets Manager Credentials"
+title: "AWS Secrets Manager"
 description: "Fetch a credential from AWS Secrets Manager at proxy startup and inject it into HTTPS requests."
 keywords: ["gatekeeper", "AWS Secrets Manager", "credential source", "cloud secrets"]
 ---

@@ -1,5 +1,5 @@
 ---
-title: "Token Exchange (RFC 8693)"
+title: "Token Exchange"
 description: "Resolve per-user credentials dynamically by calling an external Security Token Service using RFC 8693 token exchange."
 keywords: ["gatekeeper", "token exchange", "RFC 8693", "STS", "OAuth"]
 ---

@@ -1,5 +1,5 @@
 ---
-title: "GCP Secret Manager Credentials"
+title: "GCP Secret Manager"
 description: "Fetch a credential from Google Cloud Secret Manager at proxy startup and inject it into HTTPS requests."
 keywords: ["gatekeeper", "GCP Secret Manager", "credential source", "cloud secrets"]
 ---

@@ -1,5 +1,5 @@
 ---
-title: "Environment variables"
+title: "Environment"
 description: "Reference for all environment variables that Gatekeeper reads, including AWS, GCP, OpenTelemetry, and client-side proxy variables."
 keywords: ["gatekeeper", "environment variables", "OTEL", "AWS", "configuration"]
 ---

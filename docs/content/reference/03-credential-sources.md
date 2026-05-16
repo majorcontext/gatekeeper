@@ -1,5 +1,5 @@
 ---
-title: "Credential sources"
+title: "Source types"
 description: "Reference for all credential source types including env, static, AWS Secrets Manager, GCP Secret Manager, GitHub App, and token exchange."
 keywords: ["gatekeeper", "credential sources", "source types", "configuration reference"]
 ---

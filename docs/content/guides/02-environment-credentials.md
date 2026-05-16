@@ -1,5 +1,5 @@
 ---
-title: "Environment Variable Credentials"
+title: "Env Credentials"
 description: "Read a credential from an environment variable and inject it into HTTPS requests through Gatekeeper."
 keywords: ["gatekeeper", "environment variables", "credential injection", "env source"]
 ---

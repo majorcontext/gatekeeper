@@ -1,5 +1,5 @@
 ---
-title: "Credential Injection"
+title: "Injection"
 description: "How Gatekeeper matches hostnames, injects authentication headers, and handles multiple credentials per host."
 keywords: ["gatekeeper", "credential injection", "host matching", "authorization headers"]
 ---

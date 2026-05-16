@@ -1,5 +1,5 @@
 ---
-title: "Go Library Usage"
+title: "Go Library"
 description: "Import Gatekeeper as a Go module to embed the credential-injecting proxy in a custom application."
 keywords: ["gatekeeper", "Go library", "embedding", "proxy API"]
 ---
