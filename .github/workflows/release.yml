@@ -38,8 +38,8 @@ jobs:
         with:
           images: ghcr.io/majorcontext/gatekeeper
           tags: |
-            type=semver,pattern={{version}},value=${{ inputs.tag || github.ref }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag || github.ref }}
+            type=semver,pattern={{version}},value=${{ inputs.tag || github.ref_name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag || github.ref_name }}
             type=sha
 
       - uses: docker/build-push-action@v6
