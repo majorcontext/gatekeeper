@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -63,6 +64,9 @@ func NewGCPServiceAccountSource(keyJSON []byte, scopes string) (*GCPServiceAccou
 // attempt, so key rotation in the backing source is picked up without a
 // restart. Close releases the key source if it implements io.Closer.
 func NewGCPServiceAccountSourceFromKeySource(keySource CredentialSource, scopes string) *GCPServiceAccountSource {
+	if keySource == nil {
+		panic("credentialsource: keySource must not be nil")
+	}
 	return newGCPServiceAccountSource(keySource, scopes)
 }
 
@@ -108,12 +112,16 @@ func (s *GCPServiceAccountSource) Fetch(ctx context.Context) (string, error) {
 
 	body, err := readTokenResponse(resp, http.StatusOK, "token endpoint")
 	if err != nil {
-		// A 4xx rejection may mean the cached key was rotated or revoked;
-		// drop it so the next attempt re-reads from the key source.
-		if s.keySource != nil && resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			s.mu.Lock()
-			s.sa = nil
-			s.mu.Unlock()
+		// An assertion rejection may mean the cached key was rotated or
+		// revoked; drop it so the next attempt re-reads from the key
+		// source. Other failures (429, 5xx) keep the cached key.
+		switch resp.StatusCode {
+		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden:
+			if s.keySource != nil {
+				s.mu.Lock()
+				s.sa = nil
+				s.mu.Unlock()
+			}
 		}
 		return "", err
 	}
@@ -221,8 +229,33 @@ func parseGCPSAKey(keyJSON []byte) (*gcpSAKey, error) {
 	tokenURI := raw.TokenURI
 	if tokenURI == "" {
 		tokenURI = gcpDefaultTokenURI
+	} else if err := validateTokenURI(tokenURI); err != nil {
+		return nil, err
 	}
 	return &gcpSAKey{email: raw.ClientEmail, key: key, tokenURI: tokenURI}, nil
+}
+
+// validateTokenURI requires https for the token endpoint so a tampered key
+// JSON cannot redirect signed assertions to a plaintext endpoint. Plain
+// http is permitted only for loopback hosts (local emulators and tests).
+func validateTokenURI(tokenURI string) error {
+	u, err := url.Parse(tokenURI)
+	if err != nil {
+		return fmt.Errorf("service account key has invalid token_uri")
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		host := u.Hostname()
+		if host == "localhost" {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+	}
+	return fmt.Errorf("service account key token_uri must use https")
 }
 
 // buildGCPJWT builds the RS256-signed JWT assertion for the jwt-bearer

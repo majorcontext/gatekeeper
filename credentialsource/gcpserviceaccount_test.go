@@ -413,6 +413,66 @@ func TestGCPServiceAccountSource_KeyRotation(t *testing.T) {
 	}
 }
 
+func TestGCPServiceAccountSource_NonHTTPSTokenURI(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, uri := range []string{
+		"http://attacker.example.com/token",
+		"ftp://example.com/token",
+	} {
+		if _, err := NewGCPServiceAccountSource(testSAKeyJSON(t, key, uri), ""); err == nil {
+			t.Errorf("expected error for non-https token_uri %q", uri)
+		}
+	}
+	// Plain http is permitted for loopback hosts (emulators, tests).
+	for _, uri := range []string{
+		"http://localhost:8080/token",
+		"http://127.0.0.1:9090/token",
+	} {
+		if _, err := NewGCPServiceAccountSource(testSAKeyJSON(t, key, uri), ""); err != nil {
+			t.Errorf("loopback http token_uri %q rejected: %v", uri, err)
+		}
+	}
+}
+
+func TestGCPServiceAccountSource_NilKeySourcePanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic for nil key source")
+		}
+	}()
+	NewGCPServiceAccountSourceFromKeySource(nil, "")
+}
+
+func TestGCPServiceAccountSource_RateLimitKeepsCachedKey(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":"rate_limited"}`))
+	}))
+	defer srv.Close()
+
+	ks := &fakeKeySource{val: string(testSAKeyJSON(t, key, srv.URL))}
+	src := NewGCPServiceAccountSourceFromKeySource(ks, "")
+
+	// A 429 is not an assertion rejection: the cached key must survive so
+	// retries do not hammer the key source.
+	for range 2 {
+		if _, err := src.Fetch(context.Background()); err == nil {
+			t.Fatal("expected error for 429 response")
+		}
+	}
+	if ks.fetches != 1 {
+		t.Errorf("key source fetches = %d, want 1 (429 must not drop the cached key)", ks.fetches)
+	}
+}
+
 func TestGCPServiceAccountSource_KeySourceError(t *testing.T) {
 	ks := &fakeKeySource{err: context.DeadlineExceeded}
 	src := NewGCPServiceAccountSourceFromKeySource(ks, "")
