@@ -2,17 +2,12 @@ package credentialsource
 
 import (
 	"context"
-	"crypto"
-	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/asn1"
-	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"io"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -82,17 +77,9 @@ func (s *GitHubAppSource) Fetch(ctx context.Context) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	body, err := readTokenResponse(resp, http.StatusCreated, "GitHub API")
 	if err != nil {
-		return "", fmt.Errorf("reading response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusCreated {
-		msg := string(body)
-		if len(msg) > 200 {
-			msg = msg[:200]
-		}
-		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, msg)
+		return "", err
 	}
 
 	var result struct {
@@ -136,26 +123,11 @@ func (s *GitHubAppSource) TTL() time.Duration {
 
 func (s *GitHubAppSource) buildJWT() (string, error) {
 	now := time.Now()
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
-
-	claims, err := json.Marshal(map[string]any{
+	return signRS256JWT(s.key, map[string]any{
 		"iss": s.appID,
 		"iat": now.Add(-60 * time.Second).Unix(),
 		"exp": now.Add(10 * time.Minute).Unix(),
 	})
-	if err != nil {
-		return "", err
-	}
-	payload := base64.RawURLEncoding.EncodeToString(claims)
-
-	signingInput := header + "." + payload
-	hash := sha256.Sum256([]byte(signingInput))
-	sig, err := rsa.SignPKCS1v15(rand.Reader, s.key, crypto.SHA256, hash[:])
-	if err != nil {
-		return "", err
-	}
-
-	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
 }
 
 // parseRSAPrivateKey extracts an RSA private key from a PEM block.

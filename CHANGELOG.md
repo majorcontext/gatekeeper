@@ -4,6 +4,21 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.11.0 — 2026-06-10
+
+### Added
+
+- **GCP service account credential source** — new `gcp-service-account` source type mints short-lived OAuth2 access tokens from a service account key JSON: gatekeeper signs an RS256 JWT assertion with the key and exchanges it at the key's `token_uri` via the jwt-bearer grant; the key JSON can come from GCP Secret Manager (`secret`/`project`/`version`), a file (`private_key_path`), or an environment variable (`private_key_env`); optional `scopes` field takes a space-separated scope list and defaults to `cloud-platform`; implements `RefreshingSource`, so tokens hot-swap at 75% of their ~1-hour TTL; an assertion rejection (400/401/403) drops the cached key and re-reads it from the key source on the next refresh, picking up key rotation without a restart; `token_uri` must be https (loopback hosts excepted, for emulators) ([#27](https://github.com/majorcontext/gatekeeper/pull/27))
+
+### Changed
+
+- **`SourceConfig` struct** — added `Scopes` field for the GCP service account source; all other source types reject it as extraneous; the struct now documents that it must remain comparable because it keys the source-deduplication maps ([#27](https://github.com/majorcontext/gatekeeper/pull/27))
+- **Shared token-source helpers** — `github-app`, `token-exchange`, and the new source now share `signRS256JWT` (RS256 JWT signing), `readTokenResponse` (bounded response read with truncated error bodies), and `readKeyMaterial` (path/env key loading) instead of maintaining per-source copies; no behavior change ([#27](https://github.com/majorcontext/gatekeeper/pull/27))
+
+### Fixed
+
+- **Validation gaps** — `env` and `static` sources now reject an extraneous `region` field, and `token-exchange` rejects an extraneous `scopes` field, matching the strict-validation contract of all other source types ([#27](https://github.com/majorcontext/gatekeeper/pull/27))
+
 ## v0.10.0 — 2026-05-11
 
 ### Added

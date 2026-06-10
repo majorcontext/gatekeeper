@@ -1,6 +1,6 @@
 ---
 title: "Source types"
-description: "Reference for all credential source types including env, static, AWS Secrets Manager, GCP Secret Manager, GitHub App, and token exchange."
+description: "Reference for all credential source types including env, static, AWS Secrets Manager, GCP Secret Manager, GCP service accounts, GitHub App, and token exchange."
 keywords: ["gatekeeper", "credential sources", "source types", "configuration reference"]
 ---
 
@@ -16,10 +16,11 @@ Each credential entry in gatekeeper.yaml includes a `source` block that determin
 | `static` | Literal inline value | No |
 | `aws-secretsmanager` | Fetch from AWS Secrets Manager | No |
 | `gcp-secretmanager` | Fetch from GCP Secret Manager | No |
+| `gcp-service-account` | Mint GCP OAuth2 access token from a service account key | Yes (auto-refresh before expiry) |
 | `github-app` | Generate GitHub App installation token | Yes (auto-refresh before expiry) |
 | `token-exchange` | RFC 8693 token exchange | Yes (per-request, cached with TTL) |
 
-Sources marked **Refresh: Yes** have credentials that expire. `github-app` implements background credential refresh — gatekeeper re-fetches at 75% of TTL (minimum 30 seconds) and hot-swaps without downtime. `token-exchange` uses per-request lazy caching: on cache miss, gatekeeper calls the STS and caches the result for the token's TTL.
+Sources marked **Refresh: Yes** have credentials that expire. `github-app` and `gcp-service-account` implement background credential refresh — gatekeeper re-fetches at 75% of TTL (minimum 30 seconds) and hot-swaps without downtime. `token-exchange` uses per-request lazy caching: on cache miss, gatekeeper calls the STS and caches the result for the token's TTL.
 
 ---
 
@@ -142,6 +143,75 @@ Secret version to access.
 - **Default:** `"latest"`
 
 The underlying gRPC connection is closed on gatekeeper shutdown.
+
+---
+
+## gcp-service-account
+
+Mint short-lived GCP OAuth2 access tokens from a service account key (the JSON file format produced by `gcloud iam service-accounts keys create`). Gatekeeper signs a JWT with the key, exchanges it for an access token at Google's OAuth2 token endpoint, and refreshes the token automatically in the background before expiry. Clients inside the sandbox never see the service account key — only the proxy holds it.
+
+```yaml
+credentials:
+  - host: storage.googleapis.com
+    grant: gcs
+    source:
+      type: gcp-service-account
+      project: my-gcp-project
+      secret: gcs-uploader-key
+      scopes: https://www.googleapis.com/auth/devstorage.read_write
+```
+
+The service account key JSON can come from one of three locations: GCP Secret Manager (`secret` + `project`), a file (`private_key_path`), or an environment variable (`private_key_env`). Exactly one must be set.
+
+### secret
+
+GCP Secret Manager secret holding the service account key JSON. Reading the secret uses Application Default Credentials, same as the `gcp-secretmanager` source. If the token endpoint rejects an assertion (e.g., after the key is rotated and the old key revoked), gatekeeper drops the cached key and re-reads it from Secret Manager on the next refresh, so key rotation is picked up without a restart.
+
+- **Type:** `string`
+- **Required:** One of `secret`, `private_key_path`, or `private_key_env` is required
+- **Default:** —
+
+### project
+
+GCP project ID containing the secret.
+
+- **Type:** `string`
+- **Required:** Yes, when `secret` is set
+- **Default:** —
+
+### version
+
+Secret version to access.
+
+- **Type:** `string`
+- **Required:** No (only valid with `secret`)
+- **Default:** `"latest"`
+
+### private_key_path
+
+File path to the service account key JSON.
+
+- **Type:** `string`
+- **Required:** One of `secret`, `private_key_path`, or `private_key_env` is required
+- **Default:** —
+
+### private_key_env
+
+Name of an environment variable containing the service account key JSON.
+
+- **Type:** `string`
+- **Required:** One of `secret`, `private_key_path`, or `private_key_env` is required
+- **Default:** —
+
+The environment variable must be set and non-empty at startup.
+
+### scopes
+
+Space-separated list of OAuth scopes to request.
+
+- **Type:** `string`
+- **Required:** No
+- **Default:** `"https://www.googleapis.com/auth/cloud-platform"`
 
 ---
 

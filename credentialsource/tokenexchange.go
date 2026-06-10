@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -115,17 +114,9 @@ func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken, actorT
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	body, err := readTokenResponse(resp, http.StatusOK, "token exchange")
 	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		msg := string(body)
-		if len(msg) > 200 {
-			msg = msg[:200]
-		}
-		return nil, fmt.Errorf("token exchange returned %d: %s", resp.StatusCode, msg)
+		return nil, err
 	}
 
 	var result TokenExchangeResponse

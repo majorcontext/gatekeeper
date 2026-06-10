@@ -52,19 +52,25 @@ type CredentialConfig struct {
 }
 
 // SourceConfig describes where to read a credential value from.
+//
+// SourceConfig is used as a map key to deduplicate identical sources (see
+// Server.setCredentials), so it must remain comparable: add list-valued
+// fields as delimited strings (like Scopes), never slices, and avoid
+// pointer fields, which would compile but silently break deduplication.
 type SourceConfig struct {
-	Type    string `yaml:"type"`              // "env", "static", "aws-secretsmanager", "gcp-secretmanager", "github-app", "token-exchange"
+	Type    string `yaml:"type"`              // "env", "static", "aws-secretsmanager", "gcp-secretmanager", "gcp-service-account", "github-app", "token-exchange"
 	Var     string `yaml:"var,omitempty"`     // for env source
 	Value   string `yaml:"value,omitempty"`   // for static source
-	Secret  string `yaml:"secret,omitempty"`  // for aws-secretsmanager, gcp-secretmanager
+	Secret  string `yaml:"secret,omitempty"`  // for aws-secretsmanager, gcp-secretmanager; for gcp-service-account, the secret holding the key JSON
 	Region  string `yaml:"region,omitempty"`  // for aws-secretsmanager
-	Project string `yaml:"project,omitempty"` // for gcp-secretmanager
-	Version string `yaml:"version,omitempty"` // for gcp-secretmanager (default: "latest")
+	Project string `yaml:"project,omitempty"` // for gcp-secretmanager, gcp-service-account
+	Version string `yaml:"version,omitempty"` // for gcp-secretmanager, gcp-service-account (default: "latest")
 
 	AppID          string `yaml:"app_id,omitempty"`           // for github-app source
 	InstallationID string `yaml:"installation_id,omitempty"`  // for github-app source
-	PrivateKeyPath string `yaml:"private_key_path,omitempty"` // for github-app source
-	PrivateKeyEnv  string `yaml:"private_key_env,omitempty"`  // for github-app source
+	PrivateKeyPath string `yaml:"private_key_path,omitempty"` // for github-app (PEM key), gcp-service-account (key JSON)
+	PrivateKeyEnv  string `yaml:"private_key_env,omitempty"`  // for github-app (PEM key), gcp-service-account (key JSON)
+	Scopes         string `yaml:"scopes,omitempty"`           // for gcp-service-account: space-separated OAuth scopes (default: cloud-platform)
 
 	// token-exchange (RFC 8693) fields
 	Endpoint         string `yaml:"endpoint,omitempty"`
