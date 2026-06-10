@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"os"
 	"path/filepath"
@@ -124,6 +125,8 @@ func TestResolveSourceExtraneousFields(t *testing.T) {
 	}{
 		{"env with value", SourceConfig{Type: "env", Var: "X", Value: "extra"}},
 		{"env with secret", SourceConfig{Type: "env", Var: "X", Secret: "extra"}},
+		{"env with region", SourceConfig{Type: "env", Var: "X", Region: "extra"}},
+		{"static with region", SourceConfig{Type: "static", Value: "v", Region: "extra"}},
 		{"env with app_id", SourceConfig{Type: "env", Var: "X", AppID: "extra"}},
 		{"env with project", SourceConfig{Type: "env", Var: "X", Project: "extra"}},
 		{"env with version", SourceConfig{Type: "env", Var: "X", Version: "extra"}},
@@ -276,6 +279,167 @@ func TestResolveSourceGitHubAppExtraneousFields(t *testing.T) {
 				t.Fatal("expected error for extraneous fields")
 			}
 		})
+	}
+}
+
+// testGCPSAKeyJSON builds a GCP service account key JSON with a freshly
+// generated RSA key, mirroring the real key file format.
+func testGCPSAKeyJSON(t *testing.T) []byte {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	b, err := json.Marshal(map[string]string{
+		"type":         "service_account",
+		"client_email": "uploader@my-project.iam.gserviceaccount.com",
+		"private_key":  string(keyPEM),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func TestResolveSourceGCPServiceAccount(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "sa.json")
+	if err := os.WriteFile(keyFile, testGCPSAKeyJSON(t), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	src, err := ResolveSource(SourceConfig{
+		Type:           "gcp-service-account",
+		PrivateKeyPath: keyFile,
+		Scopes:         "https://www.googleapis.com/auth/devstorage.read_write",
+	})
+	if err != nil {
+		t.Fatalf("ResolveSource: %v", err)
+	}
+	if src.Type() != "gcp-service-account" {
+		t.Errorf("Type() = %q, want gcp-service-account", src.Type())
+	}
+}
+
+func TestResolveSourceGCPServiceAccountFromEnv(t *testing.T) {
+	t.Setenv("TEST_GCP_SA_KEY", string(testGCPSAKeyJSON(t)))
+
+	src, err := ResolveSource(SourceConfig{
+		Type:          "gcp-service-account",
+		PrivateKeyEnv: "TEST_GCP_SA_KEY",
+	})
+	if err != nil {
+		t.Fatalf("ResolveSource: %v", err)
+	}
+	if src.Type() != "gcp-service-account" {
+		t.Errorf("Type() = %q, want gcp-service-account", src.Type())
+	}
+}
+
+func TestResolveSourceGCPServiceAccountNoKey(t *testing.T) {
+	_, err := ResolveSource(SourceConfig{Type: "gcp-service-account"})
+	if err == nil {
+		t.Fatal("expected error when no key location is set")
+	}
+}
+
+func TestResolveSourceGCPServiceAccountMultipleKeyLocations(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  SourceConfig
+	}{
+		{"path and env", SourceConfig{Type: "gcp-service-account", PrivateKeyPath: "/p", PrivateKeyEnv: "E"}},
+		{"path and secret", SourceConfig{Type: "gcp-service-account", PrivateKeyPath: "/p", Secret: "s", Project: "pr"}},
+		{"env and secret", SourceConfig{Type: "gcp-service-account", PrivateKeyEnv: "E", Secret: "s", Project: "pr"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ResolveSource(tt.cfg)
+			if err == nil {
+				t.Fatal("expected error for multiple key locations")
+			}
+		})
+	}
+}
+
+func TestResolveSourceGCPServiceAccountSecretWithoutProject(t *testing.T) {
+	_, err := ResolveSource(SourceConfig{Type: "gcp-service-account", Secret: "s"})
+	if err == nil {
+		t.Fatal("expected error for secret without project")
+	}
+}
+
+func TestResolveSourceGCPServiceAccountProjectWithoutSecret(t *testing.T) {
+	_, err := ResolveSource(SourceConfig{Type: "gcp-service-account", PrivateKeyEnv: "E", Project: "pr"})
+	if err == nil {
+		t.Fatal("expected error for project without secret")
+	}
+}
+
+func TestResolveSourceGCPServiceAccountExtraneousFields(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  SourceConfig
+	}{
+		{"with var", SourceConfig{Type: "gcp-service-account", PrivateKeyEnv: "X", Var: "extra"}},
+		{"with value", SourceConfig{Type: "gcp-service-account", PrivateKeyEnv: "X", Value: "extra"}},
+		{"with region", SourceConfig{Type: "gcp-service-account", PrivateKeyEnv: "X", Region: "extra"}},
+		{"with app_id", SourceConfig{Type: "gcp-service-account", PrivateKeyEnv: "X", AppID: "extra"}},
+		{"with installation_id", SourceConfig{Type: "gcp-service-account", PrivateKeyEnv: "X", InstallationID: "extra"}},
+		{"with endpoint", SourceConfig{Type: "gcp-service-account", PrivateKeyEnv: "X", Endpoint: "extra"}},
+		{"with client_id", SourceConfig{Type: "gcp-service-account", PrivateKeyEnv: "X", ClientID: "extra"}},
+		{"with subject_from", SourceConfig{Type: "gcp-service-account", PrivateKeyEnv: "X", SubjectFrom: "proxy-auth"}},
+		{"with actor_token_from", SourceConfig{Type: "gcp-service-account", PrivateKeyEnv: "X", ActorTokenFrom: "proxy-auth-password"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ResolveSource(tt.cfg)
+			if err == nil {
+				t.Fatal("expected error for extraneous fields")
+			}
+		})
+	}
+}
+
+func TestResolveSourceScopesExtraneousOnOtherTypes(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  SourceConfig
+	}{
+		{"env with scopes", SourceConfig{Type: "env", Var: "X", Scopes: "extra"}},
+		{"static with scopes", SourceConfig{Type: "static", Value: "v", Scopes: "extra"}},
+		{"aws with scopes", SourceConfig{Type: "aws-secretsmanager", Secret: "s", Scopes: "extra"}},
+		{"gcp-secretmanager with scopes", SourceConfig{Type: "gcp-secretmanager", Secret: "s", Project: "p", Scopes: "extra"}},
+		{"github-app with scopes", SourceConfig{Type: "github-app", AppID: "1", InstallationID: "2", PrivateKeyEnv: "X", Scopes: "extra"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ResolveSource(tt.cfg)
+			if err == nil {
+				t.Fatal("expected error for extraneous scopes field")
+			}
+		})
+	}
+}
+
+func TestResolveSourceTokenExchangeScopesExtraneous(t *testing.T) {
+	_, _, err := ResolveCredentialSource(CredentialConfig{
+		Host: "api.github.com",
+		Source: SourceConfig{
+			Type:          "token-exchange",
+			Endpoint:      "https://sts.example.com/token",
+			ClientID:      "gk",
+			ClientSecret:  "s",
+			SubjectHeader: "X-Subject",
+			Scopes:        "extra",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for extraneous scopes field on token-exchange")
 	}
 }
 

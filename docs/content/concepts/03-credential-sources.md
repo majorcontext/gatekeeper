@@ -36,6 +36,7 @@ type CredentialSource interface {
 |---|---|---|
 | `aws-secretsmanager` | `secret: my-secret`, `region: us-east-1` | Fetches from AWS Secrets Manager |
 | `gcp-secretmanager` | `secret: my-secret`, `project: my-project` | Fetches from GCP Secret Manager |
+| `gcp-service-account` | key location, `scopes` | Mints GCP OAuth2 access tokens from a service account key |
 | `github-app` | `app_id`, `installation_id`, private key | Generates GitHub App installation tokens |
 
 ## RefreshingSource and Background Refresh
@@ -55,7 +56,7 @@ type RefreshingSource interface {
 - **Failure backoff.** On fetch failure, gatekeeper retries with exponential backoff starting at 1 second, doubling each attempt, capped at 60 seconds. A random jitter (up to 25% of the backoff) is added to prevent thundering herds.
 - **Hot-swap.** Refreshed credentials are applied to the proxy immediately via `SetCredentialWithGrant`. In-flight requests use the previous value; subsequent requests use the new one.
 
-The `github-app` source is a `RefreshingSource`. GitHub App installation tokens expire after one hour, so gatekeeper refreshes them every 45 minutes.
+The `github-app` and `gcp-service-account` sources are `RefreshingSource`s. Both produce tokens that expire after one hour, so gatekeeper refreshes them every 45 minutes.
 
 ## Source Deduplication
 

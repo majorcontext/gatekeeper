@@ -37,6 +37,7 @@ The client must trust the proxy's CA certificate. Generate one with the included
 | Static value | `static` | Fixed API keys |
 | AWS Secrets Manager | `aws-secretsmanager` | AWS-hosted credentials |
 | GCP Secret Manager | `gcp-secretmanager` | GCP-hosted credentials |
+| GCP service account | `gcp-service-account` | Short-lived GCP access tokens with auto-refresh |
 | GitHub App | `github-app` | Short-lived installation tokens with auto-refresh |
 | Token exchange | `token-exchange` | Multi-user OAuth via RFC 8693 STS |
 

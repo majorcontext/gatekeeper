@@ -8,7 +8,7 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Key capabilities:
 
-- **Credential injection** — Resolve credentials from environment variables, static values, or AWS Secrets Manager, then inject them as HTTP headers for matching hosts
+- **Credential injection** — Resolve credentials from environment variables, static values, AWS Secrets Manager, GCP Secret Manager, GCP service account keys, GitHub App keys, or RFC 8693 token exchange, then inject them as HTTP headers for matching hosts
 - **TLS interception** — MITM proxy with per-host certificate generation from a configured CA
 - **MCP relay** — Forward Model Context Protocol requests with credential injection and SSE streaming
 - **Network policy** — Allow/deny traffic by host pattern
@@ -31,13 +31,17 @@ proxy/              Core TLS-intercepting proxy engine
 
 gatekeeper.go       Standalone server wiring (config → proxy + credential sources)
 config.go           YAML config parsing (proxy, TLS, credentials, network, log)
-config_credential.go  Credential source resolution (env, static, AWS Secrets Manager)
+config_credential.go  Credential source resolution (maps source config to backends)
 
 credentialsource/   Pluggable credential backends
-  source.go           Source interface
+  source.go           Source interface (CredentialSource, RefreshingSource)
   env.go             Environment variable source
   static.go          Literal value source
   awssecretsmanager.go  AWS Secrets Manager source
+  gcpsecretmanager.go   GCP Secret Manager source
+  gcpserviceaccount.go  GCP service account OAuth2 token source
+  githubapp.go       GitHub App installation token source
+  tokenexchange.go   RFC 8693 token exchange source
 
 cmd/gatekeeper/     CLI entry point (--config flag)
 
