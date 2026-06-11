@@ -29,6 +29,7 @@ import (
 	"github.com/majorcontext/gatekeeper/credentialsource"
 	"github.com/majorcontext/gatekeeper/proxy"
 
+	"github.com/jackc/pgx/v5/pgproto3"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -2232,8 +2233,8 @@ func TestHTTPSTokenExchangeFallbackToStatic(t *testing.T) {
 				},
 			},
 			{
-				Host:  "127.0.0.1",
-				Grant: "github-bot",
+				Host:   "127.0.0.1",
+				Grant:  "github-bot",
 				Source: SourceConfig{Type: "static", Value: "Bearer bot-fallback-token"},
 			},
 		},
@@ -2317,3 +2318,114 @@ func TestHTTPSTokenExchangeFallbackToStatic(t *testing.T) {
 	}
 }
 
+// newTestCAConfig generates a CA on disk and returns a TLSConfig pointing at it.
+func newTestCAConfig(t *testing.T) TLSConfig {
+	t.Helper()
+	dir := t.TempDir()
+	if _, err := proxy.NewCA(dir); err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+	return TLSConfig{
+		CACert: filepath.Join(dir, "ca.crt"),
+		CAKey:  filepath.Join(dir, "ca.key"),
+	}
+}
+
+func TestServerStartsPostgresListener(t *testing.T) {
+	cfg := &Config{
+		Proxy:    ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		TLS:      newTestCAConfig(t),
+		Postgres: &PostgresConfig{Port: 0},
+		Credentials: []CredentialConfig{
+			{
+				Host:     "*.neon.tech",
+				Postgres: &PostgresCredentialConfig{Resolver: "static"},
+				Source:   SourceConfig{Type: "static", Value: "pw"},
+			},
+		},
+	}
+
+	srv, err := New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+
+	// Poll until the postgres listener has an address.
+	deadline := time.Now().Add(2 * time.Second)
+	var pgAddr string
+	for {
+		pgAddr = srv.PostgresAddr()
+		if pgAddr != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("postgres listener did not start in time")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Raw TCP dial must succeed.
+	conn, err := net.DialTimeout("tcp", pgAddr, time.Second)
+	if err != nil {
+		t.Fatalf("dial postgres listener: %v", err)
+	}
+	defer conn.Close()
+
+	// Sending an SSLRequest should get a single 'S' byte back, proving the
+	// listener speaks the Postgres wire protocol and offers TLS.
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
+	frontend := pgproto3.NewFrontend(conn, conn)
+	frontend.Send(&pgproto3.SSLRequest{})
+	if err := frontend.Flush(); err != nil {
+		t.Fatalf("send SSLRequest: %v", err)
+	}
+	buf := make([]byte, 1)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read SSLRequest response: %v", err)
+	}
+	if buf[0] != 'S' {
+		t.Errorf("SSLRequest response = %q, want 'S'", buf[0])
+	}
+}
+
+func TestServerPostgresRequiresCA(t *testing.T) {
+	cfg := &Config{
+		Proxy:    ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		Postgres: &PostgresConfig{Port: 0},
+	}
+
+	_, err := New(context.Background(), cfg, "")
+	if err == nil {
+		t.Fatal("expected error for postgres listener without CA")
+	}
+	if !strings.Contains(err.Error(), "ca_cert") || !strings.Contains(err.Error(), "tls") {
+		t.Errorf("error = %q, want mention of tls ca_cert", err)
+	}
+}
+
+func TestServerPostgresUnknownResolver(t *testing.T) {
+	cfg := &Config{
+		Proxy:    ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		TLS:      newTestCAConfig(t),
+		Postgres: &PostgresConfig{Port: 0},
+		Credentials: []CredentialConfig{
+			{
+				Host:     "*.neon.tech",
+				Postgres: &PostgresCredentialConfig{Resolver: "bogus"},
+				Source:   SourceConfig{Type: "static", Value: "pw"},
+			},
+		},
+	}
+
+	_, err := New(context.Background(), cfg, "")
+	if err == nil {
+		t.Fatal("expected error for unknown postgres resolver")
+	}
+	if !strings.Contains(err.Error(), "unknown resolver") {
+		t.Errorf("error = %q, want mention of 'unknown resolver'", err)
+	}
+}
