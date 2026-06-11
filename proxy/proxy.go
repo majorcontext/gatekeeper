@@ -164,8 +164,8 @@ type RequestLogData struct {
 	ResponseHeaders http.Header
 	RequestBody     []byte
 	ResponseBody    []byte
-	RequestSize     int64  // Content-Length of the request body, -1 if unknown. For postgres connections this carries a protocol-message count, not bytes.
-	ResponseSize    int64  // Content-Length of the response body, -1 if unknown. For postgres connections this carries a protocol-message count, not bytes.
+	RequestSize     int64           // Content-Length of the request body, -1 if unknown. For postgres connections this carries a protocol-message count, not bytes.
+	ResponseSize    int64           // Content-Length of the response body, -1 if unknown. For postgres connections this carries a protocol-message count, not bytes.
 	AuthInjected    bool            // True if any credential header was injected for this host
 	InjectedHeaders map[string]bool // Lower-cased header names that were injected
 	Grants          []string        // Credential grant names that were injected
