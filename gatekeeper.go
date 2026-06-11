@@ -766,6 +766,13 @@ func (s *Server) Start(ctx context.Context) error {
 		pg := proxy.NewPostgresServer(s.proxy)
 		pgAddr := fmt.Sprintf("%s:%d", pgHost, s.cfg.Postgres.Port)
 		if err := pg.Start(pgAddr); err != nil {
+			// Tear down the already-running HTTP server so a postgres bind
+			// failure doesn't leak the HTTP listener. http.Server.Shutdown
+			// closes the listener it was Serve-ing, so closing the server is
+			// sufficient — closing ln again here would race the Serve goroutine.
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = s.proxyServer.Shutdown(shutdownCtx)
+			cancel()
 			return fmt.Errorf("starting postgres listener: %w", err)
 		}
 		s.mu.Lock()

@@ -2392,6 +2392,67 @@ func TestServerStartsPostgresListener(t *testing.T) {
 	}
 }
 
+func TestServerPostgresStartFailureCleansUpHTTP(t *testing.T) {
+	// Occupy a port so the postgres listener fails to bind to it.
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupying port: %v", err)
+	}
+	defer occupied.Close()
+	occupiedPort := occupied.Addr().(*net.TCPAddr).Port
+
+	cfg := &Config{
+		Proxy:    ProxyConfig{Port: 0, Host: "127.0.0.1"}, // OS-assigned HTTP port
+		TLS:      newTestCAConfig(t),
+		Postgres: &PostgresConfig{Port: occupiedPort, Host: "127.0.0.1"},
+		Credentials: []CredentialConfig{
+			{
+				Host:     "*.neon.tech",
+				Postgres: &PostgresCredentialConfig{Resolver: "static"},
+				Source:   SourceConfig{Type: "static", Value: "pw"},
+			},
+		},
+	}
+
+	srv, err := New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// On the postgres-bind-failure path, Start returns the error immediately
+	// (it does not block on ctx.Done), so call it in the current goroutine.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startErr := srv.Start(ctx)
+	if startErr == nil {
+		t.Fatal("expected Start to fail when postgres port is occupied")
+	}
+	if !strings.Contains(startErr.Error(), "postgres listener") {
+		t.Errorf("error = %q, want mention of 'postgres listener'", startErr)
+	}
+
+	// The HTTP listener must have been torn down — its port should no longer
+	// be accepting connections. The proxy server's Shutdown closes the
+	// listener, so a dial to the proxy address should fail.
+	proxyAddr := srv.ProxyAddr()
+	if proxyAddr == "" {
+		t.Fatal("ProxyAddr is empty; HTTP listener address was never recorded")
+	}
+	// Give the Serve goroutine a moment to observe the closed listener.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		conn, dialErr := net.DialTimeout("tcp", proxyAddr, 100*time.Millisecond)
+		if dialErr != nil {
+			break // listener closed — leak cleaned up
+		}
+		conn.Close()
+		if time.Now().After(deadline) {
+			t.Fatalf("HTTP listener at %s still accepting after postgres failure; it leaked", proxyAddr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestServerPostgresRequiresCA(t *testing.T) {
 	cfg := &Config{
 		Proxy:    ProxyConfig{Port: 0, Host: "127.0.0.1"},
