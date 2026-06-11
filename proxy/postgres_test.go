@@ -22,6 +22,7 @@ func TestPostgresResolverLookup(t *testing.T) {
 		want PostgresCredentialResolver
 	}{
 		{"ep-foo-123.us-east-2.aws.neon.tech", neon},
+		{"ep-foo.aws.neon.tech:5432", neon}, // host:port input — port is stripped before matching
 		{"db.internal", other},
 		{"example.com", nil},
 	}

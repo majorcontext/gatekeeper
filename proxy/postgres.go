@@ -1,6 +1,9 @@
 package proxy
 
-import "context"
+import (
+	"context"
+	"net"
+)
 
 // postgresDefaultPort is the port used when matching Postgres host patterns.
 const postgresDefaultPort = 5432
@@ -18,7 +21,8 @@ type PostgresCredentialResolver interface {
 }
 
 // PostgresResolverEntry binds a host pattern (hosts.go glob syntax) to a
-// resolver.
+// resolver. Patterns match hostname only; a pattern with an explicit port
+// other than 5432 (e.g. "db.internal:5433") will never match.
 type PostgresResolverEntry struct {
 	Pattern  string
 	Resolver PostgresCredentialResolver
@@ -44,7 +48,8 @@ func (s *StaticPostgresResolver) InvalidatePassword(host, user, database string)
 
 // SetPostgresResolver registers a proxy-level Postgres credential resolver
 // for hosts matching pattern. Calling again with the same pattern replaces
-// the previous resolver.
+// the previous resolver. Patterns match hostname only; a pattern with an
+// explicit port other than 5432 will never match.
 func (p *Proxy) SetPostgresResolver(pattern string, r PostgresCredentialResolver) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -61,9 +66,13 @@ func (p *Proxy) SetPostgresResolver(pattern string, r PostgresCredentialResolver
 // When a run context is present, only its per-run resolvers are consulted —
 // proxy-level resolvers are never used as fallback, even when the run has no
 // resolvers at all (matching the credential scoping rule in
-// getCredentialsForRequest). Patterns match against the Postgres default
-// port (5432).
+// getCredentialsForRequest). Matching is on hostname only: any port in host
+// is stripped before matching, and patterns match against the Postgres
+// default port (5432).
 func (p *Proxy) postgresResolverForHost(rc *RunContextData, host string) PostgresCredentialResolver {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
 	if rc != nil {
 		return postgresResolverFromEntries(rc.PostgresResolvers, host)
 	}
