@@ -638,6 +638,8 @@ func (s *PostgresServer) serveAuthenticated(clientConn net.Conn, backend *pgprot
 
 	bytesIn, bytesOut := relayPostgres(backend, up.frontend, clientConn, up.conn)
 	logEntry.StatusCode = 200
+	// These are postgres protocol-message counts, not byte counts (for HTTP
+	// traffic RequestSize/ResponseSize carry byte counts).
 	logEntry.RequestSize = bytesIn
 	logEntry.ResponseSize = bytesOut
 	logEntry.Duration = time.Since(start)
@@ -683,6 +685,7 @@ func (s *PostgresServer) connectWithRetry(resolver PostgresCredentialResolver, h
 		// The cached password was rejected: drop it and try once more.
 		resolver.InvalidatePassword(host, user, database)
 	}
+	// unreachable: the loop returns on every path
 	return nil, nil, errors.New("unreachable")
 }
 
@@ -693,13 +696,24 @@ func (s *PostgresServer) connectWithRetry(resolver PostgresCredentialResolver, h
 // pump drains those buffers correctly. When one direction errors, both conns
 // are closed so the other Receive unblocks. The returned counts are
 // protocol-message counts, not byte counts.
-func relayPostgres(backend *pgproto3.Backend, frontend *pgproto3.Frontend, clientConn, upstreamConn net.Conn) (bytesIn, bytesOut int64) {
+func relayPostgres(backend *pgproto3.Backend, frontend *pgproto3.Frontend, clientConn, upConn net.Conn) (bytesIn, bytesOut int64) {
+	// Concurrency invariant: the two pumps below share one *pgproto3.Frontend
+	// and one *pgproto3.Backend, but each pump uses only one direction of each
+	// object — the client->upstream pump calls backend.Receive + frontend.Send,
+	// and the upstream->client pump calls frontend.Receive + backend.Send. This
+	// is safe only because pgproto3's read path (chunkReader + message
+	// flyweights) and write path (write buffer + writer + encodeError) live in
+	// disjoint struct fields, so a concurrent Send and Receive on one object
+	// touch different memory. pgproto3 does NOT document Send/Receive as
+	// concurrency-safe; this was verified against the pinned v5.10.0 (via
+	// jackc/pgx/v5 v5.10.0). If pgproto3 is upgraded, re-verify this
+	// field-disjointness or split into per-direction objects over the same conn.
 	var inCount, outCount atomic.Int64
 	var once sync.Once
 	closeBoth := func() {
 		once.Do(func() {
 			clientConn.Close()
-			upstreamConn.Close()
+			upConn.Close()
 		})
 	}
 
