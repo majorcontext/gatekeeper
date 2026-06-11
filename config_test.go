@@ -136,6 +136,71 @@ proxy:
 	}
 }
 
+func TestParseConfigPostgres(t *testing.T) {
+	yamlData := `
+proxy:
+  port: 8080
+postgres:
+  port: 5432
+  host: 0.0.0.0
+credentials:
+  - host: "*.neon.tech"
+    postgres:
+      resolver: neon
+    source:
+      type: env
+      var: NEON_API_KEY
+    grant: neon-databases
+`
+	cfg, err := ParseConfig([]byte(yamlData))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if cfg.Postgres == nil {
+		t.Fatal("Postgres config is nil")
+	}
+	if cfg.Postgres.Port != 5432 {
+		t.Errorf("Port = %d, want 5432", cfg.Postgres.Port)
+	}
+	if cfg.Postgres.Host != "0.0.0.0" {
+		t.Errorf("Host = %q, want 0.0.0.0", cfg.Postgres.Host)
+	}
+	if len(cfg.Credentials) != 1 {
+		t.Fatalf("credentials = %d, want 1", len(cfg.Credentials))
+	}
+	pg := cfg.Credentials[0].Postgres
+	if pg == nil {
+		t.Fatal("credential Postgres block is nil")
+	}
+	if pg.Resolver != "neon" {
+		t.Errorf("Resolver = %q, want neon", pg.Resolver)
+	}
+}
+
+func TestParseConfigNoPostgres(t *testing.T) {
+	// A config without a postgres block leaves Config.Postgres nil and
+	// credential Postgres nil (regression: pointer fields default to nil).
+	yamlData := `
+proxy:
+  port: 8080
+credentials:
+  - host: api.github.com
+    source:
+      type: env
+      var: GH_TOKEN
+`
+	cfg, err := ParseConfig([]byte(yamlData))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if cfg.Postgres != nil {
+		t.Error("expected nil Postgres config")
+	}
+	if cfg.Credentials[0].Postgres != nil {
+		t.Error("expected nil credential Postgres block")
+	}
+}
+
 func TestParseConfig_InvalidYAML(t *testing.T) {
 	_, err := ParseConfig([]byte(`{{{invalid`))
 	if err == nil {

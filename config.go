@@ -13,6 +13,15 @@ type Config struct {
 	Credentials []CredentialConfig `yaml:"credentials"`
 	Network     NetworkConfig      `yaml:"network"`
 	Log         LogConfig          `yaml:"log"`
+	Postgres    *PostgresConfig    `yaml:"postgres,omitempty"`
+}
+
+// PostgresConfig configures the Postgres data-plane listener. When present,
+// gatekeeper starts a Postgres-protocol listener that authenticates clients
+// with their run token and injects resolved database credentials upstream.
+type PostgresConfig struct {
+	Port int    `yaml:"port"`           // listener port (e.g. 5432)
+	Host string `yaml:"host,omitempty"` // bind address (default: same as proxy host)
 }
 
 // ProxyConfig configures the proxy listener.
@@ -43,12 +52,21 @@ type TLSConfig struct {
 // smart HTTP), set Format to "basic" and Prefix to the Basic auth username.
 // The credential value becomes the password: Authorization: Basic base64(prefix:value).
 type CredentialConfig struct {
-	Host   string       `yaml:"host"`             // Target host (e.g., "api.github.com")
-	Header string       `yaml:"header,omitempty"` // Header name (default: "Authorization")
-	Prefix string       `yaml:"prefix,omitempty"` // Auth scheme prefix (e.g., "Bearer", "token"); auto-detected if omitted
-	Format string       `yaml:"format,omitempty"` // Auth format: "" (default scheme prefix) or "basic" (HTTP Basic)
-	Source SourceConfig `yaml:"source"`
-	Grant  string       `yaml:"grant,omitempty"` // Optional label for logging
+	Host     string                    `yaml:"host"`             // Target host (e.g., "api.github.com")
+	Header   string                    `yaml:"header,omitempty"` // Header name (default: "Authorization")
+	Prefix   string                    `yaml:"prefix,omitempty"` // Auth scheme prefix (e.g., "Bearer", "token"); auto-detected if omitted
+	Format   string                    `yaml:"format,omitempty"` // Auth format: "" (default scheme prefix) or "basic" (HTTP Basic)
+	Source   SourceConfig              `yaml:"source"`
+	Grant    string                    `yaml:"grant,omitempty"` // Optional label for logging
+	Postgres *PostgresCredentialConfig `yaml:"postgres,omitempty"`
+}
+
+// PostgresCredentialConfig marks a credential as a Postgres credential and
+// selects how the upstream password is resolved. Resolver is "neon" (the
+// Source supplies the Neon API key, passwords are minted per branch) or
+// "static" (the Source supplies the password directly).
+type PostgresCredentialConfig struct {
+	Resolver string `yaml:"resolver"`
 }
 
 // SourceConfig describes where to read a credential value from.
@@ -93,10 +111,10 @@ type NetworkConfig struct {
 
 // LogConfig configures logging.
 type LogConfig struct {
-	Level          string   `yaml:"level"`                      // Log level (e.g., "debug", "info", "warn", "error")
-	Format         string   `yaml:"format"`                     // Output format ("json" or "text")
-	Output         string   `yaml:"output"`                     // Destination ("stderr", "stdout", or a file path; default: stderr)
-	CaptureHeaders []string `yaml:"capture_headers,omitempty"`  // Request headers to log and strip before forwarding
+	Level          string   `yaml:"level"`                     // Log level (e.g., "debug", "info", "warn", "error")
+	Format         string   `yaml:"format"`                    // Output format ("json" or "text")
+	Output         string   `yaml:"output"`                    // Destination ("stderr", "stdout", or a file path; default: stderr)
+	CaptureHeaders []string `yaml:"capture_headers,omitempty"` // Request headers to log and strip before forwarding
 }
 
 // ParseConfig parses a Gate Keeper config from YAML bytes.
