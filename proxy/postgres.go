@@ -22,6 +22,23 @@ import (
 // startup, and the cleartext password exchange must complete within this window.
 const postgresHandshakeTimeout = 30 * time.Second
 
+// postgresKeepAlivePeriod is the TCP keep-alive probe interval for the relayed
+// connection. The relay has no idle or statement timeout — a long-running query
+// or an idle session blocks indefinitely on Receive — so keep-alives let each
+// side detect a dead peer and reclaim the connection instead of leaking it.
+const postgresKeepAlivePeriod = 30 * time.Second
+
+// enableKeepAlive turns on TCP keep-alives for a relayed connection. It is a
+// no-op for non-TCP connections (e.g. test pipes).
+func enableKeepAlive(conn net.Conn) {
+	tc, ok := conn.(*net.TCPConn)
+	if !ok {
+		return
+	}
+	_ = tc.SetKeepAlive(true)
+	_ = tc.SetKeepAlivePeriod(postgresKeepAlivePeriod)
+}
+
 // postgresDefaultPort is the port used when matching Postgres host patterns.
 const postgresDefaultPort = 5432
 
@@ -146,7 +163,7 @@ type upstreamConn struct {
 // startup parameters, completes SCRAM-SHA-256 authentication with the
 // resolved password, and buffers the post-auth messages up to ReadyForQuery.
 func connectPostgresUpstream(ctx context.Context, p upstreamParams) (*upstreamConn, error) {
-	dialer := net.Dialer{Timeout: postgresDialTimeout}
+	dialer := net.Dialer{Timeout: postgresDialTimeout, KeepAlive: postgresKeepAlivePeriod}
 	rawConn, err := dialer.DialContext(ctx, "tcp", p.dialAddr)
 	if err != nil {
 		return nil, fmt.Errorf("dial upstream: %w", err)
@@ -434,6 +451,10 @@ func (s *PostgresServer) acceptLoop(ln net.Listener) {
 // authenticate it, then hand off to serveAuthenticated.
 func (s *PostgresServer) handleConn(conn net.Conn) {
 	defer conn.Close()
+
+	// Keep-alives so a dead client is detected during a long-running query or
+	// an idle session, which the relay would otherwise block on indefinitely.
+	enableKeepAlive(conn)
 
 	// Bound the handshake on both reads and writes: a stalled client write (a
 	// full socket buffer while we flush AuthenticationCleartextPassword or an
