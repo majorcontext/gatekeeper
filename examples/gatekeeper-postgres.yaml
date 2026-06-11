@@ -51,9 +51,15 @@ tls:
 credentials:
   # Neon resolver: the source supplies the Neon API key, and gatekeeper mints
   # per-branch passwords from the Neon API (cached with a TTL).
+  #
+  # An account-scoped API key needs no `project`: gatekeeper discovers which
+  # project owns an endpoint by listing projects. A project-scoped key (the
+  # least-privilege option) cannot list projects — set `project` to its
+  # project ID so gatekeeper queries that project directly.
   - host: "*.neon.tech"
     postgres:
       resolver: neon
+      # project: falling-river-38863773   # required only for project-scoped keys
     source:
       type: env
       var: NEON_API_KEY

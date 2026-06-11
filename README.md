@@ -135,7 +135,7 @@ A Postgres listener **requires a CA** (`tls.ca_cert` and `tls.ca_key`) for TLS t
 
 Two resolvers are available:
 
-- **`neon`** — the source supplies a Neon API key; per-branch passwords are minted from the Neon API and cached with a TTL.
+- **`neon`** — the source supplies a Neon API key; per-branch passwords are minted from the Neon API and cached with a TTL. With an account-scoped key, Gatekeeper discovers an endpoint's project automatically; with a project-scoped key (which can't list projects), set `project:` on the credential to its project ID.
 - **`static`** — the source supplies a fixed password directly (for non-Neon Postgres or testing).
 
 ```yaml
