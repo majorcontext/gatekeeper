@@ -365,6 +365,7 @@ type RunContextData struct {
 	HostGateway          string
 	HostGatewayIP        string // actual IP to forward allowed host-gateway requests to
 	AllowedHostPorts     []int
+	PostgresResolvers    []PostgresResolverEntry
 }
 
 // ContextResolver resolves a proxy auth token to per-run context data.
@@ -406,6 +407,7 @@ type CredentialResolver func(ctx context.Context, proxyReq, innerReq *http.Reque
 type Proxy struct {
 	credentials          map[string][]credentialHeader    // host -> credential headers
 	credentialResolvers  map[string]CredentialResolver    // host -> dynamic resolver
+	postgresResolvers    []PostgresResolverEntry          // host pattern -> Postgres password resolver
 	extraHeaders         map[string][]extraHeader         // host -> additional headers to inject
 	responseTransformers map[string][]ResponseTransformer // host -> response transformers
 	mu                   sync.RWMutex
