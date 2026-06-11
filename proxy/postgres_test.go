@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"context"
+	"crypto/x509"
+	"errors"
 	"testing"
 
 	"github.com/majorcontext/gatekeeper/credentialsource"
@@ -74,4 +76,73 @@ func TestStaticPostgresResolver(t *testing.T) {
 		t.Fatalf("ResolvePassword = %q, %v; want \"pw\", nil", got, err)
 	}
 	r.InvalidatePassword("any.host", "u", "d") // must not panic
+}
+
+func TestConnectPostgresUpstreamSCRAM(t *testing.T) {
+	fake := startFakePostgres(t, "ep-foo-123.aws.neon.tech", "app_rw", "real-password")
+	up, err := connectPostgresUpstream(context.Background(), upstreamParams{
+		dialAddr:          fake.addr,
+		serverName:        "ep-foo-123.aws.neon.tech",
+		rootCAs:           fake.certPool,
+		user:              "app_rw",
+		password:          "real-password",
+		startupParameters: map[string]string{"user": "app_rw", "database": "appdb"},
+	})
+	if err != nil {
+		t.Fatalf("connectPostgresUpstream: %v", err)
+	}
+	defer up.conn.Close()
+	if len(up.postAuthFrames) == 0 {
+		t.Error("expected buffered post-auth frames")
+	}
+	// last frame must be ReadyForQuery: type byte 'Z'
+	last := up.postAuthFrames[len(up.postAuthFrames)-1]
+	if len(last) == 0 || last[0] != 'Z' {
+		t.Errorf("last frame type = %q, want 'Z' (ReadyForQuery)", last[0])
+	}
+	// first frame must be AuthenticationOk: type byte 'R'
+	first := up.postAuthFrames[0]
+	if len(first) == 0 || first[0] != 'R' {
+		t.Errorf("first frame type = %q, want 'R' (AuthenticationOk)", first[0])
+	}
+}
+
+func TestConnectPostgresUpstreamBadPassword(t *testing.T) {
+	fake := startFakePostgres(t, "ep-foo-123.aws.neon.tech", "app_rw", "real-password")
+	_, err := connectPostgresUpstream(context.Background(), upstreamParams{
+		dialAddr: fake.addr, serverName: "ep-foo-123.aws.neon.tech", rootCAs: fake.certPool,
+		user: "app_rw", password: "wrong",
+		startupParameters: map[string]string{"user": "app_rw", "database": "appdb"},
+	})
+	if !errors.Is(err, errUpstreamAuthFailed) {
+		t.Fatalf("err = %v, want errUpstreamAuthFailed", err)
+	}
+}
+
+func TestConnectPostgresUpstreamUnknownUser(t *testing.T) {
+	// fake sends 28000 for unknown role — must also map to errUpstreamAuthFailed
+	fake := startFakePostgres(t, "ep-foo-123.aws.neon.tech", "app_rw", "real-password")
+	_, err := connectPostgresUpstream(context.Background(), upstreamParams{
+		dialAddr: fake.addr, serverName: "ep-foo-123.aws.neon.tech", rootCAs: fake.certPool,
+		user: "other_user", password: "real-password",
+		startupParameters: map[string]string{"user": "other_user", "database": "appdb"},
+	})
+	if !errors.Is(err, errUpstreamAuthFailed) {
+		t.Fatalf("err = %v, want errUpstreamAuthFailed", err)
+	}
+}
+
+func TestConnectPostgresUpstreamRejectsUntrustedCert(t *testing.T) {
+	fake := startFakePostgres(t, "ep-foo-123.aws.neon.tech", "app_rw", "real-password")
+	_, err := connectPostgresUpstream(context.Background(), upstreamParams{
+		dialAddr: fake.addr, serverName: "ep-foo-123.aws.neon.tech", rootCAs: x509.NewCertPool(),
+		user: "app_rw", password: "real-password",
+		startupParameters: map[string]string{"user": "app_rw", "database": "appdb"},
+	})
+	if err == nil {
+		t.Fatal("expected TLS verification failure")
+	}
+	if errors.Is(err, errUpstreamAuthFailed) {
+		t.Fatal("TLS failure must not be classified as auth failure")
+	}
 }
