@@ -9,6 +9,7 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 Key capabilities:
 
 - **Credential injection** — Resolve credentials from environment variables, static values, AWS Secrets Manager, GCP Secret Manager, GCP service account keys, GitHub App keys, or RFC 8693 token exchange, then inject them as HTTP headers for matching hosts
+- **Postgres data plane** — Credential-injecting Postgres proxy on a second listener: routes by TLS SNI, authenticates clients with their run token (sent as the Postgres password inside gatekeeper's TLS), and resolves per-branch Neon passwords (or a static password) on the fly so no database secret lives in the sandbox
 - **TLS interception** — MITM proxy with per-host certificate generation from a configured CA
 - **MCP relay** — Forward Model Context Protocol requests with credential injection and SSE streaming
 - **Network policy** — Allow/deny traffic by host pattern
@@ -26,6 +27,7 @@ proxy/              Core TLS-intercepting proxy engine
   mcp.go             MCP relay handler (SSE streaming, tool credential injection)
   llmpolicy.go       LLM response policy evaluation via Keep
   relay.go           HTTP relay for non-CONNECT requests
+  postgres.go        Postgres data-plane listener (TLS termination, run-token auth, SCRAM upstream, message relay)
   otel.go            OpenTelemetry handler wrapper, metrics instruments, span helpers
   server.go          Proxy server lifecycle (start/stop/listen)
 
@@ -42,6 +44,7 @@ credentialsource/   Pluggable credential backends
   gcpserviceaccount.go  GCP service account OAuth2 token source
   githubapp.go       GitHub App installation token source
   tokenexchange.go   RFC 8693 token exchange source
+  neon.go            Neon endpoint parsing + per-branch Postgres password resolver
 
 cmd/gatekeeper/     CLI entry point (--config flag)
 
@@ -53,6 +56,8 @@ examples/           Sample config, CA generation script, and test harness
 - **`proxy.Proxy`** — The core proxy. Handles HTTP CONNECT, TLS interception, credential injection, network policy, and request logging.
 - **`proxy.RunContextData`** — Per-caller credential and policy context. Holds credentials, network policy, MCP servers, host gateway config, and Keep engines for a single caller.
 - **`proxy.ContextResolver`** — Function type (`func(token string) (*RunContextData, bool)`) that resolves a proxy auth token to per-caller context. Standalone mode uses a single static context; moat's daemon maps each registered run to its own scoped context.
+- **`proxy.PostgresServer`** — The client-facing Postgres listener. Terminates client TLS with a CA-minted cert for the SNI host, authenticates the run token sent as the Postgres password, resolves the upstream password, completes SCRAM-SHA-256 upstream, and relays pgproto3 messages in both directions.
+- **`proxy.PostgresCredentialResolver`** — Interface resolving an upstream Postgres password for a (host, user, database) tuple at connection time. Implemented by `credentialsource.NeonResolver` (per-branch passwords via the Neon API, cached with TTL) and `proxy.StaticPostgresResolver` (a fixed password).
 - **`gatekeeper.Server`** — Standalone server that loads config, resolves credential sources, and wires up the proxy.
 
 ### How Credential Injection Works

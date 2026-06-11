@@ -12,6 +12,8 @@ curl --proxy http://127.0.0.1:9080 --cacert ca.crt https://api.github.com/user
 
 No `GITHUB_TOKEN` in the command. No secrets in environment variables. The token is resolved from the configured source and injected at the network layer.
 
+Gatekeeper also runs an optional [Postgres data plane](#postgres-data-plane) — connect to Neon databases with only a run token, never a database password.
+
 ## Installation
 
 ```bash
@@ -115,6 +117,54 @@ network:
 ```
 
 Policies: `permissive` (allow all), `strict` (deny all, allow listed).
+
+## Postgres data plane
+
+Gatekeeper can run a second listener that speaks the Postgres wire protocol, letting a sandboxed client connect to arbitrary Neon databases without any database secret ever entering the sandbox. The only credential the client holds is a run-scoped token, which is useless outside Gatekeeper.
+
+The client connects to the real Neon hostname and presents its run token (or the proxy's `auth_token`) as the Postgres password. Gatekeeper terminates TLS with a CA-minted certificate, reads the target endpoint from the TLS SNI, resolves the real per-branch password from the Neon API on the fly, completes SCRAM-SHA-256 with the upstream server, and relays the connection. The run token travels as a cleartext password, but only inside Gatekeeper's own TLS tunnel — the same trust model as `Proxy-Authorization` on the HTTP plane.
+
+```
+client ──TLS(token as password)──▶ gatekeeper ──TLS(SCRAM, real password)──▶ Neon
+         SNI: ep-...neon.tech                    resolved via Neon API
+```
+
+**Routing is by SNI.** The target endpoint travels in the TLS SNI field, so the embedder must arrange DNS inside the container so `*.neon.tech` resolves to Gatekeeper. That DNS plumbing is outside Gatekeeper's scope — it's the embedder's responsibility (e.g. [Moat](https://github.com/majorcontext/moat) handles it). The v1 data plane is a blind message relay: it routes on SNI only and does no SQL-level inspection.
+
+A Postgres listener **requires a CA** (`tls.ca_cert` and `tls.ca_key`) for TLS termination — Gatekeeper errors at startup otherwise.
+
+Two resolvers are available:
+
+- **`neon`** — the source supplies a Neon API key; per-branch passwords are minted from the Neon API and cached with a TTL.
+- **`static`** — the source supplies a fixed password directly (for non-Neon Postgres or testing).
+
+```yaml
+postgres:
+  host: 127.0.0.1      # optional, defaults to the proxy host
+  port: 5432
+
+tls:
+  ca_cert: ca.crt
+  ca_key: ca.key
+
+credentials:
+  - host: "*.neon.tech"
+    postgres:
+      resolver: neon
+    source:
+      type: env
+      var: NEON_API_KEY
+    grant: neon-databases
+```
+
+Once DNS routes `*.neon.tech` to Gatekeeper, connect with the run token as the password:
+
+```bash
+PGPASSWORD=<run-token> psql \
+  "host=ep-cool-darkness-123456.us-east-2.aws.neon.tech dbname=neondb user=neondb_owner sslmode=require"
+```
+
+Moat sets `PGPASSWORD` in the container so the token never appears in the agent's command line. See [`examples/gatekeeper-postgres.yaml`](examples/gatekeeper-postgres.yaml) for a complete example.
 
 ## Observability
 
