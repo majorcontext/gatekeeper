@@ -1,0 +1,5 @@
+# Build artifact (go build -o gatekeeper ./cmd/gatekeeper/)
+/gatekeeper
+
+# Git worktrees
+/.worktrees/
