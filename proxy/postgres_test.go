@@ -5,13 +5,16 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/majorcontext/gatekeeper/credentialsource"
 )
@@ -505,4 +508,203 @@ func TestPostgresStopNilListenerIsSafe(t *testing.T) {
 	srv := NewPostgresServer(NewProxy())
 	srv.Stop() // must not panic.
 	srv.Stop()
+}
+
+// connectThroughGatekeeper drives a real pgx client through the gatekeeper
+// Postgres listener: it authenticates with token (the run token, sent as the
+// cleartext password) and presents sniHost as the TLS server name.
+func connectThroughGatekeeper(t *testing.T, srv *PostgresServer, caPool *x509.CertPool, sniHost, user, db, token string) (*pgconn.PgConn, error) {
+	t.Helper()
+	cfg, err := pgconn.ParseConfig(fmt.Sprintf("postgres://%s:%s@%s/%s", user, token, srv.Addr(), db))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.TLSConfig = &tls.Config{ServerName: sniHost, RootCAs: caPool}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return pgconn.ConnectConfig(ctx, cfg)
+}
+
+// logCapture collects RequestLogData entries under a mutex.
+type logCapture struct {
+	mu      sync.Mutex
+	entries []RequestLogData
+}
+
+func (c *logCapture) log(data RequestLogData) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = append(c.entries, data)
+}
+
+func (c *logCapture) snapshot() []RequestLogData {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]RequestLogData, len(c.entries))
+	copy(out, c.entries)
+	return out
+}
+
+func TestPostgresEndToEnd(t *testing.T) {
+	fake := startFakePostgres(t, "ep-foo-123.aws.neon.tech", "app_rw", "real-password")
+
+	ca, err := generateCA()
+	if err != nil {
+		t.Fatalf("generateCA: %v", err)
+	}
+	p := NewProxy()
+	p.SetCA(ca)
+	p.SetUpstreamCAs(fake.certPool)
+	p.SetAuthToken("run-token")
+	p.SetPostgresResolver("*.neon.tech", NewStaticPostgresResolver("real-password"))
+	cap := &logCapture{}
+	p.SetLogger(cap.log)
+
+	srv := newTestPostgresListener(t, p)
+	srv.dialUpstream = func(ctx context.Context, h string) (string, error) {
+		if h != "ep-foo-123.aws.neon.tech" {
+			t.Errorf("dialUpstream host = %q, want ep-foo-123.aws.neon.tech", h)
+		}
+		return fake.addr, nil
+	}
+
+	conn, err := connectThroughGatekeeper(t, srv, caTrustPool(t, ca),
+		"ep-foo-123.aws.neon.tech", "app_rw", "appdb", "run-token")
+	if err != nil {
+		t.Fatalf("connect through gatekeeper: %v", err)
+	}
+
+	res, err := conn.Exec(context.Background(), "SELECT 1").ReadAll()
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if len(res) == 0 {
+		t.Fatalf("got %d results, want >= 1", len(res))
+	}
+	if res[0].Err != nil {
+		t.Errorf("result error: %v", res[0].Err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := conn.Close(ctx); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+
+	if got := fake.queriedLast(); got != "SELECT 1" {
+		t.Errorf("queriedLast = %q, want %q", got, "SELECT 1")
+	}
+
+	// The audit log entry is written after the relay completes (client
+	// disconnect). Poll until it appears.
+	var entries []RequestLogData
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		entries = cap.snapshot()
+		if len(entries) >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d log entries, want exactly 1", len(entries))
+	}
+	e := entries[0]
+	if e.RequestType != "postgres" {
+		t.Errorf("RequestType = %q, want postgres", e.RequestType)
+	}
+	if e.Host != "ep-foo-123.aws.neon.tech" {
+		t.Errorf("Host = %q, want ep-foo-123.aws.neon.tech", e.Host)
+	}
+	if e.UserID != "app_rw" {
+		t.Errorf("UserID = %q, want app_rw", e.UserID)
+	}
+	if e.Denied {
+		t.Errorf("Denied = true, want false")
+	}
+	if !e.AuthInjected {
+		t.Errorf("AuthInjected = false, want true")
+	}
+}
+
+// flakyResolver returns the next password in a sequence on each
+// ResolvePassword call (clamped at the last entry) and records whether
+// InvalidatePassword was called.
+type flakyResolver struct {
+	mu          sync.Mutex
+	passwords   []string
+	idx         int
+	invalidated atomic.Bool
+}
+
+func (r *flakyResolver) ResolvePassword(_ context.Context, _, _, _ string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	pw := r.passwords[r.idx]
+	if r.idx < len(r.passwords)-1 {
+		r.idx++
+	}
+	return pw, nil
+}
+
+func (r *flakyResolver) InvalidatePassword(_, _, _ string) {
+	r.invalidated.Store(true)
+}
+
+func TestPostgresRetriesAfterStalePassword(t *testing.T) {
+	fake := startFakePostgres(t, "ep-foo-123.aws.neon.tech", "app_rw", "current-password")
+
+	ca, err := generateCA()
+	if err != nil {
+		t.Fatalf("generateCA: %v", err)
+	}
+	p := NewProxy()
+	p.SetCA(ca)
+	p.SetUpstreamCAs(fake.certPool)
+	p.SetAuthToken("run-token")
+	flaky := &flakyResolver{passwords: []string{"stale-password", "current-password"}}
+	p.SetPostgresResolver("*.neon.tech", flaky)
+
+	srv := newTestPostgresListener(t, p)
+	srv.dialUpstream = func(_ context.Context, _ string) (string, error) {
+		return fake.addr, nil
+	}
+
+	conn, err := connectThroughGatekeeper(t, srv, caTrustPool(t, ca),
+		"ep-foo-123.aws.neon.tech", "app_rw", "appdb", "run-token")
+	if err != nil {
+		t.Fatalf("connect through gatekeeper: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := conn.Close(ctx); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+
+	if !flaky.invalidated.Load() {
+		t.Error("expected InvalidatePassword to be called after the stale password failed")
+	}
+}
+
+func TestPostgresPolicyDeniesHost(t *testing.T) {
+	ca, err := generateCA()
+	if err != nil {
+		t.Fatalf("generateCA: %v", err)
+	}
+	p := NewProxy()
+	p.SetCA(ca)
+	p.SetAuthToken("run-token")
+	p.SetNetworkPolicy("strict", []string{"api.github.com"}, nil)
+	p.SetPostgresResolver("*.neon.tech", NewStaticPostgresResolver("real-password"))
+
+	srv := newTestPostgresListener(t, p)
+
+	conn, err := connectThroughGatekeeper(t, srv, caTrustPool(t, ca),
+		"ep-foo.aws.neon.tech", "app_rw", "appdb", "run-token")
+	if err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn.Close(ctx)
+		t.Fatal("connect succeeded, want a policy-denial error")
+	}
 }

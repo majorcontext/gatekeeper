@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -544,24 +545,216 @@ func (s *PostgresServer) authenticate(token string) (*RunContextData, bool) {
 	return nil, true
 }
 
-// serveAuthenticated takes over a fully authenticated client connection.
-//
-// This is a stub for Task 7: it resolves the upstream credential resolver for
-// the SNI host and reports failure either way (relay not yet implemented).
-//
-// Task 8 replaces the relay-not-implemented branch with the real upstream
-// connection and bidirectional copy. Handoff notes for Task 8:
-//   - connectPostgresUpstream returns post-auth data as postAuthFrames [][]byte,
-//     pre-encoded wire frames. Write those bytes directly to clientConn (NOT via
-//     backend.Send, which takes typed messages).
-//   - Clear the handshake read deadline on clientConn before entering the relay
-//     phase.
+// serveAuthenticated takes over a fully authenticated client connection: it
+// enforces network policy, resolves the upstream password (re-resolving once on
+// an upstream auth failure), connects to the upstream server, forwards the
+// buffered post-auth frames to the client, then relays messages in both
+// directions until either side closes. Every outcome is audit-logged once.
 func (s *PostgresServer) serveAuthenticated(clientConn net.Conn, backend *pgproto3.Backend, rc *RunContextData, sniHost, user, database string, startupParams map[string]string) {
-	if s.proxy.postgresResolverForHost(rc, sniHost) == nil {
-		sendPGError(backend, "08004", "no credentials configured for this host")
+	start := time.Now()
+	logEntry := RequestLogData{
+		Method:       "STARTUP",
+		URL:          sniHost,
+		Host:         sniHost,
+		RequestType:  "postgres",
+		UserID:       user,
+		RequestSize:  -1,
+		ResponseSize: -1,
+	}
+	if rc != nil {
+		logEntry.RunID = rc.RunID
+	}
+
+	deny := func(code, clientMsg, logReason string) {
+		sendPGError(backend, code, clientMsg)
+		logEntry.Denied = true
+		logEntry.DenyReason = logReason
+		logEntry.Duration = time.Since(start)
+		s.log(logEntry)
+	}
+
+	// Network policy: when a run context is present, honor its scoped policy;
+	// otherwise fall back to the proxy-level policy.
+	var allowed bool
+	if rc != nil {
+		allowed = rc.Policy != "strict" || matchHost(rc.AllowedHosts, sniHost, postgresDefaultPort)
+	} else {
+		allowed = s.proxy.checkNetworkPolicy(sniHost, postgresDefaultPort)
+	}
+	if !allowed {
+		if s.proxy.policyLogger != nil {
+			runID := ""
+			if rc != nil {
+				runID = rc.RunID
+			}
+			s.proxy.policyLogger(PolicyLogData{
+				RunID:     runID,
+				Scope:     "network",
+				Operation: "postgres.connect",
+				Message:   "Host not in allow list: " + sniHost,
+			})
+		}
+		deny("28000", "connection not allowed by network policy", "Host not in allow list: "+sniHost)
 		return
 	}
-	sendPGError(backend, "08004", "relay not implemented")
+
+	resolver := s.proxy.postgresResolverForHost(rc, sniHost)
+	if resolver == nil {
+		deny("08004", "no credentials configured for this host", "no postgres resolver for host")
+		return
+	}
+
+	up, grants, err := s.connectWithRetry(resolver, sniHost, user, database, startupParams)
+	if err != nil {
+		// Never include the underlying error in the client-facing message: it
+		// could echo the upstream server's identifiers. The full error is only
+		// logged at debug level, never with credential values.
+		slog.Debug("postgres upstream connection failed",
+			"subsystem", "proxy",
+			"host", sniHost,
+			"user", user,
+			"error", err)
+		deny("28P01", "could not authenticate to upstream database", "upstream connection failed")
+		return
+	}
+	defer up.conn.Close()
+	logEntry.AuthInjected = true
+	logEntry.Grants = grants
+
+	// Forward the buffered post-auth frames (AuthenticationOk .. ReadyForQuery)
+	// verbatim. These are pre-encoded wire bytes, so they go straight to the
+	// client socket, not through backend.Send.
+	for _, frame := range up.postAuthFrames {
+		if _, err := clientConn.Write(frame); err != nil {
+			logEntry.Duration = time.Since(start)
+			s.log(logEntry)
+			return
+		}
+	}
+
+	// The handshake deadlines must not bound the (potentially long-lived) relay.
+	_ = clientConn.SetDeadline(time.Time{})
+	_ = up.conn.SetDeadline(time.Time{})
+
+	bytesIn, bytesOut := relayPostgres(backend, up.frontend, clientConn, up.conn)
+	logEntry.StatusCode = 200
+	logEntry.RequestSize = bytesIn
+	logEntry.ResponseSize = bytesOut
+	logEntry.Duration = time.Since(start)
+	s.log(logEntry)
+}
+
+// connectWithRetry resolves the upstream password and connects to the upstream
+// Postgres server, retrying exactly once on an upstream authentication failure
+// after invalidating the (presumably stale) cached password. It returns the
+// authenticated upstream connection and the grant names for audit logging.
+func (s *PostgresServer) connectWithRetry(resolver PostgresCredentialResolver, host, user, database string, startupParams map[string]string) (*upstreamConn, []string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresHandshakeTimeout)
+	defer cancel()
+
+	dialAddr := net.JoinHostPort(host, "5432")
+	if s.dialUpstream != nil {
+		addr, err := s.dialUpstream(ctx, host)
+		if err != nil {
+			return nil, nil, err
+		}
+		dialAddr = addr
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		password, err := resolver.ResolvePassword(ctx, host, user, database)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolving postgres password: %w", err)
+		}
+		up, err := connectPostgresUpstream(ctx, upstreamParams{
+			dialAddr:          dialAddr,
+			serverName:        host,
+			rootCAs:           s.proxy.upstreamCAs,
+			user:              user,
+			password:          password,
+			startupParameters: startupParams,
+		})
+		if err == nil {
+			return up, []string{"postgres:" + host}, nil
+		}
+		if !errors.Is(err, errUpstreamAuthFailed) || attempt == 1 {
+			return nil, nil, err
+		}
+		// The cached password was rejected: drop it and try once more.
+		resolver.InvalidatePassword(host, user, database)
+	}
+	return nil, nil, errors.New("unreachable")
+}
+
+// relayPostgres pumps pgproto3 messages in both directions between the client
+// (via backend) and the upstream server (via frontend) until either side errors
+// or the client sends Terminate. Both readers are buffered, so a raw io.Copy
+// would risk stranding bytes already pulled past the handshake — the message
+// pump drains those buffers correctly. When one direction errors, both conns
+// are closed so the other Receive unblocks. The returned counts are
+// protocol-message counts, not byte counts.
+func relayPostgres(backend *pgproto3.Backend, frontend *pgproto3.Frontend, clientConn, upstreamConn net.Conn) (bytesIn, bytesOut int64) {
+	var inCount, outCount atomic.Int64
+	var once sync.Once
+	closeBoth := func() {
+		once.Do(func() {
+			clientConn.Close()
+			upstreamConn.Close()
+		})
+	}
+
+	done := make(chan struct{}, 2)
+
+	// client -> upstream
+	go func() {
+		defer func() { done <- struct{}{} }()
+		for {
+			msg, err := backend.Receive()
+			if err != nil {
+				closeBoth()
+				return
+			}
+			frontend.Send(msg)
+			if err := frontend.Flush(); err != nil {
+				closeBoth()
+				return
+			}
+			inCount.Add(1)
+			if _, ok := msg.(*pgproto3.Terminate); ok {
+				closeBoth()
+				return
+			}
+		}
+	}()
+
+	// upstream -> client
+	go func() {
+		defer func() { done <- struct{}{} }()
+		for {
+			msg, err := frontend.Receive()
+			if err != nil {
+				closeBoth()
+				return
+			}
+			backend.Send(msg)
+			if err := backend.Flush(); err != nil {
+				closeBoth()
+				return
+			}
+			outCount.Add(1)
+		}
+	}()
+
+	<-done
+	<-done
+	return inCount.Load(), outCount.Load()
+}
+
+// log forwards an audit entry to the proxy's request logger, if configured.
+func (s *PostgresServer) log(data RequestLogData) {
+	if s.proxy.logger != nil {
+		s.proxy.logger(data)
+	}
 }
 
 // sendPGError sends a FATAL ErrorResponse with the given SQLSTATE and message,
