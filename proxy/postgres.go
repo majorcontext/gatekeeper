@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -356,6 +358,10 @@ type PostgresServer struct {
 	proxy    *Proxy
 	listener net.Listener
 
+	// closed is set by Stop before the listener is closed so acceptLoop can
+	// distinguish an intentional shutdown from a real Accept failure.
+	closed atomic.Bool
+
 	// dialUpstream overrides upstream dialing in tests; nil means dial host:5432.
 	// Task 8 (the relay) consumes it.
 	dialUpstream func(ctx context.Context, host string) (string, error)
@@ -393,9 +399,14 @@ func (s *PostgresServer) Addr() string {
 	return s.listener.Addr().String()
 }
 
-// Stop closes the listener. It is safe to call on a nil-listener server.
+// Stop closes the listener. It is safe to call on a nil-listener server and
+// idempotent: the closed flag guards against a double close and signals
+// acceptLoop to treat the resulting Accept error as an intentional shutdown.
 func (s *PostgresServer) Stop() {
-	if s.listener != nil {
+	if s.listener == nil {
+		return
+	}
+	if s.closed.CompareAndSwap(false, true) {
 		s.listener.Close()
 	}
 }
@@ -404,6 +415,13 @@ func (s *PostgresServer) acceptLoop(ln net.Listener) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
+			if s.closed.Load() {
+				// Intentional shutdown via Stop: the listener was closed.
+				return
+			}
+			slog.Error("postgres accept loop exited",
+				"subsystem", "proxy",
+				"error", err)
 			return
 		}
 		go s.handleConn(conn)
@@ -416,9 +434,11 @@ func (s *PostgresServer) acceptLoop(ln net.Listener) {
 func (s *PostgresServer) handleConn(conn net.Conn) {
 	defer conn.Close()
 
-	// Bound the handshake. The relay phase (Task 8) clears this deadline before
-	// entering the bidirectional copy.
-	_ = conn.SetReadDeadline(time.Now().Add(postgresHandshakeTimeout))
+	// Bound the handshake on both reads and writes: a stalled client write (a
+	// full socket buffer while we flush AuthenticationCleartextPassword or an
+	// ErrorResponse) must not pin this goroutine. The relay phase (Task 8)
+	// clears this deadline before entering the bidirectional copy.
+	_ = conn.SetDeadline(time.Now().Add(postgresHandshakeTimeout))
 
 	backend := pgproto3.NewBackend(conn, conn)
 	startup, err := backend.ReceiveStartupMessage()
@@ -448,7 +468,9 @@ func (s *PostgresServer) handleConn(conn net.Conn) {
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		return
 	}
-	_ = tlsConn.SetReadDeadline(time.Now().Add(postgresHandshakeTimeout))
+	// Bound reads and writes for the same reason as above. The relay phase
+	// (Task 8) clears this deadline before entering the bidirectional copy.
+	_ = tlsConn.SetDeadline(time.Now().Add(postgresHandshakeTimeout))
 
 	backend = pgproto3.NewBackend(tlsConn, tlsConn)
 

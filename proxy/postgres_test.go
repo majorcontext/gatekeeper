@@ -5,8 +5,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -427,4 +429,80 @@ func TestPostgresListenerStaticTokenAuth(t *testing.T) {
 			t.Errorf("ErrorResponse code = %q, want 28P01", errResp.Code)
 		}
 	})
+}
+
+// errorCountHandler is a slog.Handler that counts records logged at
+// slog.LevelError or above. It is safe for concurrent use.
+type errorCountHandler struct {
+	mu    sync.Mutex
+	count int
+}
+
+func (h *errorCountHandler) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= slog.LevelError
+}
+
+func (h *errorCountHandler) Handle(_ context.Context, r slog.Record) error {
+	if r.Level >= slog.LevelError {
+		h.mu.Lock()
+		h.count++
+		h.mu.Unlock()
+	}
+	return nil
+}
+
+func (h *errorCountHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h *errorCountHandler) WithGroup(_ string) slog.Handler      { return h }
+
+func (h *errorCountHandler) errorCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.count
+}
+
+// TestPostgresListenerStopIsCleanAndSilent verifies that stopping the listener
+// is an intentional shutdown: the accept loop must not log an error, Stop must
+// be safe to call more than once, and the closed listener must reject further
+// connections.
+func TestPostgresListenerStopIsCleanAndSilent(t *testing.T) {
+	// Capture error-level logs from the accept loop for the duration of the test.
+	h := &errorCountHandler{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	p, _ := newTestProxyWithCA(t)
+	srv := NewPostgresServer(p)
+	if err := srv.Start("127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	addr := srv.Addr()
+	if addr == "" {
+		t.Fatal("Addr() returned empty string while listening")
+	}
+
+	// Clean shutdown: must not log, and must be idempotent.
+	srv.Stop()
+	srv.Stop() // second call must not panic or double-close.
+
+	// Give the accept loop a moment to observe the closed listener and exit.
+	time.Sleep(50 * time.Millisecond)
+
+	if got := h.errorCount(); got != 0 {
+		t.Errorf("accept loop logged %d error(s) on clean shutdown; want 0", got)
+	}
+
+	// A subsequent connection attempt must fail: the listener is closed.
+	conn, err := net.DialTimeout("tcp", addr, time.Second)
+	if err == nil {
+		conn.Close()
+		t.Fatal("dial to stopped listener succeeded; want failure")
+	}
+}
+
+// TestPostgresStopNilListenerIsSafe verifies Stop is safe before Start.
+func TestPostgresStopNilListenerIsSafe(t *testing.T) {
+	srv := NewPostgresServer(NewProxy())
+	srv.Stop() // must not panic.
+	srv.Stop()
 }
