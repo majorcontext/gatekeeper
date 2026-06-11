@@ -76,11 +76,9 @@ func testServerCert(t *testing.T, dnsName string) (tls.Certificate, *x509.CertPo
 // fakePostgresServer is a TLS Postgres server that requires and verifies
 // SCRAM-SHA-256 authentication, then answers simple Query messages.
 type fakePostgresServer struct {
-	t        *testing.T
 	addr     string
 	certPool *x509.CertPool // trusts the server's own certificate
 	user     string
-	password string
 
 	cert        tls.Certificate
 	scramServer *scram.Server
@@ -132,11 +130,9 @@ func startFakePostgres(t *testing.T, dnsName, user, password string) *fakePostgr
 	t.Cleanup(func() { ln.Close() })
 
 	f := &fakePostgresServer{
-		t:           t,
 		addr:        ln.Addr().String(),
 		certPool:    pool,
 		user:        user,
-		password:    password,
 		cert:        cert,
 		scramServer: scramServer,
 	}
@@ -154,10 +150,15 @@ func startFakePostgres(t *testing.T, dnsName, user, password string) *fakePostgr
 	return f
 }
 
-// handle serves a single client connection. It must not touch f.t: it may
-// still be running as the test finishes.
+// handle serves a single client connection. It deliberately has no access to
+// the testing.T: it may still be running as the test finishes.
 func (f *fakePostgresServer) handle(conn net.Conn) {
 	defer conn.Close()
+
+	// A leaked connection (e.g. a proxy bug that stops relaying) should fail
+	// loudly rather than wedge the test. The TLS conn below inherits this
+	// deadline from the underlying conn.
+	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 
 	// The first startup message must be an SSLRequest — like Neon, the fake
 	// requires TLS.
@@ -188,12 +189,15 @@ func (f *fakePostgresServer) handle(conn net.Conn) {
 		return
 	}
 	if sm.Parameters["user"] != f.user {
-		f.failAuth(backend, fmt.Sprintf("role %q does not exist", sm.Parameters["user"]))
+		// 28000 invalid_authorization_specification: what real Postgres sends
+		// for an unknown role.
+		f.failAuth(backend, "28000", fmt.Sprintf("role %q does not exist", sm.Parameters["user"]))
 		return
 	}
 
 	if err := f.scramAuth(backend); err != nil {
-		f.failAuth(backend, "password authentication failed")
+		// 28P01 invalid_password: the client failed the SCRAM proof.
+		f.failAuth(backend, "28P01", "password authentication failed")
 		return
 	}
 
@@ -234,8 +238,16 @@ func (f *fakePostgresServer) handle(conn net.Conn) {
 			}
 		case *pgproto3.Terminate:
 			return
+		case *pgproto3.Sync:
+			// Only the simple query protocol is supported. Answering Sync with
+			// ReadyForQuery makes extended-protocol clients fail loudly (their
+			// Parse/Bind got no results) instead of hanging.
+			backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+			if err := backend.Flush(); err != nil {
+				return
+			}
 		default:
-			// Ignore anything else (e.g. Sync) and keep serving.
+			// Only the simple query protocol is supported; ignore anything else.
 		}
 	}
 }
@@ -298,15 +310,16 @@ func (f *fakePostgresServer) scramAuth(backend *pgproto3.Backend) error {
 	return backend.Flush()
 }
 
-// failAuth records the failure and sends a FATAL 28P01 error to the client.
-func (f *fakePostgresServer) failAuth(backend *pgproto3.Backend, message string) {
+// failAuth records the failure and sends a FATAL error with the given
+// SQLSTATE code to the client.
+func (f *fakePostgresServer) failAuth(backend *pgproto3.Backend, code, message string) {
 	f.mu.Lock()
 	f.authFail++
 	f.mu.Unlock()
 
 	backend.Send(&pgproto3.ErrorResponse{
 		Severity: "FATAL",
-		Code:     "28P01",
+		Code:     code,
 		Message:  message,
 	})
 	backend.Flush()
