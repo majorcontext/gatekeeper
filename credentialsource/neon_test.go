@@ -49,9 +49,11 @@ const (
 // connection URI. It owns two projects: proj-1 (no matching endpoints) and
 // proj-2 (owns ep-cool-darkness-123456 on branch br-9).
 type fakeNeonAPI struct {
-	t        *testing.T
-	server   *httptest.Server
-	uriCalls atomic.Int64
+	t             *testing.T
+	server        *httptest.Server
+	uriCalls      atomic.Int64
+	projectsCalls atomic.Int64
+	projectScoped bool // simulate a project-scoped key: GET /projects returns 404
 
 	mu       sync.Mutex
 	password string
@@ -100,6 +102,13 @@ func (f *fakeNeonAPI) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	switch r.URL.Path {
 	case "/api/v2/projects":
+		f.projectsCalls.Add(1)
+		if f.projectScoped {
+			// Project-scoped API keys cannot list projects.
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message":"not allowed to perform actions outside the project this key is scoped to"}`)
+			return
+		}
 		fmt.Fprint(w, `{"projects":[{"id":"proj-1"},{"id":"proj-2"}]}`)
 	case "/api/v2/projects/proj-1/endpoints":
 		fmt.Fprint(w, `{"endpoints":[{"id":"ep-other-endpoint-999999","branch_id":"br-1"}]}`)
@@ -232,6 +241,52 @@ func TestNeonResolverUnknownEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ep-unknown-endpoint-000000") {
 		t.Errorf("error %q does not name the endpoint ID", err)
+	}
+}
+
+// A project-scoped Neon API key cannot list projects. When the resolver is
+// told the project ID, it must query that project directly and never hit the
+// /projects enumeration endpoint.
+func TestNeonResolverProjectScoped(t *testing.T) {
+	f := newFakeNeonAPI(t)
+	f.projectScoped = true
+	r := newTestNeonResolver(f, testNeonAPIKey)
+	r.Project = "proj-2"
+
+	got, err := r.ResolvePassword(context.Background(), testNeonHost, testNeonRole, testNeonDatabase)
+	if err != nil {
+		t.Fatalf("ResolvePassword() error = %v", err)
+	}
+	if got != "s3cret" {
+		t.Errorf("ResolvePassword() = %q, want %q", got, "s3cret")
+	}
+	if calls := f.projectsCalls.Load(); calls != 0 {
+		t.Errorf("projects enumeration calls = %d, want 0 (enumeration must be skipped)", calls)
+	}
+}
+
+func TestNeonResolverProjectScopedEndpointNotFound(t *testing.T) {
+	f := newFakeNeonAPI(t)
+	f.projectScoped = true
+	r := newTestNeonResolver(f, testNeonAPIKey)
+	r.Project = "proj-1" // proj-1 does not own the test endpoint
+
+	_, err := r.ResolvePassword(context.Background(), testNeonHost, testNeonRole, testNeonDatabase)
+	if err == nil {
+		t.Fatal("ResolvePassword() with endpoint absent from project succeeded, want error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "ep-cool-darkness-123456") {
+		t.Errorf("error %q does not name the endpoint ID", msg)
+	}
+	if strings.Contains(msg, "s3cret") {
+		t.Errorf("error %q contains the password", msg)
+	}
+	if strings.Contains(msg, testNeonAPIKey) {
+		t.Errorf("error %q contains the API key", msg)
+	}
+	if calls := f.projectsCalls.Load(); calls != 0 {
+		t.Errorf("projects enumeration calls = %d, want 0 (enumeration must be skipped)", calls)
 	}
 }
 

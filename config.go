@@ -67,6 +67,7 @@ type CredentialConfig struct {
 // "static" (the Source supplies the password directly).
 type PostgresCredentialConfig struct {
 	Resolver string `yaml:"resolver"`
+	Project  string `yaml:"project,omitempty"` // optional Neon project ID; required for project-scoped API keys
 }
 
 // SourceConfig describes where to read a credential value from.

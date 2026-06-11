@@ -147,6 +147,7 @@ credentials:
   - host: "*.neon.tech"
     postgres:
       resolver: neon
+      project: falling-river-38863773
     source:
       type: env
       var: NEON_API_KEY
@@ -174,6 +175,9 @@ credentials:
 	}
 	if pg.Resolver != "neon" {
 		t.Errorf("Resolver = %q, want neon", pg.Resolver)
+	}
+	if pg.Project != "falling-river-38863773" {
+		t.Errorf("Project = %q, want falling-river-38863773", pg.Project)
 	}
 }
 

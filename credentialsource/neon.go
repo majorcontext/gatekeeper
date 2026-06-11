@@ -39,10 +39,14 @@ func ParseNeonEndpointID(host string) (string, error) {
 // The zero value is not usable: APIKey must be set. All other fields are
 // optional. NeonResolver is safe for concurrent use.
 type NeonResolver struct {
-	APIKey     CredentialSource // source for the Neon API key
-	BaseURL    string           // defaults to DefaultNeonBaseURL
-	TTL        time.Duration    // password cache TTL; defaults to 5 minutes
-	HTTPClient *http.Client     // defaults to a client with a 15s timeout
+	APIKey CredentialSource // source for the Neon API key
+	// Project is an optional Neon project ID. When set, the resolver queries
+	// this project directly instead of enumerating all projects — required for
+	// project-scoped API keys, which cannot list projects.
+	Project    string
+	BaseURL    string        // defaults to DefaultNeonBaseURL
+	TTL        time.Duration // password cache TTL; defaults to 5 minutes
+	HTTPClient *http.Client  // defaults to a client with a 15s timeout
 
 	mu        sync.Mutex
 	passwords map[string]neonCachedPassword
@@ -134,9 +138,24 @@ func neonPasswordKey(endpointID, user, database string) string {
 	return endpointID + "\x00" + user + "\x00" + database
 }
 
-// findEndpoint locates the project and branch that own endpointID by listing
-// the API key's projects and each project's endpoints.
+// findEndpoint locates the project and branch that own endpointID.
+//
+// When r.Project is set, it queries that project's endpoints directly — the
+// only mode available to project-scoped API keys, which cannot list projects.
+// Otherwise it enumerates the API key's projects and each project's endpoints
+// (account-scoped keys).
 func (r *NeonResolver) findEndpoint(ctx context.Context, endpointID string) (neonEndpointInfo, error) {
+	if r.Project != "" {
+		branchID, err := r.lookupEndpointInProject(ctx, r.Project, endpointID)
+		if err != nil {
+			return neonEndpointInfo{}, err
+		}
+		if branchID == "" {
+			return neonEndpointInfo{}, fmt.Errorf("neon endpoint %q not found in configured project", endpointID)
+		}
+		return neonEndpointInfo{projectID: r.Project, branchID: branchID}, nil
+	}
+
 	var projects struct {
 		Projects []struct {
 			ID string `json:"id"`
@@ -150,23 +169,38 @@ func (r *NeonResolver) findEndpoint(ctx context.Context, endpointID string) (neo
 			"count", len(projects.Projects))
 	}
 	for _, p := range projects.Projects {
-		var endpoints struct {
-			Endpoints []struct {
-				ID       string `json:"id"`
-				BranchID string `json:"branch_id"`
-			} `json:"endpoints"`
-		}
-		path := "/api/v2/projects/" + url.PathEscape(p.ID) + "/endpoints"
-		if err := r.apiGet(ctx, path, &endpoints); err != nil {
+		branchID, err := r.lookupEndpointInProject(ctx, p.ID, endpointID)
+		if err != nil {
 			return neonEndpointInfo{}, err
 		}
-		for _, ep := range endpoints.Endpoints {
-			if ep.ID == endpointID {
-				return neonEndpointInfo{projectID: p.ID, branchID: ep.BranchID}, nil
-			}
+		if branchID != "" {
+			return neonEndpointInfo{projectID: p.ID, branchID: branchID}, nil
 		}
 	}
 	return neonEndpointInfo{}, fmt.Errorf("neon endpoint %q not found in any accessible project", endpointID)
+}
+
+// lookupEndpointInProject fetches projectID's endpoints and returns the branch
+// ID of the endpoint matching endpointID. It returns an empty branch ID (no
+// error) when the endpoint is absent, so the caller can keep searching other
+// projects during enumeration.
+func (r *NeonResolver) lookupEndpointInProject(ctx context.Context, projectID, endpointID string) (string, error) {
+	var endpoints struct {
+		Endpoints []struct {
+			ID       string `json:"id"`
+			BranchID string `json:"branch_id"`
+		} `json:"endpoints"`
+	}
+	path := "/api/v2/projects/" + url.PathEscape(projectID) + "/endpoints"
+	if err := r.apiGet(ctx, path, &endpoints); err != nil {
+		return "", err
+	}
+	for _, ep := range endpoints.Endpoints {
+		if ep.ID == endpointID {
+			return ep.BranchID, nil
+		}
+	}
+	return "", nil
 }
 
 // fetchPassword retrieves the connection URI for the endpoint's branch and

@@ -547,7 +547,7 @@ func (s *Server) loadPostgresCredential(ctx context.Context, cred CredentialConf
 		if c, ok := src.(io.Closer); ok {
 			s.closers = append(s.closers, c)
 		}
-		resolver = &credentialsource.NeonResolver{APIKey: src}
+		resolver = &credentialsource.NeonResolver{APIKey: src, Project: cred.Postgres.Project}
 	case "static":
 		src, err := buildSource()
 		if err != nil {
