@@ -132,6 +132,46 @@ func TestConnectPostgresUpstreamUnknownUser(t *testing.T) {
 	}
 }
 
+func TestConnectPostgresUpstreamNonAuthError(t *testing.T) {
+	// The upstream completes TLS and SCRAM successfully, then reports a
+	// non-auth failure (53300 too_many_connections) before AuthenticationOk.
+	// Task 8's retry logic only re-resolves credentials for auth failures, so
+	// this must NOT be classified as errUpstreamAuthFailed — otherwise the proxy
+	// would needlessly invalidate a valid cached password and retry.
+	fake := startFakePostgres(t, "ep-foo-123.aws.neon.tech", "app_rw", "real-password",
+		withFailPostAuth("53300"))
+	_, err := connectPostgresUpstream(context.Background(), upstreamParams{
+		dialAddr: fake.addr, serverName: "ep-foo-123.aws.neon.tech", rootCAs: fake.certPool,
+		user: "app_rw", password: "real-password",
+		startupParameters: map[string]string{"user": "app_rw", "database": "appdb"},
+	})
+	if err == nil {
+		t.Fatal("expected a non-auth upstream error, got nil")
+	}
+	if errors.Is(err, errUpstreamAuthFailed) {
+		t.Fatalf("non-auth upstream error misclassified as auth failure: %v", err)
+	}
+}
+
+func TestConnectPostgresUpstreamNoSupportedSASLMechanism(t *testing.T) {
+	// The upstream advertises only a mechanism the proxy cannot perform. The
+	// proxy must return an error rather than panicking or treating the missing
+	// mechanism as either success or an auth failure.
+	fake := startFakePostgres(t, "ep-foo-123.aws.neon.tech", "app_rw", "real-password",
+		withAuthMechanisms("SCRAM-SHA-256-PLUS"))
+	_, err := connectPostgresUpstream(context.Background(), upstreamParams{
+		dialAddr: fake.addr, serverName: "ep-foo-123.aws.neon.tech", rootCAs: fake.certPool,
+		user: "app_rw", password: "real-password",
+		startupParameters: map[string]string{"user": "app_rw", "database": "appdb"},
+	})
+	if err == nil {
+		t.Fatal("expected an error when upstream offers no supported SASL mechanism, got nil")
+	}
+	if errors.Is(err, errUpstreamAuthFailed) {
+		t.Fatalf("missing-mechanism error must not be classified as auth failure: %v", err)
+	}
+}
+
 func TestConnectPostgresUpstreamRejectsUntrustedCert(t *testing.T) {
 	fake := startFakePostgres(t, "ep-foo-123.aws.neon.tech", "app_rw", "real-password")
 	_, err := connectPostgresUpstream(context.Background(), upstreamParams{

@@ -83,10 +83,34 @@ type fakePostgresServer struct {
 	cert        tls.Certificate
 	scramServer *scram.Server
 
+	// authMechanisms is the list advertised in AuthenticationSASL. Defaults to
+	// ["SCRAM-SHA-256"]; a test may override it to simulate a server that offers
+	// no mechanism the proxy supports.
+	authMechanisms []string
+	// failPostAuthWith, when non-empty, makes the server send a FATAL
+	// ErrorResponse with this SQLSTATE instead of AuthenticationOk after a
+	// successful SCRAM exchange. Used to exercise non-auth upstream errors.
+	failPostAuthWith string
+
 	mu        sync.Mutex
 	authOK    int
 	authFail  int
 	lastQuery string
+}
+
+// fakePostgresOption customizes a fakePostgresServer before it starts serving.
+type fakePostgresOption func(*fakePostgresServer)
+
+// withAuthMechanisms makes the fake advertise the given SASL mechanisms in its
+// AuthenticationSASL message instead of the default SCRAM-SHA-256.
+func withAuthMechanisms(mechs ...string) fakePostgresOption {
+	return func(f *fakePostgresServer) { f.authMechanisms = mechs }
+}
+
+// withFailPostAuth makes the fake send a FATAL ErrorResponse with the given
+// SQLSTATE instead of AuthenticationOk once SCRAM succeeds.
+func withFailPostAuth(sqlState string) fakePostgresOption {
+	return func(f *fakePostgresServer) { f.failPostAuthWith = sqlState }
 }
 
 func (f *fakePostgresServer) counts() (authOK, authFail int) {
@@ -103,7 +127,7 @@ func (f *fakePostgresServer) queriedLast() string {
 
 // startFakePostgres starts a fake Postgres server on 127.0.0.1:0. The listener
 // is closed via t.Cleanup.
-func startFakePostgres(t *testing.T, dnsName, user, password string) *fakePostgresServer {
+func startFakePostgres(t *testing.T, dnsName, user, password string, opts ...fakePostgresOption) *fakePostgresServer {
 	t.Helper()
 
 	cert, pool := testServerCert(t, dnsName)
@@ -130,11 +154,15 @@ func startFakePostgres(t *testing.T, dnsName, user, password string) *fakePostgr
 	t.Cleanup(func() { ln.Close() })
 
 	f := &fakePostgresServer{
-		addr:        ln.Addr().String(),
-		certPool:    pool,
-		user:        user,
-		cert:        cert,
-		scramServer: scramServer,
+		addr:           ln.Addr().String(),
+		certPool:       pool,
+		user:           user,
+		cert:           cert,
+		scramServer:    scramServer,
+		authMechanisms: []string{"SCRAM-SHA-256"},
+	}
+	for _, opt := range opts {
+		opt(f)
 	}
 
 	go func() {
@@ -205,6 +233,19 @@ func (f *fakePostgresServer) handle(conn net.Conn) {
 	f.authOK++
 	f.mu.Unlock()
 
+	// Simulate a non-auth upstream error that arrives after SCRAM succeeds
+	// (e.g. the server is out of connection slots). The proxy must surface this
+	// without misclassifying it as an authentication failure.
+	if f.failPostAuthWith != "" {
+		backend.Send(&pgproto3.ErrorResponse{
+			Severity: "FATAL",
+			Code:     f.failPostAuthWith,
+			Message:  "simulated post-auth failure",
+		})
+		backend.Flush()
+		return
+	}
+
 	backend.Send(&pgproto3.AuthenticationOk{})
 	backend.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: "17.0"})
 	backend.Send(&pgproto3.BackendKeyData{ProcessID: 42, SecretKey: []byte{0, 0, 0, 7}})
@@ -255,7 +296,7 @@ func (f *fakePostgresServer) handle(conn net.Conn) {
 // scramAuth runs the server side of a SCRAM-SHA-256 conversation. It returns
 // an error if the client fails to prove knowledge of the password.
 func (f *fakePostgresServer) scramAuth(backend *pgproto3.Backend) error {
-	backend.Send(&pgproto3.AuthenticationSASL{AuthMechanisms: []string{"SCRAM-SHA-256"}})
+	backend.Send(&pgproto3.AuthenticationSASL{AuthMechanisms: f.authMechanisms})
 	if err := backend.Flush(); err != nil {
 		return err
 	}
