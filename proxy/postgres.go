@@ -575,6 +575,11 @@ func (s *PostgresServer) serveAuthenticated(clientConn net.Conn, backend *pgprot
 
 	// Network policy: when a run context is present, honor its scoped policy;
 	// otherwise fall back to the proxy-level policy.
+	//
+	// Like the HTTP CONNECT path, the Postgres plane intentionally enforces only
+	// host-level allow/deny here. It deliberately does not consult per-run
+	// RequestCheck or host-gateway (isHostGateway) handling: Neon endpoints are
+	// public DNS, so host-gateway routing does not apply to the Postgres data plane.
 	var allowed bool
 	if rc != nil {
 		allowed = rc.Policy != "strict" || matchHost(rc.AllowedHosts, sniHost, postgresDefaultPort)

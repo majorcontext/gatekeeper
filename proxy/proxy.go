@@ -156,7 +156,7 @@ type RequestLogData struct {
 	URL             string
 	Host            string // Target hostname (extracted from URL or CONNECT)
 	Path            string // Request path (empty for CONNECT tunnel-level logs)
-	RequestType     string // "http", "connect", "mcp", "relay"
+	RequestType     string // "http", "connect", "mcp", "relay", "postgres"
 	StatusCode      int
 	Duration        time.Duration
 	Err             error
@@ -164,15 +164,15 @@ type RequestLogData struct {
 	ResponseHeaders http.Header
 	RequestBody     []byte
 	ResponseBody    []byte
-	RequestSize     int64  // Content-Length of the request body, -1 if unknown
-	ResponseSize    int64  // Content-Length of the response body, -1 if unknown
+	RequestSize     int64  // Content-Length of the request body, -1 if unknown. For postgres connections this carries a protocol-message count, not bytes.
+	ResponseSize    int64  // Content-Length of the response body, -1 if unknown. For postgres connections this carries a protocol-message count, not bytes.
 	AuthInjected    bool            // True if any credential header was injected for this host
 	InjectedHeaders map[string]bool // Lower-cased header names that were injected
 	Grants          []string        // Credential grant names that were injected
 	Denied          bool            // True if request was denied by network/keep policy
 	DenyReason      string          // Why the request was denied (e.g., "network_policy", "keep_policy")
 	RunID           string          // Run ID from per-run context (daemon mode)
-	UserID          string          // User ID from proxy auth username
+	UserID          string          // User ID from proxy auth username. For postgres connections this carries the Postgres role, not the proxy auth user.
 	Ctx             context.Context // Request context (for OTel span extraction, may be nil)
 }
 
