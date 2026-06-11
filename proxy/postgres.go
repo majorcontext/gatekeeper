@@ -58,11 +58,13 @@ func (p *Proxy) SetPostgresResolver(pattern string, r PostgresCredentialResolver
 }
 
 // postgresResolverForHost returns the Postgres credential resolver for host.
-// When rc carries its own resolvers, only those are consulted — proxy-level
-// resolvers are never used as fallback for that run (matching the credential
-// scoping rule). Patterns match against the Postgres default port (5432).
+// When a run context is present, only its per-run resolvers are consulted —
+// proxy-level resolvers are never used as fallback, even when the run has no
+// resolvers at all (matching the credential scoping rule in
+// getCredentialsForRequest). Patterns match against the Postgres default
+// port (5432).
 func (p *Proxy) postgresResolverForHost(rc *RunContextData, host string) PostgresCredentialResolver {
-	if rc != nil && len(rc.PostgresResolvers) > 0 {
+	if rc != nil {
 		return postgresResolverFromEntries(rc.PostgresResolvers, host)
 	}
 	p.mu.RLock()

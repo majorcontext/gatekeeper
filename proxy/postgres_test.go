@@ -50,6 +50,22 @@ func TestPostgresResolverRunContextOverridesProxy(t *testing.T) {
 	}
 }
 
+func TestPostgresResolverRunContextWithoutResolversBlocksProxyLevel(t *testing.T) {
+	p := NewProxy()
+	p.SetPostgresResolver("*.neon.tech", NewStaticPostgresResolver("proxy-pass"))
+
+	// A run context with no Postgres resolvers means the run was granted no
+	// Postgres access — it must not inherit proxy-level resolvers.
+	for _, rc := range []*RunContextData{
+		{},
+		{PostgresResolvers: []PostgresResolverEntry{}},
+	} {
+		if got := p.postgresResolverForHost(rc, "ep-foo.aws.neon.tech"); got != nil {
+			t.Errorf("run context without resolvers fell back to proxy-level resolver: got %v", got)
+		}
+	}
+}
+
 func TestStaticPostgresResolver(t *testing.T) {
 	r := NewStaticPostgresResolver("pw")
 	got, err := r.ResolvePassword(context.Background(), "any.host", "u", "d")
