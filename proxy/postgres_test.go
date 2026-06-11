@@ -2,10 +2,15 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"net"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/majorcontext/gatekeeper/credentialsource"
 )
 
@@ -185,4 +190,241 @@ func TestConnectPostgresUpstreamRejectsUntrustedCert(t *testing.T) {
 	if errors.Is(err, errUpstreamAuthFailed) {
 		t.Fatal("TLS failure must not be classified as auth failure")
 	}
+}
+
+// caTrustPool builds a client trust pool from a proxy CA.
+func caTrustPool(t *testing.T, ca *CA) *x509.CertPool {
+	t.Helper()
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(ca.CertPEM()) {
+		t.Fatal("failed to add CA cert to pool")
+	}
+	return pool
+}
+
+// newTestProxyWithCA returns a proxy with a fresh CA installed.
+func newTestProxyWithCA(t *testing.T) (*Proxy, *CA) {
+	t.Helper()
+	ca, err := generateCA()
+	if err != nil {
+		t.Fatalf("generateCA: %v", err)
+	}
+	p := NewProxy()
+	p.SetCA(ca)
+	return p, ca
+}
+
+func newTestPostgresListener(t *testing.T, p *Proxy) *PostgresServer {
+	t.Helper()
+	srv := NewPostgresServer(p)
+	if err := srv.Start("127.0.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Stop)
+	return srv
+}
+
+// pgClientHandshake dials the listener, does SSLRequest+TLS, sends the startup
+// message, and answers AuthenticationCleartextPassword with password. It returns
+// the message received after sending the password (the auth result or an error)
+// and the TLS conn so the caller can Close it. caPool trusts the proxy CA.
+func pgClientHandshake(t *testing.T, addr, sniHost string, caPool *x509.CertPool, user, db, password string) (pgproto3.BackendMessage, net.Conn) {
+	t.Helper()
+
+	raw, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	_ = raw.SetDeadline(time.Now().Add(10 * time.Second))
+
+	// SSLRequest preamble.
+	fe := pgproto3.NewFrontend(raw, raw)
+	fe.Send(&pgproto3.SSLRequest{})
+	if err := fe.Flush(); err != nil {
+		raw.Close()
+		t.Fatalf("send SSLRequest: %v", err)
+	}
+	var resp [1]byte
+	if _, err := raw.Read(resp[:]); err != nil {
+		raw.Close()
+		t.Fatalf("read SSLRequest response: %v", err)
+	}
+	if resp[0] != 'S' {
+		raw.Close()
+		t.Fatalf("server refused TLS, got %q want 'S'", resp[0])
+	}
+
+	tlsConn := tls.Client(raw, &tls.Config{ServerName: sniHost, RootCAs: caPool})
+	if err := tlsConn.Handshake(); err != nil {
+		raw.Close()
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	_ = tlsConn.SetDeadline(time.Now().Add(10 * time.Second))
+
+	params := map[string]string{"user": user}
+	if db != "" {
+		params["database"] = db
+	}
+	fe = pgproto3.NewFrontend(tlsConn, tlsConn)
+	fe.Send(&pgproto3.StartupMessage{
+		ProtocolVersion: pgproto3.ProtocolVersionNumber,
+		Parameters:      params,
+	})
+	if err := fe.Flush(); err != nil {
+		tlsConn.Close()
+		t.Fatalf("send startup: %v", err)
+	}
+
+	msg, err := fe.Receive()
+	if err != nil {
+		tlsConn.Close()
+		t.Fatalf("receive auth request: %v", err)
+	}
+	if _, ok := msg.(*pgproto3.AuthenticationCleartextPassword); !ok {
+		tlsConn.Close()
+		t.Fatalf("expected AuthenticationCleartextPassword, got %T", msg)
+	}
+
+	fe.Send(&pgproto3.PasswordMessage{Password: password})
+	if err := fe.Flush(); err != nil {
+		tlsConn.Close()
+		t.Fatalf("send password: %v", err)
+	}
+
+	msg, err = fe.Receive()
+	if err != nil {
+		tlsConn.Close()
+		t.Fatalf("receive auth result: %v", err)
+	}
+	return msg, tlsConn
+}
+
+func TestPostgresListenerRequiresCA(t *testing.T) {
+	srv := NewPostgresServer(NewProxy())
+	err := srv.Start("127.0.0.1:0")
+	if err == nil {
+		srv.Stop()
+		t.Fatal("Start without CA succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "CA") {
+		t.Errorf("error = %q, want it to mention CA", err)
+	}
+}
+
+func TestPostgresListenerRejectsPlaintext(t *testing.T) {
+	p, _ := newTestProxyWithCA(t)
+	srv := newTestPostgresListener(t, p)
+
+	raw, err := net.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer raw.Close()
+	_ = raw.SetDeadline(time.Now().Add(10 * time.Second))
+
+	// Send a StartupMessage directly, with no SSLRequest preamble.
+	fe := pgproto3.NewFrontend(raw, raw)
+	fe.Send(&pgproto3.StartupMessage{
+		ProtocolVersion: pgproto3.ProtocolVersionNumber,
+		Parameters:      map[string]string{"user": "app"},
+	})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("send startup: %v", err)
+	}
+
+	// The server must NOT proceed to auth. It either sends an ErrorResponse
+	// (28000) or closes the connection — but never AuthenticationCleartextPassword.
+	msg, err := fe.Receive()
+	if err != nil {
+		// Connection closed without any auth challenge: acceptable.
+		return
+	}
+	switch m := msg.(type) {
+	case *pgproto3.ErrorResponse:
+		if m.Code != "28000" {
+			t.Errorf("ErrorResponse code = %q, want 28000", m.Code)
+		}
+	case *pgproto3.AuthenticationCleartextPassword:
+		t.Fatal("server sent AuthenticationCleartextPassword to a plaintext client")
+	default:
+		t.Fatalf("unexpected message %T", msg)
+	}
+}
+
+func TestPostgresListenerRejectsBadToken(t *testing.T) {
+	p, ca := newTestProxyWithCA(t)
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		if token == "good-token" {
+			return &RunContextData{}, true
+		}
+		return nil, false
+	})
+	srv := newTestPostgresListener(t, p)
+
+	msg, conn := pgClientHandshake(t, srv.Addr(), "db.test.local", caTrustPool(t, ca), "app", "appdb", "bad-token")
+	defer conn.Close()
+
+	errResp, ok := msg.(*pgproto3.ErrorResponse)
+	if !ok {
+		t.Fatalf("expected ErrorResponse, got %T", msg)
+	}
+	if errResp.Code != "28P01" {
+		t.Errorf("ErrorResponse code = %q, want 28P01", errResp.Code)
+	}
+}
+
+func TestPostgresListenerAcceptsGoodTokenButNoResolver(t *testing.T) {
+	p, ca := newTestProxyWithCA(t)
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		if token == "good-token" {
+			return &RunContextData{}, true
+		}
+		return nil, false
+	})
+	srv := newTestPostgresListener(t, p)
+
+	msg, conn := pgClientHandshake(t, srv.Addr(), "db.test.local", caTrustPool(t, ca), "app", "appdb", "good-token")
+	defer conn.Close()
+
+	// Auth passed; the serveAuthenticated stub reports no resolver for the host.
+	errResp, ok := msg.(*pgproto3.ErrorResponse)
+	if !ok {
+		t.Fatalf("expected ErrorResponse, got %T", msg)
+	}
+	if errResp.Code != "08004" {
+		t.Errorf("ErrorResponse code = %q, want 08004", errResp.Code)
+	}
+}
+
+func TestPostgresListenerStaticTokenAuth(t *testing.T) {
+	p, ca := newTestProxyWithCA(t)
+	p.SetAuthToken("static-token")
+	srv := newTestPostgresListener(t, p)
+	pool := caTrustPool(t, ca)
+
+	t.Run("correct token", func(t *testing.T) {
+		msg, conn := pgClientHandshake(t, srv.Addr(), "db.test.local", pool, "app", "appdb", "static-token")
+		defer conn.Close()
+
+		errResp, ok := msg.(*pgproto3.ErrorResponse)
+		if !ok {
+			t.Fatalf("expected ErrorResponse, got %T", msg)
+		}
+		if errResp.Code != "08004" {
+			t.Errorf("ErrorResponse code = %q, want 08004", errResp.Code)
+		}
+	})
+
+	t.Run("wrong token", func(t *testing.T) {
+		msg, conn := pgClientHandshake(t, srv.Addr(), "db.test.local", pool, "app", "appdb", "wrong-token")
+		defer conn.Close()
+
+		errResp, ok := msg.(*pgproto3.ErrorResponse)
+		if !ok {
+			t.Fatalf("expected ErrorResponse, got %T", msg)
+		}
+		if errResp.Code != "28P01" {
+			t.Errorf("ErrorResponse code = %q, want 28P01", errResp.Code)
+		}
+	})
 }
