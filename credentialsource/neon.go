@@ -32,8 +32,9 @@ func ParseNeonEndpointID(host string) (string, error) {
 // NeonResolver resolves Postgres passwords for Neon endpoints via the Neon
 // API. It maps an (endpoint hostname, role, database) tuple to a password by
 // locating the project that owns the endpoint and fetching its connection
-// URI. Resolved passwords are cached for TTL; endpoint-to-project mappings
-// are cached indefinitely (endpoints never move between projects).
+// URI. Resolved passwords are cached for TTL; endpoint-to-project/branch
+// mappings are cached until InvalidatePassword drops them (Neon can reassign
+// an endpoint to a different branch).
 //
 // The zero value is not usable: APIKey must be set. All other fields are
 // optional. NeonResolver is safe for concurrent use.
@@ -112,9 +113,11 @@ func (r *NeonResolver) ResolvePassword(ctx context.Context, host, user, database
 	return password, nil
 }
 
-// InvalidatePassword drops the cached password for the given tuple. Callers
-// invoke this when authentication fails (Neon rotates passwords on branch
-// reset) and then retry once.
+// InvalidatePassword drops the cached password for the given tuple, along
+// with the endpoint's cached project/branch info (Neon can reassign a compute
+// endpoint to a different branch, e.g. on branch reset). Callers invoke this
+// when authentication fails and then retry once; the retry re-discovers the
+// endpoint and fetches fresh credentials.
 func (r *NeonResolver) InvalidatePassword(host, user, database string) {
 	host = strings.ToLower(host)
 	endpointID, err := ParseNeonEndpointID(host)
@@ -123,6 +126,7 @@ func (r *NeonResolver) InvalidatePassword(host, user, database string) {
 	}
 	r.mu.Lock()
 	delete(r.passwords, neonPasswordKey(endpointID, user, database))
+	delete(r.endpoints, endpointID)
 	r.mu.Unlock()
 }
 

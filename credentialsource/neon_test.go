@@ -55,10 +55,11 @@ type fakeNeonAPI struct {
 
 	mu       sync.Mutex
 	password string
+	branchID string
 }
 
 func newFakeNeonAPI(t *testing.T) *fakeNeonAPI {
-	f := &fakeNeonAPI{t: t, password: "s3cret"}
+	f := &fakeNeonAPI{t: t, password: "s3cret", branchID: "br-9"}
 	f.server = httptest.NewServer(http.HandlerFunc(f.handle))
 	t.Cleanup(f.server.Close)
 	return f
@@ -76,6 +77,20 @@ func (f *fakeNeonAPI) currentPassword() string {
 	return f.password
 }
 
+// setBranchID simulates Neon reassigning the compute endpoint to a different
+// branch. Connection URI requests for any other branch are rejected.
+func (f *fakeNeonAPI) setBranchID(b string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.branchID = b
+}
+
+func (f *fakeNeonAPI) currentBranchID() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.branchID
+}
+
 func (f *fakeNeonAPI) handle(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Authorization") != "Bearer "+testNeonAPIKey {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -89,12 +104,14 @@ func (f *fakeNeonAPI) handle(w http.ResponseWriter, r *http.Request) {
 	case "/api/v2/projects/proj-1/endpoints":
 		fmt.Fprint(w, `{"endpoints":[{"id":"ep-other-endpoint-999999","branch_id":"br-1"}]}`)
 	case "/api/v2/projects/proj-2/endpoints":
-		fmt.Fprint(w, `{"endpoints":[{"id":"ep-cool-darkness-123456","branch_id":"br-9"}]}`)
+		fmt.Fprintf(w, `{"endpoints":[{"id":"ep-cool-darkness-123456","branch_id":%q}]}`, f.currentBranchID())
 	case "/api/v2/projects/proj-2/connection_uri":
 		f.uriCalls.Add(1)
 		q := r.URL.Query()
-		if got := q.Get("branch_id"); got != "br-9" {
-			f.t.Errorf("connection_uri branch_id = %q, want %q", got, "br-9")
+		if got, want := q.Get("branch_id"), f.currentBranchID(); got != want {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message":"branch not found"}`)
+			return
 		}
 		if got := q.Get("database_name"); got != testNeonDatabase {
 			f.t.Errorf("connection_uri database_name = %q, want %q", got, testNeonDatabase)
@@ -173,6 +190,35 @@ func TestNeonResolverInvalidatePassword(t *testing.T) {
 	}
 	if calls := f.uriCalls.Load(); calls != 2 {
 		t.Errorf("connection_uri calls = %d, want 2", calls)
+	}
+}
+
+// Neon can reassign a compute endpoint to a different branch (e.g. branch
+// reset). InvalidatePassword must drop the cached endpoint info too, so the
+// retry re-discovers the endpoint and resolves against the new branch instead
+// of fetching the old branch's credentials forever.
+func TestNeonResolverInvalidatePasswordAfterBranchMove(t *testing.T) {
+	f := newFakeNeonAPI(t)
+	r := newTestNeonResolver(f, testNeonAPIKey)
+
+	got, err := r.ResolvePassword(context.Background(), testNeonHost, testNeonRole, testNeonDatabase)
+	if err != nil {
+		t.Fatalf("ResolvePassword() error = %v", err)
+	}
+	if got != "s3cret" {
+		t.Errorf("ResolvePassword() = %q, want %q", got, "s3cret")
+	}
+
+	f.setBranchID("br-10")
+	f.setPassword("moved")
+	r.InvalidatePassword(testNeonHost, testNeonRole, testNeonDatabase)
+
+	got, err = r.ResolvePassword(context.Background(), testNeonHost, testNeonRole, testNeonDatabase)
+	if err != nil {
+		t.Fatalf("ResolvePassword() after branch move error = %v", err)
+	}
+	if got != "moved" {
+		t.Errorf("ResolvePassword() after branch move = %q, want %q", got, "moved")
 	}
 }
 
