@@ -450,6 +450,13 @@ func (s *PostgresServer) Stop() {
 // Shutdown stops accepting new connections and waits for active relays to drain.
 // If ctx expires first, it force-closes the remaining connections (interrupting
 // in-flight queries) and returns ctx.Err().
+//
+// A connection that is mid-credential-resolution when shutdown begins blocks the
+// drain until that resolution returns, since a singleflight-shared Neon API call
+// cannot be interrupted by closing the client socket. The standalone server
+// bounds this by closing credential resolvers before calling Shutdown (see
+// NeonResolver.Close), which cancels in-flight API calls; an embedder that wires
+// Shutdown directly should close its resolvers first for the same reason.
 func (s *PostgresServer) Shutdown(ctx context.Context) error {
 	if s.listener == nil {
 		return nil

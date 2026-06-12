@@ -553,7 +553,11 @@ func (s *Server) loadPostgresCredential(ctx context.Context, cred CredentialConf
 		if c, ok := src.(io.Closer); ok {
 			s.closers = append(s.closers, c)
 		}
-		resolver = &credentialsource.NeonResolver{APIKey: src, Project: cred.Postgres.Project}
+		neon := &credentialsource.NeonResolver{APIKey: src, Project: cred.Postgres.Project}
+		// Closed on shutdown (before the listener drain) so in-flight Neon API
+		// calls are cancelled rather than holding up the drain.
+		s.closers = append(s.closers, neon)
+		resolver = neon
 	case "static":
 		src, err := buildSource()
 		if err != nil {
