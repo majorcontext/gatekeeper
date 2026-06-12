@@ -425,15 +425,24 @@ func (s *PostgresServer) Addr() string {
 // Stop closes the listener. It is safe to call on a nil-listener server and
 // idempotent: the closed flag guards against a double close and signals
 // acceptLoop to treat the resulting Accept error as an intentional shutdown.
+// beginClose marks the server closed (under the lock, so trackConn observes it
+// atomically with its wg.Add) and closes the listener once.
+func (s *PostgresServer) beginClose() {
+	s.mu.Lock()
+	first := s.closed.CompareAndSwap(false, true)
+	s.mu.Unlock()
+	if first {
+		_ = s.listener.Close()
+	}
+}
+
 // Stop closes the listener immediately and force-closes active connections
 // without waiting for relays to finish. Prefer Shutdown for graceful drain.
 func (s *PostgresServer) Stop() {
 	if s.listener == nil {
 		return
 	}
-	if s.closed.CompareAndSwap(false, true) {
-		_ = s.listener.Close()
-	}
+	s.beginClose()
 	s.closeActiveConns()
 	s.wg.Wait()
 }
@@ -445,9 +454,7 @@ func (s *PostgresServer) Shutdown(ctx context.Context) error {
 	if s.listener == nil {
 		return nil
 	}
-	if s.closed.CompareAndSwap(false, true) {
-		_ = s.listener.Close()
-	}
+	s.beginClose()
 
 	done := make(chan struct{})
 	go func() {
@@ -488,14 +495,16 @@ func (s *PostgresServer) acceptLoop(ln net.Listener) {
 				"error", err)
 			return
 		}
-		// Reject connections that arrive after shutdown began but before the
-		// listener fully closed.
-		if s.closed.Load() {
+		// Register the connection under the same lock that Shutdown uses to set
+		// closed. This makes the closed check and wg.Add atomic with respect to
+		// shutdown: either we add to the WaitGroup before Shutdown observes the
+		// count, or Shutdown has already set closed and we reject the connection.
+		// Without this, Shutdown could see a zero WaitGroup and return between
+		// the check and wg.Add, leaving an untracked goroutine running.
+		if !s.trackConn(conn) {
 			_ = conn.Close()
 			continue
 		}
-		s.trackConn(conn)
-		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
 			defer s.untrackConn(conn)
@@ -504,13 +513,21 @@ func (s *PostgresServer) acceptLoop(ln net.Listener) {
 	}
 }
 
-func (s *PostgresServer) trackConn(conn net.Conn) {
+// trackConn registers a connection and increments the WaitGroup, unless a
+// shutdown is already in progress. It returns false when the caller should
+// reject the connection.
+func (s *PostgresServer) trackConn(conn net.Conn) bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed.Load() {
+		return false
+	}
 	if s.active == nil {
 		s.active = make(map[net.Conn]struct{})
 	}
 	s.active[conn] = struct{}{}
-	s.mu.Unlock()
+	s.wg.Add(1)
+	return true
 }
 
 func (s *PostgresServer) untrackConn(conn net.Conn) {
