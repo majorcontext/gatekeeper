@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestParseNeonEndpointID(t *testing.T) {
@@ -307,11 +308,11 @@ func TestNeonResolverConcurrentInvalidationDoesNotRepoisonPassword(t *testing.T)
 	}
 	cacheKey := neonPasswordKey(endpointID, testNeonRole, testNeonDatabase)
 
-	// Seed endpoint info (haveInfo=true) with no cached password, so the next
-	// resolve goes straight to fetchPassword.
+	// Seed unexpired endpoint info (haveInfo=true) with no cached password, so
+	// the next resolve goes straight to fetchPassword.
 	r.mu.Lock()
 	r.endpoints = map[string]neonEndpointInfo{
-		endpointID: {projectID: "proj-2", branchID: f.currentBranchID()},
+		endpointID: {projectID: "proj-2", branchID: f.currentBranchID(), expiresAt: time.Now().Add(time.Hour)},
 	}
 	r.mu.Unlock()
 
@@ -331,6 +332,44 @@ func TestNeonResolverConcurrentInvalidationDoesNotRepoisonPassword(t *testing.T)
 	r.mu.Unlock()
 	if cached {
 		t.Error("stale password was cached despite a concurrent invalidation")
+	}
+}
+
+// TestNeonResolverEndpointInfoExpires verifies that endpoint info is re-resolved
+// after its TTL, so a branch moved or deleted without an upstream auth failure
+// (which is the only trigger for InvalidatePassword) does not leave a stale
+// branchID cached indefinitely.
+func TestNeonResolverEndpointInfoExpires(t *testing.T) {
+	f := newFakeNeonAPI(t)
+	r := newTestNeonResolver(f, testNeonAPIKey)
+
+	if _, err := r.ResolvePassword(context.Background(), testNeonHost, testNeonRole, testNeonDatabase); err != nil {
+		t.Fatalf("initial ResolvePassword() error = %v", err)
+	}
+
+	endpointID, err := ParseNeonEndpointID(testNeonHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Move the branch with no auth failure, then force the cached endpoint info
+	// and password to expire. The next resolve must re-discover the endpoint
+	// rather than fetch against the stale branch.
+	f.setBranchID("br-10")
+	f.setPassword("moved")
+	r.mu.Lock()
+	info := r.endpoints[endpointID]
+	info.expiresAt = time.Unix(0, 0)
+	r.endpoints[endpointID] = info
+	delete(r.passwords, neonPasswordKey(endpointID, testNeonRole, testNeonDatabase))
+	r.mu.Unlock()
+
+	got, err := r.ResolvePassword(context.Background(), testNeonHost, testNeonRole, testNeonDatabase)
+	if err != nil {
+		t.Fatalf("ResolvePassword() after endpoint TTL expiry error = %v", err)
+	}
+	if got != "moved" {
+		t.Errorf("ResolvePassword() = %q, want %q (endpoint info should have been re-resolved)", got, "moved")
 	}
 }
 

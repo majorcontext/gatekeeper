@@ -65,6 +65,7 @@ type neonCachedPassword struct {
 type neonEndpointInfo struct {
 	projectID string
 	branchID  string
+	expiresAt time.Time
 }
 
 // Type returns the resolver type identifier.
@@ -82,12 +83,26 @@ func (r *NeonResolver) ResolvePassword(ctx context.Context, host, user, database
 	}
 	cacheKey := neonPasswordKey(endpointID, user, database)
 
+	ttl := r.TTL
+	if ttl <= 0 {
+		ttl = defaultNeonPasswordTTL
+	}
+
 	r.mu.Lock()
 	if cached, ok := r.passwords[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		r.mu.Unlock()
 		return cached.password, nil
 	}
 	info, haveInfo := r.endpoints[endpointID]
+	// Expire endpoint info on the same TTL as passwords. Without this, a stale
+	// branchID outlives its branch whenever a branch is deleted without first
+	// causing an upstream auth failure (the only trigger for InvalidatePassword):
+	// fetchPassword would keep hitting the gone branch and 404 — a non-auth error
+	// connectWithRetry never retries — failing every connection until restart.
+	if haveInfo && !time.Now().Before(info.expiresAt) {
+		delete(r.endpoints, endpointID)
+		haveInfo = false
+	}
 	gen := r.endpointsGen
 	r.mu.Unlock()
 
@@ -96,6 +111,7 @@ func (r *NeonResolver) ResolvePassword(ctx context.Context, host, user, database
 		if err != nil {
 			return "", err
 		}
+		info.expiresAt = time.Now().Add(ttl)
 		r.mu.Lock()
 		if r.endpoints == nil {
 			r.endpoints = make(map[string]neonEndpointInfo)
@@ -115,10 +131,6 @@ func (r *NeonResolver) ResolvePassword(ctx context.Context, host, user, database
 		return "", err
 	}
 
-	ttl := r.TTL
-	if ttl <= 0 {
-		ttl = defaultNeonPasswordTTL
-	}
 	r.mu.Lock()
 	if r.passwords == nil {
 		r.passwords = make(map[string]neonCachedPassword)
