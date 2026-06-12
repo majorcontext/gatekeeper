@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // DefaultNeonBaseURL is the production Neon API base URL.
@@ -55,6 +57,10 @@ type NeonResolver struct {
 	// resolved an endpoint while a concurrent invalidation occurred must not
 	// write its now-stale result back into the cache (see ResolvePassword).
 	endpointsGen uint64
+	// findGroup collapses concurrent endpoint lookups for the same endpoint into
+	// a single Neon API call chain, so a cold-start burst of connections to one
+	// endpoint doesn't fan out into N project enumerations.
+	findGroup singleflight.Group
 }
 
 type neonCachedPassword struct {
@@ -107,10 +113,16 @@ func (r *NeonResolver) ResolvePassword(ctx context.Context, host, user, database
 	r.mu.Unlock()
 
 	if !haveInfo {
-		info, err = r.findEndpoint(ctx, endpointID)
-		if err != nil {
-			return "", err
+		// Collapse a concurrent stampede of cold-start lookups for this endpoint
+		// into one API call chain. Correctness still rests on the gen guard
+		// below, not on singleflight.
+		v, ferr, _ := r.findGroup.Do(endpointID, func() (any, error) {
+			return r.findEndpoint(ctx, endpointID)
+		})
+		if ferr != nil {
+			return "", ferr
 		}
+		info = v.(neonEndpointInfo)
 		info.expiresAt = time.Now().Add(ttl)
 		r.mu.Lock()
 		if r.endpoints == nil {

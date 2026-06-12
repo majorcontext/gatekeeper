@@ -69,6 +69,10 @@ type fakeNeonAPI struct {
 	// Same idea for the connection_uri (password fetch) handler.
 	connURIEntered chan struct{}
 	connURIRelease chan struct{}
+
+	// Same idea for the projects-list handler.
+	projectsEntered chan struct{}
+	projectsRelease chan struct{}
 }
 
 func newFakeNeonAPI(t *testing.T) *fakeNeonAPI {
@@ -113,6 +117,13 @@ func (f *fakeNeonAPI) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	switch r.URL.Path {
 	case "/api/v2/projects":
+		if f.projectsEntered != nil {
+			select {
+			case f.projectsEntered <- struct{}{}:
+			default:
+			}
+			<-f.projectsRelease
+		}
 		f.projectsCalls.Add(1)
 		if f.projectScoped {
 			// Project-scoped API keys cannot list projects.
@@ -370,6 +381,38 @@ func TestNeonResolverEndpointInfoExpires(t *testing.T) {
 	}
 	if got != "moved" {
 		t.Errorf("ResolvePassword() = %q, want %q (endpoint info should have been re-resolved)", got, "moved")
+	}
+}
+
+// TestNeonResolverConcurrentColdStartCollapsesLookups verifies that a burst of
+// concurrent cold-start resolves for the same endpoint collapses into a single
+// project-enumeration via singleflight, rather than one chain per connection.
+func TestNeonResolverConcurrentColdStartCollapsesLookups(t *testing.T) {
+	f := newFakeNeonAPI(t)
+	f.projectsEntered = make(chan struct{}, 1)
+	f.projectsRelease = make(chan struct{})
+	r := newTestNeonResolver(f, testNeonAPIKey)
+
+	const n = 8
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			_, _ = r.ResolvePassword(context.Background(), testNeonHost, testNeonRole, testNeonDatabase)
+		}()
+	}
+
+	// One goroutine wins the flight and enters the projects handler; the rest
+	// block inside singleflight. Give stragglers a moment to reach Do, then let
+	// the winner proceed.
+	<-f.projectsEntered
+	time.Sleep(100 * time.Millisecond)
+	close(f.projectsRelease)
+	wg.Wait()
+
+	if got := f.projectsCalls.Load(); got != 1 {
+		t.Errorf("projects-list calls = %d, want 1 (concurrent lookups should collapse)", got)
 	}
 }
 
