@@ -239,6 +239,10 @@ func (r *NeonResolver) lookupEndpointInProject(ctx context.Context, projectID, e
 			return ep.BranchID, nil
 		}
 	}
+	if len(endpoints.Endpoints) >= 100 {
+		slog.Warn("neon endpoints list for project may be truncated; pagination is not implemented",
+			"project_id", projectID, "count", len(endpoints.Endpoints))
+	}
 	return "", nil
 }
 
