@@ -544,7 +544,24 @@ func (s *PostgresServer) handleConn(conn net.Conn) {
 		return
 	}
 
-	s.serveAuthenticated(tlsConn, backend, rc, sniHost, user, database, sm.Parameters)
+	// Forward only ordinary session parameters upstream. `replication` would
+	// request a WAL-streaming session — an elevated privilege the data plane is
+	// not meant to grant — and `options` can set arbitrary server-side GUCs at
+	// startup. Normal libpq clients send neither unless explicitly asked to.
+	forwardParams := make(map[string]string, len(sm.Parameters))
+	for k, v := range sm.Parameters {
+		switch k {
+		case "replication", "options":
+			// Intentionally dropped.
+		default:
+			forwardParams[k] = v
+		}
+	}
+
+	// Reuse the handshake context so the upstream connect shares the remaining
+	// timeout budget rather than starting a fresh 30s window after a slow
+	// client handshake has already consumed most of it.
+	s.serveAuthenticated(ctx, tlsConn, backend, rc, sniHost, user, database, forwardParams)
 }
 
 // authenticate validates the run token and returns the matching run context.
@@ -571,7 +588,7 @@ func (s *PostgresServer) authenticate(token string) (*RunContextData, bool) {
 // an upstream auth failure), connects to the upstream server, forwards the
 // buffered post-auth frames to the client, then relays messages in both
 // directions until either side closes. Every outcome is audit-logged once.
-func (s *PostgresServer) serveAuthenticated(clientConn net.Conn, backend *pgproto3.Backend, rc *RunContextData, sniHost, user, database string, startupParams map[string]string) {
+func (s *PostgresServer) serveAuthenticated(ctx context.Context, clientConn net.Conn, backend *pgproto3.Backend, rc *RunContextData, sniHost, user, database string, startupParams map[string]string) {
 	start := time.Now()
 	logEntry := RequestLogData{
 		Method:       "STARTUP",
@@ -630,7 +647,7 @@ func (s *PostgresServer) serveAuthenticated(clientConn net.Conn, backend *pgprot
 		return
 	}
 
-	up, grants, err := s.connectWithRetry(resolver, sniHost, user, database, startupParams)
+	up, grants, err := s.connectWithRetry(ctx, resolver, sniHost, user, database, startupParams)
 	if err != nil {
 		// Never include the underlying error in the client-facing message: it
 		// could echo the upstream server's identifiers. The full error is only
@@ -676,10 +693,7 @@ func (s *PostgresServer) serveAuthenticated(clientConn net.Conn, backend *pgprot
 // Postgres server, retrying exactly once on an upstream authentication failure
 // after invalidating the (presumably stale) cached password. It returns the
 // authenticated upstream connection and the grant names for audit logging.
-func (s *PostgresServer) connectWithRetry(resolver PostgresCredentialResolver, host, user, database string, startupParams map[string]string) (*upstreamConn, []string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresHandshakeTimeout)
-	defer cancel()
-
+func (s *PostgresServer) connectWithRetry(ctx context.Context, resolver PostgresCredentialResolver, host, user, database string, startupParams map[string]string) (*upstreamConn, []string, error) {
 	dialAddr := net.JoinHostPort(host, "5432")
 	if s.dialUpstream != nil {
 		addr, err := s.dialUpstream(ctx, host)
