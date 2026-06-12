@@ -17,6 +17,7 @@
 - [MCP Relay](./content/concepts/05-mcp-relay.md) — MCP request proxying, SSE streaming, tool credential injection
 - [Observability](./content/concepts/06-observability.md) — OTel instrumentation, canonical log lines, request ID tracking
 - [Host Gateway](./content/concepts/07-host-gateway.md) — Synthetic hostname mapping, loopback equivalence, port-based access control
+- [Postgres Data Plane](./content/concepts/08-postgres-data-plane.md) — Postgres wire-protocol proxying, SNI routing, run-token auth, Neon per-branch password resolution
 
 ### Guides
 

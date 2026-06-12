@@ -3,3 +3,6 @@
 
 # Git worktrees
 /.worktrees/
+
+# Ephemeral planning/design notes (keep user-facing docs under docs/content/)
+/docs/plans/
