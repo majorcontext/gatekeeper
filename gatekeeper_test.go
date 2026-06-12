@@ -29,6 +29,7 @@ import (
 	"github.com/majorcontext/gatekeeper/credentialsource"
 	"github.com/majorcontext/gatekeeper/proxy"
 
+	"github.com/jackc/pgx/v5/pgproto3"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -2232,8 +2233,8 @@ func TestHTTPSTokenExchangeFallbackToStatic(t *testing.T) {
 				},
 			},
 			{
-				Host:  "127.0.0.1",
-				Grant: "github-bot",
+				Host:   "127.0.0.1",
+				Grant:  "github-bot",
 				Source: SourceConfig{Type: "static", Value: "Bearer bot-fallback-token"},
 			},
 		},
@@ -2317,3 +2318,175 @@ func TestHTTPSTokenExchangeFallbackToStatic(t *testing.T) {
 	}
 }
 
+// newTestCAConfig generates a CA on disk and returns a TLSConfig pointing at it.
+func newTestCAConfig(t *testing.T) TLSConfig {
+	t.Helper()
+	dir := t.TempDir()
+	if _, err := proxy.NewCA(dir); err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+	return TLSConfig{
+		CACert: filepath.Join(dir, "ca.crt"),
+		CAKey:  filepath.Join(dir, "ca.key"),
+	}
+}
+
+func TestServerStartsPostgresListener(t *testing.T) {
+	cfg := &Config{
+		Proxy:    ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		TLS:      newTestCAConfig(t),
+		Postgres: &PostgresConfig{Port: 0},
+		Credentials: []CredentialConfig{
+			{
+				Host:     "*.neon.tech",
+				Postgres: &PostgresCredentialConfig{Resolver: "static"},
+				Source:   SourceConfig{Type: "static", Value: "pw"},
+			},
+		},
+	}
+
+	srv, err := New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+
+	// Poll until the postgres listener has an address.
+	deadline := time.Now().Add(2 * time.Second)
+	var pgAddr string
+	for {
+		pgAddr = srv.PostgresAddr()
+		if pgAddr != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("postgres listener did not start in time")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Raw TCP dial must succeed.
+	conn, err := net.DialTimeout("tcp", pgAddr, time.Second)
+	if err != nil {
+		t.Fatalf("dial postgres listener: %v", err)
+	}
+	defer conn.Close()
+
+	// Sending an SSLRequest should get a single 'S' byte back, proving the
+	// listener speaks the Postgres wire protocol and offers TLS.
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
+	frontend := pgproto3.NewFrontend(conn, conn)
+	frontend.Send(&pgproto3.SSLRequest{})
+	if err := frontend.Flush(); err != nil {
+		t.Fatalf("send SSLRequest: %v", err)
+	}
+	buf := make([]byte, 1)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read SSLRequest response: %v", err)
+	}
+	if buf[0] != 'S' {
+		t.Errorf("SSLRequest response = %q, want 'S'", buf[0])
+	}
+}
+
+func TestServerPostgresStartFailureCleansUpHTTP(t *testing.T) {
+	// Occupy a port so the postgres listener fails to bind to it.
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupying port: %v", err)
+	}
+	defer occupied.Close()
+	occupiedPort := occupied.Addr().(*net.TCPAddr).Port
+
+	cfg := &Config{
+		Proxy:    ProxyConfig{Port: 0, Host: "127.0.0.1"}, // OS-assigned HTTP port
+		TLS:      newTestCAConfig(t),
+		Postgres: &PostgresConfig{Port: occupiedPort, Host: "127.0.0.1"},
+		Credentials: []CredentialConfig{
+			{
+				Host:     "*.neon.tech",
+				Postgres: &PostgresCredentialConfig{Resolver: "static"},
+				Source:   SourceConfig{Type: "static", Value: "pw"},
+			},
+		},
+	}
+
+	srv, err := New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// On the postgres-bind-failure path, Start returns the error immediately
+	// (it does not block on ctx.Done), so call it in the current goroutine.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startErr := srv.Start(ctx)
+	if startErr == nil {
+		t.Fatal("expected Start to fail when postgres port is occupied")
+	}
+	if !strings.Contains(startErr.Error(), "postgres listener") {
+		t.Errorf("error = %q, want mention of 'postgres listener'", startErr)
+	}
+
+	// The HTTP listener must have been torn down — its port should no longer
+	// be accepting connections. The proxy server's Shutdown closes the
+	// listener, so a dial to the proxy address should fail.
+	proxyAddr := srv.ProxyAddr()
+	if proxyAddr == "" {
+		t.Fatal("ProxyAddr is empty; HTTP listener address was never recorded")
+	}
+	// Give the Serve goroutine a moment to observe the closed listener.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		conn, dialErr := net.DialTimeout("tcp", proxyAddr, 100*time.Millisecond)
+		if dialErr != nil {
+			break // listener closed — leak cleaned up
+		}
+		conn.Close()
+		if time.Now().After(deadline) {
+			t.Fatalf("HTTP listener at %s still accepting after postgres failure; it leaked", proxyAddr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestServerPostgresRequiresCA(t *testing.T) {
+	cfg := &Config{
+		Proxy:    ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		Postgres: &PostgresConfig{Port: 0},
+	}
+
+	_, err := New(context.Background(), cfg, "")
+	if err == nil {
+		t.Fatal("expected error for postgres listener without CA")
+	}
+	if !strings.Contains(err.Error(), "ca_cert") || !strings.Contains(err.Error(), "tls") {
+		t.Errorf("error = %q, want mention of tls ca_cert", err)
+	}
+}
+
+func TestServerPostgresUnknownResolver(t *testing.T) {
+	cfg := &Config{
+		Proxy:    ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		TLS:      newTestCAConfig(t),
+		Postgres: &PostgresConfig{Port: 0},
+		Credentials: []CredentialConfig{
+			{
+				Host:     "*.neon.tech",
+				Postgres: &PostgresCredentialConfig{Resolver: "bogus"},
+				Source:   SourceConfig{Type: "static", Value: "pw"},
+			},
+		},
+	}
+
+	_, err := New(context.Background(), cfg, "")
+	if err == nil {
+		t.Fatal("expected error for unknown postgres resolver")
+	}
+	if !strings.Contains(err.Error(), "unknown resolver") {
+		t.Errorf("error = %q, want mention of 'unknown resolver'", err)
+	}
+}

@@ -1,0 +1,8 @@
+# Build artifact (go build -o gatekeeper ./cmd/gatekeeper/)
+/gatekeeper
+
+# Git worktrees
+/.worktrees/
+
+# Ephemeral planning/design notes (keep user-facing docs under docs/content/)
+/docs/plans/

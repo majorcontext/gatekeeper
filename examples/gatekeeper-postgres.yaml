@@ -1,0 +1,85 @@
+# Gate Keeper — Postgres data-plane example (Neon).
+#
+# Runs a Postgres-protocol listener alongside the HTTP proxy. A client connects
+# to the real Neon hostname and presents its run token (or the proxy auth_token)
+# as the Postgres password. Gatekeeper terminates TLS, reads the target endpoint
+# from the TLS SNI, resolves the real per-branch password from the Neon API, and
+# relays the connection over SCRAM-SHA-256. No database password ever lives in
+# the sandbox — only the run-scoped token, which is useless outside Gatekeeper.
+#
+# Setup:
+#   1. Create a Neon API key: https://neon.tech/docs/manage/api-keys
+#   2. Export it:   export NEON_API_KEY=napi_...
+#   3. Generate a CA (required for TLS termination):
+#        cd examples && ./gen-ca.sh
+#   4. Arrange DNS so *.neon.tech resolves to this listener inside the client's
+#      network. This is normally the embedder's job (e.g. Moat does it per run).
+#      For local testing, point the endpoint hostname at 127.0.0.1, e.g. add to
+#      /etc/hosts:
+#        127.0.0.1  ep-cool-darkness-123456.us-east-2.aws.neon.tech
+#   5. Run: cd examples && go run ../cmd/gatekeeper/ --config gatekeeper-postgres.yaml
+#   6. Test (the token below matches proxy.auth_token):
+#        PGPASSWORD=local-test-token psql \
+#          "host=ep-cool-darkness-123456.us-east-2.aws.neon.tech \
+#           dbname=neondb user=neondb_owner sslmode=require"
+#
+# Notes:
+#   - The Postgres listener REQUIRES tls.ca_cert and tls.ca_key; gatekeeper
+#     errors at startup without them.
+#   - sslmode=require is mandatory: the run token is only read inside the TLS
+#     tunnel, and plaintext connections are refused.
+#   - The v1 data plane is a blind message relay routed solely on SNI; it does
+#     no SQL-level inspection.
+
+proxy:
+  host: 127.0.0.1
+  port: 9080
+  # Clients present this token as the Postgres password (and as
+  # Proxy-Authorization on the HTTP plane). In standalone mode it is a single
+  # static token; under Moat each run gets its own scoped token instead.
+  auth_token: local-test-token
+
+# Postgres data-plane listener. Omit this block to disable the data plane.
+postgres:
+  host: 127.0.0.1   # optional; defaults to the proxy host
+  port: 5432
+
+tls:
+  ca_cert: ca.crt
+  ca_key: ca.key
+
+credentials:
+  # Neon resolver: the source supplies the Neon API key, and gatekeeper mints
+  # per-branch passwords from the Neon API (cached with a TTL).
+  #
+  # An account-scoped API key needs no `project`: gatekeeper discovers which
+  # project owns an endpoint by listing projects. A project-scoped key (the
+  # least-privilege option) cannot list projects — set `project` to its
+  # project ID so gatekeeper queries that project directly.
+  - host: "*.neon.tech"
+    postgres:
+      resolver: neon
+      # project: falling-river-38863773   # required only for project-scoped keys
+    source:
+      type: env
+      var: NEON_API_KEY
+    grant: neon-databases
+
+  # Static resolver: the source supplies a fixed password directly. Useful for
+  # non-Neon Postgres or local testing. Uncomment and adjust as needed.
+  # - host: "db.internal"
+  #   postgres:
+  #     resolver: static
+  #   source:
+  #     type: env
+  #     var: DB_PASSWORD
+  #   grant: internal-db
+
+network:
+  policy: strict
+  allow:
+    - "*.neon.tech"
+
+log:
+  level: debug
+  format: text

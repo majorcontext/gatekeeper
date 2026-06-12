@@ -151,29 +151,31 @@ const MaxBodySize = 8 * 1024
 // RequestLogData contains all data for a logged request.
 // Designed for canonical log lines: one wide structured entry per request.
 type RequestLogData struct {
-	RequestID       string // Unique request identifier (from X-Request-Id or generated)
-	Method          string
-	URL             string
-	Host            string // Target hostname (extracted from URL or CONNECT)
-	Path            string // Request path (empty for CONNECT tunnel-level logs)
-	RequestType     string // "http", "connect", "mcp", "relay"
-	StatusCode      int
-	Duration        time.Duration
-	Err             error
-	RequestHeaders  http.Header
-	ResponseHeaders http.Header
-	RequestBody     []byte
-	ResponseBody    []byte
-	RequestSize     int64  // Content-Length of the request body, -1 if unknown
-	ResponseSize    int64  // Content-Length of the response body, -1 if unknown
-	AuthInjected    bool            // True if any credential header was injected for this host
-	InjectedHeaders map[string]bool // Lower-cased header names that were injected
-	Grants          []string        // Credential grant names that were injected
-	Denied          bool            // True if request was denied by network/keep policy
-	DenyReason      string          // Why the request was denied (e.g., "network_policy", "keep_policy")
-	RunID           string          // Run ID from per-run context (daemon mode)
-	UserID          string          // User ID from proxy auth username
-	Ctx             context.Context // Request context (for OTel span extraction, may be nil)
+	RequestID        string // Unique request identifier (from X-Request-Id or generated)
+	Method           string
+	URL              string
+	Host             string // Target hostname (extracted from URL or CONNECT)
+	Path             string // Request path (empty for CONNECT tunnel-level logs)
+	RequestType      string // "http", "connect", "mcp", "relay", "postgres"
+	StatusCode       int
+	Duration         time.Duration
+	Err              error
+	RequestHeaders   http.Header
+	ResponseHeaders  http.Header
+	RequestBody      []byte
+	ResponseBody     []byte
+	RequestSize      int64           // Content-Length of the request body, -1 if unknown. Always -1 for postgres connections (see RequestMessages).
+	ResponseSize     int64           // Content-Length of the response body, -1 if unknown. Always -1 for postgres connections (see ResponseMessages).
+	RequestMessages  int64           // Postgres protocol messages relayed client→upstream; 0 for non-postgres connections.
+	ResponseMessages int64           // Postgres protocol messages relayed upstream→client; 0 for non-postgres connections.
+	AuthInjected     bool            // True if any credential header was injected for this host
+	InjectedHeaders  map[string]bool // Lower-cased header names that were injected
+	Grants           []string        // Credential grant names that were injected
+	Denied           bool            // True if request was denied by network/keep policy
+	DenyReason       string          // Why the request was denied (e.g., "network_policy", "keep_policy")
+	RunID            string          // Run ID from per-run context (daemon mode)
+	UserID           string          // User ID from proxy auth username. For postgres connections this carries the Postgres role, not the proxy auth user.
+	Ctx              context.Context // Request context (for OTel span extraction, may be nil)
 }
 
 // RequestLogger is called for each proxied request.
@@ -365,6 +367,7 @@ type RunContextData struct {
 	HostGateway          string
 	HostGatewayIP        string // actual IP to forward allowed host-gateway requests to
 	AllowedHostPorts     []int
+	PostgresResolvers    []PostgresResolverEntry
 }
 
 // ContextResolver resolves a proxy auth token to per-run context data.
@@ -406,6 +409,7 @@ type CredentialResolver func(ctx context.Context, proxyReq, innerReq *http.Reque
 type Proxy struct {
 	credentials          map[string][]credentialHeader    // host -> credential headers
 	credentialResolvers  map[string]CredentialResolver    // host -> dynamic resolver
+	postgresResolvers    []PostgresResolverEntry          // host pattern -> Postgres password resolver
 	extraHeaders         map[string][]extraHeader         // host -> additional headers to inject
 	responseTransformers map[string][]ResponseTransformer // host -> response transformers
 	mu                   sync.RWMutex

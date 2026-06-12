@@ -162,7 +162,9 @@ type Server struct {
 	proxyAddr   string // actual address after Start
 	proxyLn     net.Listener
 	proxyServer *http.Server
-	logCleanup  func() // closes log file if output is a file path
+	pgServer    *proxy.PostgresServer // postgres data-plane listener, if configured
+	pgAddr      string                // actual postgres listener address after Start
+	logCleanup  func()                // closes log file if output is a file path
 
 	pendingRefreshes []pendingRefresh
 	refreshCancel    context.CancelFunc
@@ -212,6 +214,12 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 			return nil, fmt.Errorf("loading CA: %w", err)
 		}
 		p.SetCA(ca)
+	}
+
+	// The Postgres data-plane listener terminates client TLS with CA-minted
+	// certificates, so a CA is mandatory when it is configured.
+	if cfg.Postgres != nil && (cfg.TLS.CACert == "" || cfg.TLS.CAKey == "") {
+		return nil, fmt.Errorf("postgres listener requires tls.ca_cert and tls.ca_key to be configured")
 	}
 
 	// Load credentials from config and set directly on the proxy.
@@ -265,6 +273,12 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 		}
 		if data.ResponseSize >= 0 {
 			attrs = append(attrs, slog.Int64("response_size", data.ResponseSize))
+		}
+		if data.RequestMessages > 0 {
+			attrs = append(attrs, slog.Int64("request_messages", data.RequestMessages))
+		}
+		if data.ResponseMessages > 0 {
+			attrs = append(attrs, slog.Int64("response_messages", data.ResponseMessages))
 		}
 		if data.Err != nil {
 			attrs = append(attrs, slog.String("error", data.Err.Error()))
@@ -426,6 +440,15 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 			return fmt.Errorf("credential %q: host is required", cred.Grant)
 		}
 
+		// Postgres credentials use the data-plane listener, not HTTP header
+		// injection, so they bypass the header/format logic below.
+		if cred.Postgres != nil {
+			if err := s.loadPostgresCredential(ctx, cred); err != nil {
+				return err
+			}
+			continue
+		}
+
 		if cred.Format != "" && !strings.EqualFold(cred.Format, "basic") {
 			return fmt.Errorf("credential for %s: unknown format %q (valid values: \"basic\")", cred.Host, cred.Format)
 		}
@@ -502,6 +525,60 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 	for _, pr := range refreshMap {
 		s.pendingRefreshes = append(s.pendingRefreshes, *pr)
 	}
+	return nil
+}
+
+// loadPostgresCredential resolves a Postgres credential and registers a
+// resolver for its host pattern on the proxy's data-plane listener.
+//
+// The "neon" resolver mints per-branch passwords lazily from the Neon API
+// using the configured Source as the API key; nothing secret is fetched here.
+// The "static" resolver fetches the password once at startup — that value is
+// the database password and must never be logged.
+func (s *Server) loadPostgresCredential(ctx context.Context, cred CredentialConfig) error {
+	buildSource := func() (credentialsource.CredentialSource, error) {
+		if s.resolveSource != nil {
+			return s.resolveSource(cred.Source)
+		}
+		return ResolveSource(cred.Source)
+	}
+
+	var resolver proxy.PostgresCredentialResolver
+	switch strings.ToLower(cred.Postgres.Resolver) {
+	case "neon":
+		src, err := buildSource()
+		if err != nil {
+			return fmt.Errorf("postgres credential for %s: %w", cred.Host, err)
+		}
+		if c, ok := src.(io.Closer); ok {
+			s.closers = append(s.closers, c)
+		}
+		neon := &credentialsource.NeonResolver{APIKey: src, Project: cred.Postgres.Project}
+		// Closed on shutdown (before the listener drain) so in-flight Neon API
+		// calls are cancelled rather than holding up the drain.
+		s.closers = append(s.closers, neon)
+		resolver = neon
+	case "static":
+		src, err := buildSource()
+		if err != nil {
+			return fmt.Errorf("postgres credential for %s: %w", cred.Host, err)
+		}
+		if c, ok := src.(io.Closer); ok {
+			s.closers = append(s.closers, c)
+		}
+		fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		val, fetchErr := src.Fetch(fetchCtx)
+		cancel()
+		if fetchErr != nil {
+			// Never include the credential value in the error.
+			return fmt.Errorf("postgres credential for %s: fetch failed: %w", cred.Host, fetchErr)
+		}
+		resolver = proxy.NewStaticPostgresResolver(val)
+	default:
+		return fmt.Errorf("postgres credential for %s: unknown resolver %q (valid values: \"neon\", \"static\")", cred.Host, cred.Postgres.Resolver)
+	}
+
+	s.proxy.SetPostgresResolver(cred.Host, resolver)
 	return nil
 }
 
@@ -690,6 +767,31 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	go func() { _ = s.proxyServer.Serve(ln) }()
 
+	// Start the Postgres data-plane listener if configured.
+	if s.cfg.Postgres != nil {
+		pgHost := s.cfg.Postgres.Host
+		if pgHost == "" {
+			pgHost = host // same default the HTTP listener resolved
+		}
+		pg := proxy.NewPostgresServer(s.proxy)
+		pgAddr := fmt.Sprintf("%s:%d", pgHost, s.cfg.Postgres.Port)
+		if err := pg.Start(pgAddr); err != nil {
+			// Tear down the already-running HTTP server so a postgres bind
+			// failure doesn't leak the HTTP listener. http.Server.Shutdown
+			// closes the listener it was Serve-ing, so closing the server is
+			// sufficient — closing ln again here would race the Serve goroutine.
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = s.proxyServer.Shutdown(shutdownCtx)
+			cancel()
+			return fmt.Errorf("starting postgres listener: %w", err)
+		}
+		s.mu.Lock()
+		s.pgServer = pg
+		s.pgAddr = pg.Addr()
+		s.mu.Unlock()
+		slog.Info("gatekeeper postgres listener", "addr", pg.Addr(), "subsystem", "proxy")
+	}
+
 	// Start background refresh goroutines for any RefreshingSource credentials.
 	refreshCtx, refreshCancel := context.WithCancel(context.Background())
 	s.refreshCancel = refreshCancel
@@ -719,10 +821,28 @@ func (s *Server) Stop(ctx context.Context) error {
 	if s.logCleanup != nil {
 		defer s.logCleanup()
 	}
-	if s.proxyServer != nil {
-		return s.proxyServer.Shutdown(ctx)
+	// Drain both planes concurrently so each gets the full ctx budget rather
+	// than the Postgres drain eating into the HTTP server's deadline.
+	var wg sync.WaitGroup
+	var httpErr error
+	if s.pgServer != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := s.pgServer.Shutdown(ctx); err != nil {
+				slog.Warn("postgres listener shutdown timed out; active connections were closed", "error", err)
+			}
+		}()
 	}
-	return nil
+	if s.proxyServer != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			httpErr = s.proxyServer.Shutdown(ctx)
+		}()
+	}
+	wg.Wait()
+	return httpErr
 }
 
 // ProxyAddr returns the proxy listener's actual address (host:port).
@@ -731,4 +851,13 @@ func (s *Server) ProxyAddr() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.proxyAddr
+}
+
+// PostgresAddr returns the Postgres data-plane listener's actual address
+// (host:port). Returns empty string if no Postgres listener is configured or
+// it has not started.
+func (s *Server) PostgresAddr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pgAddr
 }

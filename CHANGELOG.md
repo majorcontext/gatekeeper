@@ -4,6 +4,16 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.12.0 — 2026-06-12
+
+### Added
+
+- **Postgres data plane** — an optional second listener (`postgres.port`/`postgres.host`) speaks the Postgres wire protocol so a client reaches a managed database without holding its password. The client connects with the real database hostname and presents its run token as the Postgres password; gatekeeper terminates TLS with a CA-minted certificate, reads the target endpoint from TLS SNI, validates the token against the per-run context (constant-time, the same model as the HTTP plane), resolves the real upstream password, completes SCRAM-SHA-256 with the upstream, and relays protocol messages in both directions. A credential's new `postgres` block selects the resolver: `neon` mints per-branch passwords from the Neon API (the credential `source` supplies the API key; passwords are cached with a TTL and re-resolved on rotation or after expiry; set `project` for project-scoped API keys, which cannot enumerate projects) or `static` (the source supplies a fixed password, for non-Neon servers). Upstream TLS is verified with no plaintext fallback; no API key, branch password, or run token appears in logs or client-facing errors; network policy is enforced on the SNI host before any upstream dial; the listener requires a configured CA and drains active connections within the shutdown deadline. Protocol framing uses `github.com/jackc/pgx/v5/pgproto3`; upstream SCRAM uses `github.com/xdg-go/scram` ([#30](https://github.com/majorcontext/gatekeeper/pull/30))
+
+### Changed
+
+- **Canonical request log** — postgres connections are logged with `proxy_type=postgres`; per-message counts go in new `request_messages`/`response_messages` fields (the byte-valued `request_size`/`response_size` stay unset for postgres), `user_id` carries the Postgres role, and denied connections carry a non-zero `http_status` (403 policy/credential, 502 upstream) ([#30](https://github.com/majorcontext/gatekeeper/pull/30))
+
 ## v0.11.0 — 2026-06-10
 
 ### Added

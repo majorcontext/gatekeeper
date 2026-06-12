@@ -20,6 +20,10 @@ tls:
   ca_cert: ca.pem
   ca_key: ca-key.pem
 
+postgres:
+  host: 127.0.0.1
+  port: 5432
+
 credentials:
   - host: api.github.com
     source:
@@ -41,6 +45,7 @@ log:
 |---------|-------------|
 | `proxy` | Proxy listener address and authentication |
 | `tls` | CA certificate for TLS interception |
+| `postgres` | Postgres data-plane listener (optional) |
 | `credentials` | Credential injection rules |
 | `network` | Network access policy |
 | `log` | Logging configuration |
@@ -133,6 +138,44 @@ tls:
 - **Default:** —
 
 Both `ca_cert` and `ca_key` must be set together. The proxy uses this CA to dynamically generate per-host certificates for TLS interception. Clients must trust this CA certificate.
+
+---
+
+## postgres
+
+Configures the Postgres data-plane listener. Omit this section to run the HTTP proxy alone. When present, it requires a configured CA (`tls.ca_cert` and `tls.ca_key`); Gatekeeper refuses to start otherwise. See [Postgres Data Plane](../concepts/08-postgres-data-plane.md).
+
+```yaml
+postgres:
+  host: 127.0.0.1
+  port: 5432
+```
+
+### postgres.port
+
+TCP port the Postgres listener binds to.
+
+```yaml
+postgres:
+  port: 5432
+```
+
+- **Type:** `integer`
+- **Required:** Yes (when the `postgres` section is present)
+- **Default:** —
+
+### postgres.host
+
+Address the Postgres listener binds to.
+
+```yaml
+postgres:
+  host: 0.0.0.0
+```
+
+- **Type:** `string`
+- **Required:** No
+- **Default:** the `proxy.host` value
 
 ---
 
@@ -257,6 +300,33 @@ credentials:
 - **Default:** —
 
 The `type` field selects the source backend. Each type accepts different fields. Extraneous fields for the selected type cause a validation error.
+
+### credentials[].postgres
+
+Marks a credential as a Postgres data-plane credential and selects how the upstream password is resolved. Requires the [`postgres`](#postgres) listener section. A credential with a `postgres` block injects database passwords on the Postgres listener instead of HTTP headers; the `header`, `prefix`, and `format` fields do not apply.
+
+```yaml
+credentials:
+  - host: "*.neon.tech"
+    postgres:
+      resolver: neon
+      project: falling-river-38863773
+    source:
+      type: env
+      var: NEON_API_KEY
+    grant: neon-databases
+```
+
+- **Type:** `object`
+- **Required:** No
+- **Default:** —
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `resolver` | `string` | Yes | `neon` (the source supplies a Neon API key; per-branch passwords are minted from the Neon API) or `static` (the source supplies a fixed password). |
+| `project` | `string` | No | Neon project ID. Required for project-scoped Neon API keys, which cannot list projects; omit it for account-scoped keys. |
+
+See [Postgres Data Plane](../concepts/08-postgres-data-plane.md) for how resolution works.
 
 ---
 
