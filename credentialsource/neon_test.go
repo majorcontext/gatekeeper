@@ -58,6 +58,12 @@ type fakeNeonAPI struct {
 	mu       sync.Mutex
 	password string
 	branchID string
+
+	// Optional hooks to deterministically interleave a concurrent call with an
+	// in-flight endpoint lookup. When set, the proj-2 endpoints handler signals
+	// endpointsEntered, then blocks until endpointsRelease is closed.
+	endpointsEntered chan struct{}
+	endpointsRelease chan struct{}
 }
 
 func newFakeNeonAPI(t *testing.T) *fakeNeonAPI {
@@ -113,6 +119,13 @@ func (f *fakeNeonAPI) handle(w http.ResponseWriter, r *http.Request) {
 	case "/api/v2/projects/proj-1/endpoints":
 		fmt.Fprint(w, `{"endpoints":[{"id":"ep-other-endpoint-999999","branch_id":"br-1"}]}`)
 	case "/api/v2/projects/proj-2/endpoints":
+		if f.endpointsEntered != nil {
+			select {
+			case f.endpointsEntered <- struct{}{}:
+			default:
+			}
+			<-f.endpointsRelease
+		}
 		fmt.Fprintf(w, `{"endpoints":[{"id":"ep-cool-darkness-123456","branch_id":%q}]}`, f.currentBranchID())
 	case "/api/v2/projects/proj-2/connection_uri":
 		f.uriCalls.Add(1)
@@ -228,6 +241,41 @@ func TestNeonResolverInvalidatePasswordAfterBranchMove(t *testing.T) {
 	}
 	if got != "moved" {
 		t.Errorf("ResolvePassword() after branch move = %q, want %q", got, "moved")
+	}
+}
+
+// TestNeonResolverConcurrentInvalidationNotClobbered verifies that an endpoint
+// lookup which races with InvalidatePassword does not write its now-stale
+// result back into the cache. Without the generation guard, the stale entry
+// would survive the invalidation and defeat connectWithRetry's single retry.
+func TestNeonResolverConcurrentInvalidationNotClobbered(t *testing.T) {
+	f := newFakeNeonAPI(t)
+	f.endpointsEntered = make(chan struct{}, 1)
+	f.endpointsRelease = make(chan struct{})
+	r := newTestNeonResolver(f, testNeonAPIKey)
+
+	endpointID, err := ParseNeonEndpointID(testNeonHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = r.ResolvePassword(context.Background(), testNeonHost, testNeonRole, testNeonDatabase)
+	}()
+
+	// Wait until the endpoint lookup is in flight, invalidate, then release it.
+	<-f.endpointsEntered
+	r.InvalidatePassword(testNeonHost, testNeonRole, testNeonDatabase)
+	close(f.endpointsRelease)
+	<-done
+
+	r.mu.Lock()
+	_, cached := r.endpoints[endpointID]
+	r.mu.Unlock()
+	if cached {
+		t.Error("stale endpoint info was cached despite a concurrent invalidation")
 	}
 }
 

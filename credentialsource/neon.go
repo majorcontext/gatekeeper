@@ -51,6 +51,10 @@ type NeonResolver struct {
 	mu        sync.Mutex
 	passwords map[string]neonCachedPassword
 	endpoints map[string]neonEndpointInfo
+	// endpointsGen increments on every InvalidatePassword. A goroutine that
+	// resolved an endpoint while a concurrent invalidation occurred must not
+	// write its now-stale result back into the cache (see ResolvePassword).
+	endpointsGen uint64
 }
 
 type neonCachedPassword struct {
@@ -84,6 +88,7 @@ func (r *NeonResolver) ResolvePassword(ctx context.Context, host, user, database
 		return cached.password, nil
 	}
 	info, haveInfo := r.endpoints[endpointID]
+	gen := r.endpointsGen
 	r.mu.Unlock()
 
 	if !haveInfo {
@@ -95,7 +100,13 @@ func (r *NeonResolver) ResolvePassword(ctx context.Context, host, user, database
 		if r.endpoints == nil {
 			r.endpoints = make(map[string]neonEndpointInfo)
 		}
-		r.endpoints[endpointID] = info
+		// Only cache the result if no InvalidatePassword ran while findEndpoint
+		// was in flight. Otherwise this result may predate a branch move, and
+		// writing it would re-stale the cache after the invalidation meant to
+		// clear it — defeating connectWithRetry's single retry.
+		if r.endpointsGen == gen {
+			r.endpoints[endpointID] = info
+		}
 		r.mu.Unlock()
 	}
 
@@ -131,6 +142,7 @@ func (r *NeonResolver) InvalidatePassword(host, user, database string) {
 	r.mu.Lock()
 	delete(r.passwords, neonPasswordKey(endpointID, user, database))
 	delete(r.endpoints, endpointID)
+	r.endpointsGen++
 	r.mu.Unlock()
 }
 
