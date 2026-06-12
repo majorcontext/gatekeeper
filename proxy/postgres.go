@@ -764,6 +764,11 @@ func (s *PostgresServer) serveAuthenticated(ctx context.Context, clientConn net.
 	// client socket, not through backend.Send.
 	for _, frame := range up.postAuthFrames {
 		if _, err := clientConn.Write(frame); err != nil {
+			// Upstream authenticated but the client vanished before we could
+			// deliver the post-auth frames. Record a non-zero status (like every
+			// other exit path) so the row isn't logged with StatusCode 0.
+			logEntry.StatusCode = 502
+			logEntry.Err = err
 			logEntry.Duration = time.Since(start)
 			s.log(logEntry)
 			return
