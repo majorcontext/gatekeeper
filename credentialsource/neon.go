@@ -195,7 +195,8 @@ func (r *NeonResolver) findEndpoint(ctx context.Context, endpointID string) (neo
 	if err := r.apiGet(ctx, "/api/v2/projects", &projects); err != nil {
 		return neonEndpointInfo{}, err
 	}
-	if len(projects.Projects) >= 100 {
+	truncated := len(projects.Projects) >= 100
+	if truncated {
 		slog.Warn("neon projects list may be truncated; pagination is not implemented",
 			"count", len(projects.Projects))
 	}
@@ -207,6 +208,13 @@ func (r *NeonResolver) findEndpoint(ctx context.Context, endpointID string) (neo
 		if branchID != "" {
 			return neonEndpointInfo{projectID: p.ID, branchID: branchID}, nil
 		}
+	}
+	if truncated {
+		// The endpoint may live in a project past the first (unpaginated) page.
+		// Point the operator at the cause rather than letting it read as a
+		// missing-credential error. Setting `project` on the credential avoids
+		// enumeration entirely.
+		return neonEndpointInfo{}, fmt.Errorf("neon endpoint %q not found; the projects list was truncated at %d entries (set the credential's project field)", endpointID, len(projects.Projects))
 	}
 	return neonEndpointInfo{}, fmt.Errorf("neon endpoint %q not found in any accessible project", endpointID)
 }
