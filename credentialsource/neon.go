@@ -19,6 +19,12 @@ const DefaultNeonBaseURL = "https://console.neon.tech"
 
 const defaultNeonPasswordTTL = 5 * time.Minute
 
+// neonResolveTimeout bounds a singleflight-shared endpoint lookup or password
+// fetch. The work is shared across concurrent callers, so it runs on its own
+// deadline rather than any single caller's context: a caller that gives up must
+// not cancel the call the other waiters still depend on.
+const neonResolveTimeout = 30 * time.Second
+
 // ParseNeonEndpointID extracts the Neon endpoint ID from a hostname like
 // "ep-cool-darkness-123456.us-east-2.aws.neon.tech". The "-pooler" suffix
 // (connection pooler endpoints) is stripped.
@@ -59,8 +65,10 @@ type NeonResolver struct {
 	endpointsGen uint64
 	// findGroup collapses concurrent endpoint lookups for the same endpoint into
 	// a single Neon API call chain, so a cold-start burst of connections to one
-	// endpoint doesn't fan out into N project enumerations.
-	findGroup singleflight.Group
+	// endpoint doesn't fan out into N project enumerations. passwordGroup does
+	// the same for the connection_uri fetch, keyed on (endpoint, role, database).
+	findGroup     singleflight.Group
+	passwordGroup singleflight.Group
 }
 
 type neonCachedPassword struct {
@@ -82,6 +90,12 @@ func (r *NeonResolver) Type() string { return "neon" }
 // "ep-cool-darkness-123456.us-east-2.aws.neon.tech"). Host comparison is
 // case-insensitive since SNI values are case-insensitive.
 func (r *NeonResolver) ResolvePassword(ctx context.Context, host, user, database string) (string, error) {
+	// Don't begin work for a caller that has already given up. The API calls
+	// themselves run on their own deadlines inside the singleflight closures
+	// below, so they aren't bound to this (possibly shared) caller's context.
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	host = strings.ToLower(host)
 	endpointID, err := ParseNeonEndpointID(host)
 	if err != nil {
@@ -117,7 +131,9 @@ func (r *NeonResolver) ResolvePassword(ctx context.Context, host, user, database
 		// into one API call chain. Correctness still rests on the gen guard
 		// below, not on singleflight.
 		v, ferr, _ := r.findGroup.Do(endpointID, func() (any, error) {
-			return r.findEndpoint(ctx, endpointID)
+			fctx, cancel := context.WithTimeout(context.Background(), neonResolveTimeout)
+			defer cancel()
+			return r.findEndpoint(fctx, endpointID)
 		})
 		if ferr != nil {
 			return "", ferr
@@ -138,10 +154,19 @@ func (r *NeonResolver) ResolvePassword(ctx context.Context, host, user, database
 		r.mu.Unlock()
 	}
 
-	password, err := r.fetchPassword(ctx, info, user, database)
-	if err != nil {
-		return "", err
+	// Collapse a concurrent stampede of password fetches for the same
+	// (endpoint, role, database) into one connection_uri call. Like findGroup,
+	// the shared call runs on its own deadline so one caller giving up does not
+	// cancel it for the others.
+	pv, perr, _ := r.passwordGroup.Do(cacheKey, func() (any, error) {
+		pctx, cancel := context.WithTimeout(context.Background(), neonResolveTimeout)
+		defer cancel()
+		return r.fetchPassword(pctx, info, user, database)
+	})
+	if perr != nil {
+		return "", perr
 	}
+	password := pv.(string)
 
 	r.mu.Lock()
 	if r.passwords == nil {

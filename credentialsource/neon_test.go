@@ -386,11 +386,14 @@ func TestNeonResolverEndpointInfoExpires(t *testing.T) {
 
 // TestNeonResolverConcurrentColdStartCollapsesLookups verifies that a burst of
 // concurrent cold-start resolves for the same endpoint collapses into a single
-// project-enumeration via singleflight, rather than one chain per connection.
+// project-enumeration and a single connection_uri fetch via singleflight,
+// rather than one chain per connection.
 func TestNeonResolverConcurrentColdStartCollapsesLookups(t *testing.T) {
 	f := newFakeNeonAPI(t)
 	f.projectsEntered = make(chan struct{}, 1)
 	f.projectsRelease = make(chan struct{})
+	f.connURIEntered = make(chan struct{}, 1)
+	f.connURIRelease = make(chan struct{})
 	r := newTestNeonResolver(f, testNeonAPIKey)
 
 	const n = 8
@@ -403,16 +406,24 @@ func TestNeonResolverConcurrentColdStartCollapsesLookups(t *testing.T) {
 		}()
 	}
 
-	// One goroutine wins the flight and enters the projects handler; the rest
-	// block inside singleflight. Give stragglers a moment to reach Do, then let
-	// the winner proceed.
+	// One goroutine wins each flight and enters the gated handler; the rest
+	// block inside singleflight. Give stragglers a moment to reach Do before
+	// releasing, so a late arrival can't start a second call.
 	<-f.projectsEntered
 	time.Sleep(100 * time.Millisecond)
 	close(f.projectsRelease)
+
+	<-f.connURIEntered
+	time.Sleep(100 * time.Millisecond)
+	close(f.connURIRelease)
+
 	wg.Wait()
 
 	if got := f.projectsCalls.Load(); got != 1 {
-		t.Errorf("projects-list calls = %d, want 1 (concurrent lookups should collapse)", got)
+		t.Errorf("projects-list calls = %d, want 1 (endpoint lookups should collapse)", got)
+	}
+	if got := f.uriCalls.Load(); got != 1 {
+		t.Errorf("connection_uri calls = %d, want 1 (password fetches should collapse)", got)
 	}
 }
 
