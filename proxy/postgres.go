@@ -693,8 +693,13 @@ func (s *PostgresServer) serveAuthenticated(ctx context.Context, clientConn net.
 		logEntry.RunID = rc.RunID
 	}
 
-	deny := func(code, clientMsg, logReason string) {
+	// deny sends a fatal error to the client and writes one audit row. statusCode
+	// keeps the log's StatusCode non-zero and category-consistent with the HTTP
+	// plane (403 not allowed, 502 upstream failure), so dashboards keyed on it
+	// don't see a 0 for denied Postgres connections.
+	deny := func(statusCode int, code, clientMsg, logReason string) {
 		sendPGError(backend, code, clientMsg)
+		logEntry.StatusCode = statusCode
 		logEntry.Denied = true
 		logEntry.DenyReason = logReason
 		logEntry.Duration = time.Since(start)
@@ -727,13 +732,13 @@ func (s *PostgresServer) serveAuthenticated(ctx context.Context, clientConn net.
 				Message:   "Host not in allow list: " + sniHost,
 			})
 		}
-		deny("28000", "connection not allowed by network policy", "Host not in allow list: "+sniHost)
+		deny(403, "28000", "connection not allowed by network policy", "Host not in allow list: "+sniHost)
 		return
 	}
 
 	resolver := s.proxy.postgresResolverForHost(rc, sniHost)
 	if resolver == nil {
-		deny("08004", "no credentials configured for this host", "no postgres resolver for host")
+		deny(403, "08004", "no credentials configured for this host", "no postgres resolver for host")
 		return
 	}
 
@@ -747,7 +752,7 @@ func (s *PostgresServer) serveAuthenticated(ctx context.Context, clientConn net.
 			"host", sniHost,
 			"user", user,
 			"error", err)
-		deny("28P01", "could not authenticate to upstream database", "upstream connection failed")
+		deny(502, "28P01", "could not authenticate to upstream database", "upstream connection failed")
 		return
 	}
 	defer up.conn.Close()
