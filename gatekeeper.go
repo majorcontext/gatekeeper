@@ -274,6 +274,12 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 		if data.ResponseSize >= 0 {
 			attrs = append(attrs, slog.Int64("response_size", data.ResponseSize))
 		}
+		if data.RequestMessages > 0 {
+			attrs = append(attrs, slog.Int64("request_messages", data.RequestMessages))
+		}
+		if data.ResponseMessages > 0 {
+			attrs = append(attrs, slog.Int64("response_messages", data.ResponseMessages))
+		}
 		if data.Err != nil {
 			attrs = append(attrs, slog.String("error", data.Err.Error()))
 		}
@@ -812,7 +818,9 @@ func (s *Server) Stop(ctx context.Context) error {
 		defer s.logCleanup()
 	}
 	if s.pgServer != nil {
-		s.pgServer.Stop()
+		if err := s.pgServer.Shutdown(ctx); err != nil {
+			slog.Warn("postgres listener shutdown timed out; active connections were closed", "error", err)
+		}
 	}
 	if s.proxyServer != nil {
 		return s.proxyServer.Shutdown(ctx)
