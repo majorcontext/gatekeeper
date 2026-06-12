@@ -64,6 +64,10 @@ type fakeNeonAPI struct {
 	// endpointsEntered, then blocks until endpointsRelease is closed.
 	endpointsEntered chan struct{}
 	endpointsRelease chan struct{}
+
+	// Same idea for the connection_uri (password fetch) handler.
+	connURIEntered chan struct{}
+	connURIRelease chan struct{}
 }
 
 func newFakeNeonAPI(t *testing.T) *fakeNeonAPI {
@@ -128,6 +132,13 @@ func (f *fakeNeonAPI) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(w, `{"endpoints":[{"id":"ep-cool-darkness-123456","branch_id":%q}]}`, f.currentBranchID())
 	case "/api/v2/projects/proj-2/connection_uri":
+		if f.connURIEntered != nil {
+			select {
+			case f.connURIEntered <- struct{}{}:
+			default:
+			}
+			<-f.connURIRelease
+		}
 		f.uriCalls.Add(1)
 		q := r.URL.Query()
 		if got, want := q.Get("branch_id"), f.currentBranchID(); got != want {
@@ -276,6 +287,50 @@ func TestNeonResolverConcurrentInvalidationNotClobbered(t *testing.T) {
 	r.mu.Unlock()
 	if cached {
 		t.Error("stale endpoint info was cached despite a concurrent invalidation")
+	}
+}
+
+// TestNeonResolverConcurrentInvalidationDoesNotRepoisonPassword covers the
+// haveInfo path: a goroutine that already holds endpoint info skips findEndpoint
+// and fetches a password directly. If an InvalidatePassword runs while that
+// fetch is in flight, the (possibly stale) password must not be written back
+// into the cache the invalidation just cleared.
+func TestNeonResolverConcurrentInvalidationDoesNotRepoisonPassword(t *testing.T) {
+	f := newFakeNeonAPI(t)
+	f.connURIEntered = make(chan struct{}, 1)
+	f.connURIRelease = make(chan struct{})
+	r := newTestNeonResolver(f, testNeonAPIKey)
+
+	endpointID, err := ParseNeonEndpointID(testNeonHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheKey := neonPasswordKey(endpointID, testNeonRole, testNeonDatabase)
+
+	// Seed endpoint info (haveInfo=true) with no cached password, so the next
+	// resolve goes straight to fetchPassword.
+	r.mu.Lock()
+	r.endpoints = map[string]neonEndpointInfo{
+		endpointID: {projectID: "proj-2", branchID: f.currentBranchID()},
+	}
+	r.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = r.ResolvePassword(context.Background(), testNeonHost, testNeonRole, testNeonDatabase)
+	}()
+
+	<-f.connURIEntered
+	r.InvalidatePassword(testNeonHost, testNeonRole, testNeonDatabase)
+	close(f.connURIRelease)
+	<-done
+
+	r.mu.Lock()
+	_, cached := r.passwords[cacheKey]
+	r.mu.Unlock()
+	if cached {
+		t.Error("stale password was cached despite a concurrent invalidation")
 	}
 }
 

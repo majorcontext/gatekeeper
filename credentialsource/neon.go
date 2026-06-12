@@ -123,7 +123,14 @@ func (r *NeonResolver) ResolvePassword(ctx context.Context, host, user, database
 	if r.passwords == nil {
 		r.passwords = make(map[string]neonCachedPassword)
 	}
-	r.passwords[cacheKey] = neonCachedPassword{password: password, expiresAt: time.Now().Add(ttl)}
+	// Only cache the password if no InvalidatePassword ran since we captured
+	// gen. A goroutine that read endpoint info before an invalidation (the
+	// haveInfo path) may have fetched against a stale branch; writing it here
+	// would re-poison the entry the invalidation just cleared. The same guard
+	// protects the endpoint cache above.
+	if r.endpointsGen == gen {
+		r.passwords[cacheKey] = neonCachedPassword{password: password, expiresAt: time.Now().Add(ttl)}
+	}
 	r.mu.Unlock()
 	return password, nil
 }
