@@ -817,15 +817,28 @@ func (s *Server) Stop(ctx context.Context) error {
 	if s.logCleanup != nil {
 		defer s.logCleanup()
 	}
+	// Drain both planes concurrently so each gets the full ctx budget rather
+	// than the Postgres drain eating into the HTTP server's deadline.
+	var wg sync.WaitGroup
+	var httpErr error
 	if s.pgServer != nil {
-		if err := s.pgServer.Shutdown(ctx); err != nil {
-			slog.Warn("postgres listener shutdown timed out; active connections were closed", "error", err)
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := s.pgServer.Shutdown(ctx); err != nil {
+				slog.Warn("postgres listener shutdown timed out; active connections were closed", "error", err)
+			}
+		}()
 	}
 	if s.proxyServer != nil {
-		return s.proxyServer.Shutdown(ctx)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			httpErr = s.proxyServer.Shutdown(ctx)
+		}()
 	}
-	return nil
+	wg.Wait()
+	return httpErr
 }
 
 // ProxyAddr returns the proxy listener's actual address (host:port).
