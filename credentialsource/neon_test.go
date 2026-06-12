@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -108,6 +109,27 @@ func (f *fakeNeonAPI) currentBranchID() string {
 	return f.branchID
 }
 
+// gate optionally blocks a handler so tests can interleave a concurrent call.
+// When release is non-nil it signals entered (if non-nil, non-blocking) and
+// then blocks until release is closed or the request context is cancelled —
+// modeling a real transport that aborts an in-flight request on cancellation.
+// When release is nil it is a no-op.
+func (f *fakeNeonAPI) gate(ctx context.Context, entered, release chan struct{}) {
+	if release == nil {
+		return
+	}
+	if entered != nil {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+	}
+	select {
+	case <-release:
+	case <-ctx.Done():
+	}
+}
+
 func (f *fakeNeonAPI) handle(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Authorization") != "Bearer "+testNeonAPIKey {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -117,13 +139,7 @@ func (f *fakeNeonAPI) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	switch r.URL.Path {
 	case "/api/v2/projects":
-		if f.projectsEntered != nil {
-			select {
-			case f.projectsEntered <- struct{}{}:
-			default:
-			}
-			<-f.projectsRelease
-		}
+		f.gate(r.Context(), f.projectsEntered, f.projectsRelease)
 		f.projectsCalls.Add(1)
 		if f.projectScoped {
 			// Project-scoped API keys cannot list projects.
@@ -135,22 +151,10 @@ func (f *fakeNeonAPI) handle(w http.ResponseWriter, r *http.Request) {
 	case "/api/v2/projects/proj-1/endpoints":
 		fmt.Fprint(w, `{"endpoints":[{"id":"ep-other-endpoint-999999","branch_id":"br-1"}]}`)
 	case "/api/v2/projects/proj-2/endpoints":
-		if f.endpointsEntered != nil {
-			select {
-			case f.endpointsEntered <- struct{}{}:
-			default:
-			}
-			<-f.endpointsRelease
-		}
+		f.gate(r.Context(), f.endpointsEntered, f.endpointsRelease)
 		fmt.Fprintf(w, `{"endpoints":[{"id":"ep-cool-darkness-123456","branch_id":%q}]}`, f.currentBranchID())
 	case "/api/v2/projects/proj-2/connection_uri":
-		if f.connURIEntered != nil {
-			select {
-			case f.connURIEntered <- struct{}{}:
-			default:
-			}
-			<-f.connURIRelease
-		}
+		f.gate(r.Context(), f.connURIEntered, f.connURIRelease)
 		f.uriCalls.Add(1)
 		q := r.URL.Query()
 		if got, want := q.Get("branch_id"), f.currentBranchID(); got != want {
@@ -384,47 +388,131 @@ func TestNeonResolverEndpointInfoExpires(t *testing.T) {
 	}
 }
 
+// recorderTransport drives the fake Neon API in-process (no sockets), so the
+// test stays inside a testing/synctest bubble — network I/O is not "durably
+// blocked" and would defeat synctest.Wait. The fake's gate channels still block
+// the request goroutine, which is exactly the durable block synctest observes.
+type recorderTransport struct{ f *fakeNeonAPI }
+
+func (rt recorderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		rt.f.handle(rec, req) // the gate also observes req.Context, so this returns on cancel
+		close(done)
+	}()
+	select {
+	case <-done:
+		return rec.Result(), nil
+	case <-req.Context().Done():
+		return nil, req.Context().Err()
+	}
+}
+
 // TestNeonResolverConcurrentColdStartCollapsesLookups verifies that a burst of
 // concurrent cold-start resolves for the same endpoint collapses into a single
 // project-enumeration and a single connection_uri fetch via singleflight,
 // rather than one chain per connection.
+//
+// It uses testing/synctest (Go 1.25) instead of a sleep-based gate:
+// synctest.Wait blocks until every goroutine in the bubble is durably blocked,
+// so we release the gate only once the flight leader is parked in the handler
+// and every other goroutine is parked inside singleflight.Do — deterministic
+// regardless of scheduling. See https://pkg.go.dev/testing/synctest.
 func TestNeonResolverConcurrentColdStartCollapsesLookups(t *testing.T) {
-	f := newFakeNeonAPI(t)
-	f.projectsEntered = make(chan struct{}, 1)
-	f.projectsRelease = make(chan struct{})
-	f.connURIEntered = make(chan struct{}, 1)
-	f.connURIRelease = make(chan struct{})
-	r := newTestNeonResolver(f, testNeonAPIKey)
+	synctest.Test(t, func(t *testing.T) {
+		f := &fakeNeonAPI{
+			t:               t,
+			password:        "s3cret",
+			branchID:        "br-9",
+			projectsRelease: make(chan struct{}),
+			connURIRelease:  make(chan struct{}),
+		}
+		r := &NeonResolver{
+			APIKey:     NewStaticSource(testNeonAPIKey),
+			BaseURL:    "http://neon.test",
+			HTTPClient: &http.Client{Transport: recorderTransport{f}},
+		}
 
-	const n = 8
-	var wg sync.WaitGroup
-	wg.Add(n)
-	for i := 0; i < n; i++ {
+		const n = 8
+		var wg sync.WaitGroup
+		wg.Add(n)
+		for range n {
+			go func() {
+				defer wg.Done()
+				_, _ = r.ResolvePassword(context.Background(), testNeonHost, testNeonRole, testNeonDatabase)
+			}()
+		}
+
+		// Wait until the flight leader is parked in the /projects handler and the
+		// other goroutines are parked in singleflight.Do, then release. No leader
+		// can finish (and let a straggler start a second call) before all have
+		// joined, because the leader is blocked until we close the channel.
+		synctest.Wait()
+		close(f.projectsRelease)
+
+		// Same for the password fetch via the second singleflight.
+		synctest.Wait()
+		close(f.connURIRelease)
+
+		wg.Wait()
+
+		if got := f.projectsCalls.Load(); got != 1 {
+			t.Errorf("projects-list calls = %d, want 1 (endpoint lookups should collapse)", got)
+		}
+		if got := f.uriCalls.Load(); got != 1 {
+			t.Errorf("connection_uri calls = %d, want 1 (password fetches should collapse)", got)
+		}
+	})
+}
+
+// TestNeonResolverCloseUnblocksInFlightResolve verifies that Close cancels an
+// in-flight Neon API call so a shutdown isn't held up waiting out the per-call
+// timeout. ResolvePassword must return promptly with a context error once Close
+// is called, rather than blocking on the gated handler.
+func TestNeonResolverCloseUnblocksInFlightResolve(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := &fakeNeonAPI{
+			t:               t,
+			password:        "s3cret",
+			branchID:        "br-9",
+			projectsRelease: make(chan struct{}), // gate /projects, never released
+		}
+		r := &NeonResolver{
+			APIKey:     NewStaticSource(testNeonAPIKey),
+			BaseURL:    "http://neon.test",
+			HTTPClient: &http.Client{Transport: recorderTransport{f}},
+		}
+
+		errCh := make(chan error, 1)
 		go func() {
-			defer wg.Done()
-			_, _ = r.ResolvePassword(context.Background(), testNeonHost, testNeonRole, testNeonDatabase)
+			_, err := r.ResolvePassword(context.Background(), testNeonHost, testNeonRole, testNeonDatabase)
+			errCh <- err
 		}()
-	}
 
-	// One goroutine wins each flight and enters the gated handler; the rest
-	// block inside singleflight. Give stragglers a moment to reach Do before
-	// releasing, so a late arrival can't start a second call.
-	<-f.projectsEntered
-	time.Sleep(100 * time.Millisecond)
-	close(f.projectsRelease)
+		// The resolve is parked in the gated /projects handler.
+		synctest.Wait()
+		if err := r.Close(); err != nil {
+			t.Fatalf("Close() = %v", err)
+		}
 
-	<-f.connURIEntered
-	time.Sleep(100 * time.Millisecond)
-	close(f.connURIRelease)
+		// Close cancels the API call's context, so the resolve returns now
+		// instead of blocking on the never-released gate.
+		synctest.Wait()
+		select {
+		case err := <-errCh:
+			if err == nil {
+				t.Fatal("ResolvePassword returned nil after Close, want a context error")
+			}
+		default:
+			t.Fatal("ResolvePassword did not return after Close")
+		}
 
-	wg.Wait()
-
-	if got := f.projectsCalls.Load(); got != 1 {
-		t.Errorf("projects-list calls = %d, want 1 (endpoint lookups should collapse)", got)
-	}
-	if got := f.uriCalls.Load(); got != 1 {
-		t.Errorf("connection_uri calls = %d, want 1 (password fetches should collapse)", got)
-	}
+		// Close is idempotent.
+		if err := r.Close(); err != nil {
+			t.Errorf("second Close() = %v", err)
+		}
+	})
 }
 
 func TestNeonResolverUnknownEndpoint(t *testing.T) {

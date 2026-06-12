@@ -69,6 +69,40 @@ type NeonResolver struct {
 	// the same for the connection_uri fetch, keyed on (endpoint, role, database).
 	findGroup     singleflight.Group
 	passwordGroup singleflight.Group
+	// baseCtx is the resolver's lifetime context. The singleflight closures
+	// derive their per-call deadline from it (not from any one caller's context,
+	// which would let one caller's cancellation cascade to all waiters), and
+	// Close cancels it so a shutdown unblocks any in-flight Neon API call rather
+	// than waiting out the per-call timeout. Lazily initialized under mu.
+	baseCtx    context.Context
+	baseCancel context.CancelFunc
+}
+
+// baseContext returns the resolver's lifetime context, initializing it on first
+// use. Callers must not hold r.mu.
+func (r *NeonResolver) baseContext() context.Context {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ensureBaseCtxLocked()
+	return r.baseCtx
+}
+
+func (r *NeonResolver) ensureBaseCtxLocked() {
+	if r.baseCtx == nil {
+		r.baseCtx, r.baseCancel = context.WithCancel(context.Background())
+	}
+}
+
+// Close cancels any in-flight Neon API calls so the resolver does not hold up a
+// server shutdown waiting out per-call timeouts. It is safe to call more than
+// once. ResolvePassword calls after Close fail fast with a context error.
+// Close implements io.Closer.
+func (r *NeonResolver) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ensureBaseCtxLocked()
+	r.baseCancel()
+	return nil
 }
 
 type neonCachedPassword struct {
@@ -131,7 +165,7 @@ func (r *NeonResolver) ResolvePassword(ctx context.Context, host, user, database
 		// into one API call chain. Correctness still rests on the gen guard
 		// below, not on singleflight.
 		v, ferr, _ := r.findGroup.Do(endpointID, func() (any, error) {
-			fctx, cancel := context.WithTimeout(context.Background(), neonResolveTimeout)
+			fctx, cancel := context.WithTimeout(r.baseContext(), neonResolveTimeout)
 			defer cancel()
 			return r.findEndpoint(fctx, endpointID)
 		})
@@ -159,7 +193,7 @@ func (r *NeonResolver) ResolvePassword(ctx context.Context, host, user, database
 	// the shared call runs on its own deadline so one caller giving up does not
 	// cancel it for the others.
 	pv, perr, _ := r.passwordGroup.Do(cacheKey, func() (any, error) {
-		pctx, cancel := context.WithTimeout(context.Background(), neonResolveTimeout)
+		pctx, cancel := context.WithTimeout(r.baseContext(), neonResolveTimeout)
 		defer cancel()
 		return r.fetchPassword(pctx, info, user, database)
 	})
