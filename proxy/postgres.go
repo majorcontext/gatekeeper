@@ -376,12 +376,17 @@ type PostgresServer struct {
 	proxy    *Proxy
 	listener net.Listener
 
-	// closed is set by Stop before the listener is closed so acceptLoop can
-	// distinguish an intentional shutdown from a real Accept failure.
+	// closed is set before the listener is closed so acceptLoop can distinguish
+	// an intentional shutdown from a real Accept failure.
 	closed atomic.Bool
 
+	// active tracks in-flight connections so Shutdown can wait for them to drain
+	// and force-close them when the deadline expires.
+	mu     sync.Mutex
+	active map[net.Conn]struct{}
+	wg     sync.WaitGroup
+
 	// dialUpstream overrides upstream dialing in tests; nil means dial host:5432.
-	// Task 8 (the relay) consumes it.
 	dialUpstream func(ctx context.Context, host string) (string, error)
 }
 
@@ -420,13 +425,54 @@ func (s *PostgresServer) Addr() string {
 // Stop closes the listener. It is safe to call on a nil-listener server and
 // idempotent: the closed flag guards against a double close and signals
 // acceptLoop to treat the resulting Accept error as an intentional shutdown.
+// Stop closes the listener immediately and force-closes active connections
+// without waiting for relays to finish. Prefer Shutdown for graceful drain.
 func (s *PostgresServer) Stop() {
 	if s.listener == nil {
 		return
 	}
 	if s.closed.CompareAndSwap(false, true) {
-		s.listener.Close()
+		_ = s.listener.Close()
 	}
+	s.closeActiveConns()
+	s.wg.Wait()
+}
+
+// Shutdown stops accepting new connections and waits for active relays to drain.
+// If ctx expires first, it force-closes the remaining connections (interrupting
+// in-flight queries) and returns ctx.Err().
+func (s *PostgresServer) Shutdown(ctx context.Context) error {
+	if s.listener == nil {
+		return nil
+	}
+	if s.closed.CompareAndSwap(false, true) {
+		_ = s.listener.Close()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		// Deadline hit: force-close active connections so the blocked relay
+		// goroutines unblock and exit, then wait for them.
+		s.closeActiveConns()
+		s.wg.Wait()
+		return ctx.Err()
+	}
+}
+
+func (s *PostgresServer) closeActiveConns() {
+	s.mu.Lock()
+	for c := range s.active {
+		_ = c.Close()
+	}
+	s.mu.Unlock()
 }
 
 func (s *PostgresServer) acceptLoop(ln net.Listener) {
@@ -434,7 +480,7 @@ func (s *PostgresServer) acceptLoop(ln net.Listener) {
 		conn, err := ln.Accept()
 		if err != nil {
 			if s.closed.Load() {
-				// Intentional shutdown via Stop: the listener was closed.
+				// Intentional shutdown: the listener was closed.
 				return
 			}
 			slog.Error("postgres accept loop exited",
@@ -442,8 +488,35 @@ func (s *PostgresServer) acceptLoop(ln net.Listener) {
 				"error", err)
 			return
 		}
-		go s.handleConn(conn)
+		// Reject connections that arrive after shutdown began but before the
+		// listener fully closed.
+		if s.closed.Load() {
+			_ = conn.Close()
+			continue
+		}
+		s.trackConn(conn)
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			defer s.untrackConn(conn)
+			s.handleConn(conn)
+		}()
 	}
+}
+
+func (s *PostgresServer) trackConn(conn net.Conn) {
+	s.mu.Lock()
+	if s.active == nil {
+		s.active = make(map[net.Conn]struct{})
+	}
+	s.active[conn] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *PostgresServer) untrackConn(conn net.Conn) {
+	s.mu.Lock()
+	delete(s.active, conn)
+	s.mu.Unlock()
 }
 
 // handleConn runs the client-facing handshake: refuse plaintext, terminate TLS,
@@ -679,12 +752,13 @@ func (s *PostgresServer) serveAuthenticated(ctx context.Context, clientConn net.
 	_ = clientConn.SetDeadline(time.Time{})
 	_ = up.conn.SetDeadline(time.Time{})
 
-	bytesIn, bytesOut := relayPostgres(backend, up.frontend, clientConn, up.conn)
+	msgsIn, msgsOut := relayPostgres(backend, up.frontend, clientConn, up.conn)
 	logEntry.StatusCode = 200
-	// These are postgres protocol-message counts, not byte counts (for HTTP
-	// traffic RequestSize/ResponseSize carry byte counts).
-	logEntry.RequestSize = bytesIn
-	logEntry.ResponseSize = bytesOut
+	// The relay forwards whole protocol messages and does not count bytes, so
+	// the byte-valued size fields stay unknown and the counts go in their own
+	// fields (keeping RequestSize/ResponseSize meaning bytes everywhere).
+	logEntry.RequestMessages = msgsIn
+	logEntry.ResponseMessages = msgsOut
 	logEntry.Duration = time.Since(start)
 	s.log(logEntry)
 }
@@ -703,12 +777,12 @@ func (s *PostgresServer) connectWithRetry(ctx context.Context, resolver Postgres
 		dialAddr = addr
 	}
 
-	for attempt := 0; attempt < 2; attempt++ {
+	connect := func() (*upstreamConn, error) {
 		password, err := resolver.ResolvePassword(ctx, host, user, database)
 		if err != nil {
-			return nil, nil, fmt.Errorf("resolving postgres password: %w", err)
+			return nil, fmt.Errorf("resolving postgres password: %w", err)
 		}
-		up, err := connectPostgresUpstream(ctx, upstreamParams{
+		return connectPostgresUpstream(ctx, upstreamParams{
 			dialAddr:          dialAddr,
 			serverName:        host,
 			rootCAs:           s.proxy.upstreamCAs,
@@ -716,17 +790,25 @@ func (s *PostgresServer) connectWithRetry(ctx context.Context, resolver Postgres
 			password:          password,
 			startupParameters: startupParams,
 		})
-		if err == nil {
-			return up, []string{"postgres:" + host}, nil
-		}
-		if !errors.Is(err, errUpstreamAuthFailed) || attempt == 1 {
-			return nil, nil, err
-		}
-		// The cached password was rejected: drop it and try once more.
-		resolver.InvalidatePassword(host, user, database)
 	}
-	// unreachable: the loop returns on every path
-	return nil, nil, errors.New("unreachable")
+	grants := []string{"postgres:" + host}
+
+	up, err := connect()
+	if err == nil {
+		return up, grants, nil
+	}
+	// Retry exactly once, and only when the upstream rejected the credential:
+	// the cached password may be stale (Neon rotates on branch reset), so drop
+	// it and resolve again. Any other failure is returned as-is.
+	if !errors.Is(err, errUpstreamAuthFailed) {
+		return nil, nil, err
+	}
+	resolver.InvalidatePassword(host, user, database)
+	up, err = connect()
+	if err != nil {
+		return nil, nil, err
+	}
+	return up, grants, nil
 }
 
 // relayPostgres pumps pgproto3 messages in both directions between the client
@@ -736,7 +818,7 @@ func (s *PostgresServer) connectWithRetry(ctx context.Context, resolver Postgres
 // pump drains those buffers correctly. When one direction errors, both conns
 // are closed so the other Receive unblocks. The returned counts are
 // protocol-message counts, not byte counts.
-func relayPostgres(backend *pgproto3.Backend, frontend *pgproto3.Frontend, clientConn, upConn net.Conn) (bytesIn, bytesOut int64) {
+func relayPostgres(backend *pgproto3.Backend, frontend *pgproto3.Frontend, clientConn, upConn net.Conn) (msgsIn, msgsOut int64) {
 	// Concurrency invariant: the two pumps below share one *pgproto3.Frontend
 	// and one *pgproto3.Backend, but each pump uses only one direction of each
 	// object — the client->upstream pump calls backend.Receive + frontend.Send,
