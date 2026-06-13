@@ -1,0 +1,33 @@
+# Gatekeeper starter config — copy, then edit the marked spots.
+#
+# This injects a GitHub token (from $GITHUB_TOKEN) into requests to
+# api.github.com. To verify:
+#
+#   cd examples && ./gen-ca.sh          # once, to create ca.crt + ca.key
+#   export GITHUB_TOKEN=ghp_xxx
+#   gatekeeper --config gatekeeper.yaml
+#   curl --proxy http://127.0.0.1:9080 --cacert ca.crt https://api.github.com/user
+#
+# Swap the `credentials` block for any source in references/credential-sources.md.
+
+proxy:
+  host: 127.0.0.1
+  port: 9080
+
+tls:
+  ca_cert: ca.crt          # <- path to your CA cert (see references/ca-setup.md)
+  ca_key: ca.key           # <- path to your CA key
+
+credentials:
+  - host: api.github.com   # <- the host to inject into (exact or *.glob)
+    grant: github          # label for logs only — never the secret
+    source:
+      type: env            # <- env | static | aws-secretsmanager | gcp-secretmanager |
+      var: GITHUB_TOKEN    #    gcp-service-account | github-app | token-exchange
+
+network:
+  policy: permissive       # <- switch to "strict" + allow list to lock down egress
+
+log:
+  level: info
+  format: text
