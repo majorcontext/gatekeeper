@@ -22,12 +22,15 @@ network:
 
 ## Allow-list patterns
 
-Same matching rules as credential hosts:
+Unlike credential hosts (which are matched exactly), network policy supports
+globs:
 
 - Exact host: `api.github.com`.
 - Glob: `*.anthropic.com` matches `api.anthropic.com` and any subdomain at any
   depth (e.g. `a-b.anthropic.com`, `x.y.anthropic.com`) — it's a `.anthropic.com`
   suffix match — but **not** the bare `anthropic.com`.
+- Ports: a pattern without an explicit port matches only the standard ports 80
+  and 443. For a non-standard port, include it in the pattern (`host:8443`).
 - Add regional/multi-label hosts explicitly (e.g.
   `us-central1-aiplatform.googleapis.com` alongside `aiplatform.googleapis.com`).
 

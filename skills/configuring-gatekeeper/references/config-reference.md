@@ -36,7 +36,7 @@ postgres:     { ... }   # optional: Postgres data-plane listener
 
 | Field      | Required | Default         | Description                                              |
 |------------|----------|-----------------|----------------------------------------------------------|
-| `host`     | yes      | —               | Target host; exact or glob (`*.example.com`).            |
+| `host`     | yes      | —               | Target host; matched **exactly**, port-insensitive. Not a wildcard — use `network.allow`/postgres for globs. |
 | `header`   | no       | `Authorization` | Header to inject.                                         |
 | `prefix`   | no       | auto-detected   | **Authorization only.** Scheme word (`Bearer`, `token`); or Basic username when `format: basic`. Ignored for other headers (value injected verbatim). |
 | `format`   | no       | `""`            | **Authorization only.** `""` (prefix scheme) or `basic` (HTTP Basic). Any other header with `format: basic` is a config error. |

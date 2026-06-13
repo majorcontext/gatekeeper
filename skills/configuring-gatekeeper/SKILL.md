@@ -102,9 +102,11 @@ http://127.0.0.1:9080/healthz` → `{"status":"ok"}`.
 Three facts that explain most problems:
 
 - **The client must trust the CA**, or TLS fails. There is no bypass.
-- **Host matching is exact or explicit glob** (`*.example.com`). `*.foo.com`
-  matches `a-b.foo.com` and any subdomain at any depth, but **not** bare
-  `foo.com`. No implicit wildcard leaks — only patterns listed explicitly match.
+- **Credential injection matches the request host exactly** (case-insensitive,
+  port ignored — `api.example.com` covers any port). It does **not** expand
+  wildcards: list each host. Globs (`*.example.com`) apply only to
+  `network.allow` and the Postgres data plane, where they are a `.example.com`
+  suffix match (any depth, never the bare domain).
 - **Secrets only ever appear in config/sources**, never in client commands and
   never in logs (`grant` is logged, the value is not).
 
@@ -182,7 +184,7 @@ from a `*-secretmanager` source so nothing sensitive sits in the config file.
 | Symptom                                            | Likely cause / fix                                                                 |
 |----------------------------------------------------|------------------------------------------------------------------------------------|
 | TLS / certificate verification error on the client | Client doesn't trust the CA. Pass `--cacert ca.crt` / set `NODE_EXTRA_CA_CERTS`.   |
-| `credential_injected=false` in the log             | `host` didn't match. Check exact host vs glob; `*.x.com` ≠ `x.com`. See network ref.|
+| `credential_injected=false` in the log             | `host` didn't match. Credentials need the **exact** host (port ignored); `*.x.com` is not a credential wildcard. See credential-sources.md. |
 | Request blocked / not forwarded                    | `network.policy: strict` without the host in `allow`. See network-policy.md.        |
 | `git push` to github.com rejected                  | Needs HTTP Basic with user `x-access-token`: set `format: basic`, `prefix: x-access-token`. |
 | Startup error about CA                              | Postgres data plane (and TLS interception) requires `tls.ca_cert` + `tls.ca_key`.  |

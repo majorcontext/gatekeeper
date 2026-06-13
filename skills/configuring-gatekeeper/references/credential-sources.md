@@ -5,7 +5,7 @@ an HTTP header. The shape is always:
 
 ```yaml
 credentials:
-  - host: api.example.com     # exact host or glob (*.example.com)
+  - host: api.example.com     # exact host (case-insensitive, port ignored)
     header: Authorization     # optional; default "Authorization"
     prefix: Bearer            # optional; auth scheme — auto-detected if omitted
     format: ""                # optional; "" (prefix scheme) or "basic" (HTTP Basic)
@@ -85,13 +85,14 @@ intended default comes first.
 
 ## Host matching rules
 
-- Matching is **exact** or an **explicit glob**. `*.example.com` is a
-  `.example.com` suffix match: it matches `api.example.com` and any deeper
-  subdomain, but **not** bare `example.com`. The suffix requires a dot boundary,
-  so `*.aiplatform.googleapis.com` does **not** match
-  `us-central1-aiplatform.googleapis.com` (it ends in `-aiplatform…`, not
-  `.aiplatform…`). Add such regional hosts as their own entries.
-- Ports are stripped before matching.
+- **Credentials match the request host exactly**, case-insensitively, with the
+  **port ignored** — `host: api.example.com` injects on any port. Wildcards are
+  **not** expanded for credential injection: a `*.example.com` credential host
+  matches nothing. List each host explicitly (e.g. add regional API hosts such
+  as `us-central1-aiplatform.googleapis.com` as their own entries).
+- **Globs (`*.example.com`) apply to `network.allow` and the Postgres data plane
+  only** — not to credential hosts. See [network-policy.md](network-policy.md)
+  and [postgres-data-plane.md](postgres-data-plane.md).
 - Identical `source` blocks across entries are **deduplicated** — they share one
   resolved token and one refresh loop. Safe to list many hosts for one secret.
 
