@@ -103,8 +103,8 @@ Three facts that explain most problems:
 
 - **The client must trust the CA**, or TLS fails. There is no bypass.
 - **Host matching is exact or explicit glob** (`*.example.com`). `*.foo.com`
-  does **not** match `foo.com` or `a-b.foo.com` (single labels). No accidental
-  wildcards.
+  matches `a-b.foo.com` and any subdomain at any depth, but **not** bare
+  `foo.com`. No implicit wildcard leaks — only patterns listed explicitly match.
 - **Secrets only ever appear in config/sources**, never in client commands and
   never in logs (`grant` is logged, the value is not).
 

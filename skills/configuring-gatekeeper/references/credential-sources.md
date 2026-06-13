@@ -85,10 +85,12 @@ intended default comes first.
 
 ## Host matching rules
 
-- Matching is **exact** or an **explicit glob**. `*.example.com` matches
-  `api.example.com` but **not** `example.com` and **not** a different single
-  label like `us-central1-aiplatform.googleapis.com` (that is NOT a subdomain of
-  `aiplatform.googleapis.com`). Add regional hosts as their own entries.
+- Matching is **exact** or an **explicit glob**. `*.example.com` is a
+  `.example.com` suffix match: it matches `api.example.com` and any deeper
+  subdomain, but **not** bare `example.com`. The suffix requires a dot boundary,
+  so `*.aiplatform.googleapis.com` does **not** match
+  `us-central1-aiplatform.googleapis.com` (it ends in `-aiplatform…`, not
+  `.aiplatform…`). Add such regional hosts as their own entries.
 - Ports are stripped before matching.
 - Identical `source` blocks across entries are **deduplicated** — they share one
   resolved token and one refresh loop. Safe to list many hosts for one secret.

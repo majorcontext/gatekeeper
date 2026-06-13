@@ -25,8 +25,9 @@ network:
 Same matching rules as credential hosts:
 
 - Exact host: `api.github.com`.
-- Glob: `*.anthropic.com` matches `api.anthropic.com` but **not** the bare
-  `anthropic.com`, and **not** a different single label.
+- Glob: `*.anthropic.com` matches `api.anthropic.com` and any subdomain at any
+  depth (e.g. `a-b.anthropic.com`, `x.y.anthropic.com`) — it's a `.anthropic.com`
+  suffix match — but **not** the bare `anthropic.com`.
 - Add regional/multi-label hosts explicitly (e.g.
   `us-central1-aiplatform.googleapis.com` alongside `aiplatform.googleapis.com`).
 
