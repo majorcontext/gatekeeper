@@ -146,6 +146,7 @@ func validate(skillPath string) (errs, warns []string) {
 	default:
 		if name == "" || len(name) > maxNameLen {
 			errs = append(errs, fmt.Sprintf("name must be 1-%d characters", maxNameLen))
+			break
 		}
 		if !nameRe.MatchString(name) {
 			errs = append(errs, "name must be lowercase alphanumeric with single hyphens (no leading/trailing/consecutive hyphens)")
@@ -209,12 +210,30 @@ func validate(skillPath string) (errs, warns []string) {
 		}
 	}
 
-	// Body size: keep the whole SKILL.md under the recommended ceiling.
-	if len(lines) > maxBodyLines {
-		errs = append(errs, fmt.Sprintf("SKILL.md is %d lines; keep it under %d (move detail into references/)", len(lines), maxBodyLines))
+	// Warn on unrecognized frontmatter keys — catches typos like "desciption"
+	// that would otherwise silently fail their (missing) validation.
+	known := map[string]bool{
+		"name": true, "description": true, "compatibility": true,
+		"license": true, "allowed-tools": true, "metadata": true,
+	}
+	for k := range meta {
+		if !known[k] {
+			warns = append(warns, fmt.Sprintf("unknown frontmatter field %q (possible typo?)", k))
+		}
 	}
 
-	// Referenced files must exist; warn on deep nesting.
+	// Body size: keep the post-frontmatter body under the recommended ceiling.
+	// Trim the trailing newline so a file ending in "\n" isn't counted as one
+	// line longer than it is.
+	body := strings.Join(lines[end+1:], "\n")
+	bodyLines := len(strings.Split(strings.TrimRight(body, "\n"), "\n"))
+	if bodyLines > maxBodyLines {
+		errs = append(errs, fmt.Sprintf("SKILL.md body is %d lines; keep it under %d (move detail into references/)", bodyLines, maxBodyLines))
+	}
+
+	// Referenced files must exist, stay inside the skill directory, and be
+	// shallow. The containment check rejects traversal (e.g. references/../..)
+	// before os.Stat ever touches a path outside skillDir.
 	seen := map[string]bool{}
 	for _, m := range refRe.FindAllString(text, -1) {
 		ref := strings.TrimRight(m, ".,);:'\"`")
@@ -222,7 +241,12 @@ func validate(skillPath string) (errs, warns []string) {
 			continue
 		}
 		seen[ref] = true
-		if _, err := os.Stat(filepath.Join(skillDir, ref)); err != nil {
+		target := filepath.Join(skillDir, ref)
+		if rel, err := filepath.Rel(skillDir, target); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			errs = append(errs, fmt.Sprintf("reference %q escapes the skill directory", ref))
+			continue
+		}
+		if _, err := os.Stat(target); err != nil {
 			errs = append(errs, fmt.Sprintf("referenced file does not exist: %s", ref))
 		}
 		if strings.Count(ref, "/") > 1 {
