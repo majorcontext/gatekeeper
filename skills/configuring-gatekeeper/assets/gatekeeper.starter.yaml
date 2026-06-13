@@ -19,7 +19,7 @@ tls:
   ca_key: ca.key           # <- path to your CA key
 
 credentials:
-  - host: api.github.com   # <- the host to inject into (exact or *.glob)
+  - host: api.github.com   # <- the host to inject into (exact match, case-insensitive, port ignored)
     grant: github          # label for logs only — never the secret
     source:
       type: env            # <- env | static | aws-secretsmanager | gcp-secretmanager |
