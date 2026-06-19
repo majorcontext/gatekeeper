@@ -35,6 +35,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -148,6 +149,14 @@ var httpTransport = &http.Transport{
 // Only this much is buffered for logging; the full body is always forwarded.
 const MaxBodySize = 8 * 1024
 
+// maxPolicyBodySize is the maximum request-body size (10MB) the proxy will
+// buffer to evaluate http-scope Keep policy rules that inspect the body. Unlike
+// MaxBodySize (a logging-only sample), the entire body must be buffered and
+// parsed here, because partial JSON cannot be unmarshalled. Requests whose body
+// exceeds this limit are denied (fail-closed) when a body rule is in effect.
+// Mirrors maxLLMResponseSize, the equivalent cap on the response side.
+const maxPolicyBodySize = 10 << 20
+
 // RequestLogData contains all data for a logged request.
 // Designed for canonical log lines: one wide structured entry per request.
 type RequestLogData struct {
@@ -205,6 +214,151 @@ func isTextContentType(ct string) bool {
 		strings.Contains(ct, "xml") ||
 		strings.Contains(ct, "x-www-form-urlencoded") ||
 		strings.Contains(ct, "javascript")
+}
+
+// isJSONContentType reports whether the Content-Type denotes a JSON body
+// (e.g. "application/json", "application/vnd.api+json"). Parameters such as
+// "; charset=utf-8" are tolerated. Used to decide whether a request body can be
+// parsed for http-scope body policy evaluation.
+func isJSONContentType(ct string) bool {
+	if ct == "" {
+		return false
+	}
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	ct = strings.TrimSpace(strings.ToLower(ct))
+	return ct == "application/json" || strings.HasSuffix(ct, "+json")
+}
+
+// buildHTTPCall constructs the Keep Call for an http-scope policy evaluation.
+//
+// When no loaded rule in the "http" scope inspects the request body
+// (eng.RequiresBody is false), it returns a body-less call and leaves req
+// untouched — the common, zero-overhead path.
+//
+// When a body rule is in effect, it buffers and JSON-parses the request body,
+// exposing it to rules under params.body, and restores req.Body so the upstream
+// request is unchanged. It fails closed: a body that cannot be inspected
+// (non-JSON Content-Type with a payload, malformed JSON, duplicate JSON keys, or
+// a body exceeding maxPolicyBodySize) returns ok=false with a reason, and the
+// caller denies. A request with no body is allowed through with params.body ==
+// null, so body rules simply don't match while path rules still apply.
+//
+// Note: RequiresBody is scope-global — a single body rule makes this path apply
+// to every request in the "http" scope. As a result, any non-JSON request with
+// a payload is denied once a body rule exists, even for hosts the rule's `when`
+// clause would never match. Scope body rules by host in the rule itself if that
+// over-broad denial is a concern.
+func buildHTTPCall(eng *keeplib.Engine, req *http.Request, host string) (call keeplib.Call, ok bool, denyReason string) {
+	if !eng.RequiresBody("http") {
+		return keeplib.NewHTTPCall(req.Method, host, req.URL.Path), true, ""
+	}
+
+	if req.Body == nil || req.ContentLength == 0 {
+		return keeplib.NewHTTPCallWithBody(req.Method, host, req.URL.Path, nil), true, ""
+	}
+
+	// A compressed body can't be inspected without decoding it first, so fail
+	// closed with an explicit reason rather than a misleading JSON parse error.
+	if enc := req.Header.Get("Content-Encoding"); enc != "" {
+		req.Body.Close()
+		return keeplib.Call{}, false, "request body uses unsupported Content-Encoding: " + enc
+	}
+
+	if ct := req.Header.Get("Content-Type"); !isJSONContentType(ct) {
+		req.Body.Close()
+		return keeplib.Call{}, false, "request body is not JSON (Content-Type: " + ct + ")"
+	}
+
+	// Read one byte past the limit so an exactly-limit body is still accepted
+	// while a larger one is detected. Restore req.Body afterward so the upstream
+	// request remains intact on the allow path; on a deny path the request is
+	// never forwarded, so a truncated restore is harmless.
+	buf, err := io.ReadAll(io.LimitReader(req.Body, maxPolicyBodySize+1))
+	req.Body.Close()
+	req.Body = io.NopCloser(bytes.NewReader(buf))
+	if err != nil {
+		return keeplib.Call{}, false, "failed to read request body for policy evaluation"
+	}
+	if int64(len(buf)) > maxPolicyBodySize {
+		return keeplib.Call{}, false, "request body exceeds policy inspection limit"
+	}
+
+	// An empty or whitespace-only body carries no JSON to inspect — e.g. a
+	// chunked/unknown-length request (ContentLength == -1, so it slips past the
+	// fast path above) with no payload. Treat it as bodyless rather than failing
+	// closed on json.Unmarshal of empty input, so path rules still apply and body
+	// rules simply don't match.
+	if len(bytes.TrimSpace(buf)) == 0 {
+		return keeplib.NewHTTPCallWithBody(req.Method, host, req.URL.Path, nil), true, ""
+	}
+
+	var parsed any
+	if err := json.Unmarshal(buf, &parsed); err != nil {
+		return keeplib.Call{}, false, "request body is not valid JSON"
+	}
+
+	// encoding/json silently keeps the last value for duplicate object keys.
+	// An upstream parser that keeps the first would see a different value, so a
+	// crafted body (e.g. two "model" keys) could satisfy the rule while a
+	// different value reaches the server — a policy bypass. No legitimate client
+	// sends duplicate keys, so reject them fail-closed to keep the proxy's view
+	// of the body authoritative.
+	if hasDuplicateJSONKeys(json.NewDecoder(bytes.NewReader(buf))) {
+		return keeplib.Call{}, false, "request body has duplicate JSON keys"
+	}
+	return keeplib.NewHTTPCallWithBody(req.Method, host, req.URL.Path, parsed), true, ""
+}
+
+// hasDuplicateJSONKeys reports whether any object in the JSON read from dec
+// contains a duplicate key, recursing into nested objects and arrays. It
+// consumes exactly one JSON value. A token error is reported as a duplicate
+// (fail-closed): the caller has already confirmed the bytes parse, so an error
+// here means the input is ambiguous and must not be trusted.
+func hasDuplicateJSONKeys(dec *json.Decoder) bool {
+	tok, err := dec.Token()
+	if err != nil {
+		return true
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return false // scalar value
+	}
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+		for dec.More() {
+			keyTok, err := dec.Token()
+			if err != nil {
+				return true
+			}
+			key, ok := keyTok.(string)
+			if !ok {
+				return true
+			}
+			if _, dup := seen[key]; dup {
+				return true
+			}
+			seen[key] = struct{}{}
+			if hasDuplicateJSONKeys(dec) { // the key's value
+				return true
+			}
+		}
+		if _, err := dec.Token(); err != nil { // closing '}'
+			return true
+		}
+	case '[':
+		for dec.More() {
+			if hasDuplicateJSONKeys(dec) {
+				return true
+			}
+		}
+		if _, err := dec.Token(); err != nil { // closing ']'
+			return true
+		}
+	}
+	return false
 }
 
 // readCloserWrapper wraps a Reader and Closer together.
@@ -1930,7 +2084,7 @@ func (p *Proxy) evaluateAndReplaceLLMResponse(ctxReq *http.Request, req *http.Re
 		resp.Body = io.NopCloser(bytes.NewReader(errorBody))
 		return true, "LLM policy response too large"
 	}
-	result := evaluateLLMResponse(eng, respBodyBytes, resp)
+	result := evaluateLLMResponse(req.Context(), eng, respBodyBytes, resp)
 	if result.Denied {
 		p.logPolicy(ctxReq, "llm-gateway", "llm.tool_use", result.Rule, result.Message)
 		errorBody := buildPolicyDeniedResponse(result.Rule, result.Message)
@@ -2247,10 +2401,20 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		// Keep HTTP policy check.
 		if rc := getRunContext(r); rc != nil && rc.KeepEngines != nil {
 			if eng, ok := rc.KeepEngines["http"]; ok {
-				call := keeplib.NewHTTPCall(req.Method, host, req.URL.Path)
-				call.Context.Scope = "http-" + host
-				result, evalErr := keeplib.SafeEvaluate(eng, call, "http")
-				if evalErr != nil {
+				// httpDenial describes a fail-closed http-scope policy denial.
+				// logMsg feeds the internal policy log only; clientHint is an
+				// optional detail line shown to the client (left empty for
+				// internal-only reasons). clientMsg fills the blank in
+				// "Moat: request blocked <clientMsg>".
+				type httpDenial struct {
+					rule       string
+					logMsg     string
+					denyReason string
+					clientMsg  string
+					clientHint string
+					err        error
+				}
+				denyHTTP := func(d httpDenial) {
 					p.logRequest(r, RequestLogData{
 						RequestID:      innerReqID,
 						Method:         req.Method,
@@ -2264,41 +2428,56 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 						RequestSize:    req.ContentLength,
 						ResponseSize:   -1,
 						Denied:         true,
-						DenyReason:     "Keep policy evaluation error",
-						Err:            evalErr,
+						DenyReason:     d.denyReason,
+						Err:            d.err,
 					})
-					p.logPolicy(r, "http", "http.request", "evaluation-error", "Policy evaluation failed")
+					p.logPolicy(r, "http", "http.request", d.rule, d.logMsg)
 					w.Header().Set("X-Moat-Blocked", "keep-policy")
 					w.Header().Set("Content-Type", "text/plain")
 					w.WriteHeader(http.StatusForbidden)
-					fmt.Fprintf(w, "Moat: request blocked — policy evaluation error.\nHost: %s\n", host)
+					msg := fmt.Sprintf("Moat: request blocked %s.\nHost: %s\n", d.clientMsg, host)
+					if d.clientHint != "" {
+						msg += d.clientHint + "\n"
+					}
+					fmt.Fprint(w, msg)
+				}
+
+				// Build the call, buffering and parsing the body when a body rule
+				// is in effect. Fail closed if the body can't be inspected.
+				call, callOK, bodyDenyReason := buildHTTPCall(eng, req, host)
+				if !callOK {
+					// clientHint is intentionally omitted: the specific reason
+					// (size limit, duplicate keys, content-type) is enforcement
+					// detail kept in the policy log, not revealed to the client.
+					denyHTTP(httpDenial{
+						rule:       "body-inspection-error",
+						logMsg:     bodyDenyReason,
+						denyReason: "Keep policy body inspection failed: " + bodyDenyReason,
+						clientMsg:  "— request body could not be inspected",
+					})
+					return
+				}
+				call.Context.Scope = "http-" + host
+
+				result, evalErr := keeplib.SafeEvaluate(req.Context(), eng, call, "http")
+				if evalErr != nil {
+					denyHTTP(httpDenial{
+						rule:       "evaluation-error",
+						logMsg:     "Policy evaluation failed",
+						denyReason: "Keep policy evaluation error",
+						clientMsg:  "— policy evaluation error",
+						err:        evalErr,
+					})
 					return
 				}
 				if result.Decision == keeplib.Deny {
-					p.logRequest(r, RequestLogData{
-						RequestID:      innerReqID,
-						Method:         req.Method,
-						URL:            "https://" + r.Host + req.URL.RequestURI(),
-						Host:           host,
-						Path:           req.URL.Path,
-						RequestType:    "connect",
-						StatusCode:     http.StatusForbidden,
-						Duration:       time.Since(reqStart),
-						RequestHeaders: req.Header.Clone(),
-						RequestSize:    req.ContentLength,
-						ResponseSize:   -1,
-						Denied:         true,
-						DenyReason:     "Keep policy denied: " + result.Rule + " " + result.Message,
+					denyHTTP(httpDenial{
+						rule:       result.Rule,
+						logMsg:     result.Message,
+						denyReason: "Keep policy denied: " + result.Rule + " " + result.Message,
+						clientMsg:  "by Keep policy",
+						clientHint: result.Message,
 					})
-					p.logPolicy(r, "http", "http.request", result.Rule, result.Message)
-					w.Header().Set("X-Moat-Blocked", "keep-policy")
-					w.Header().Set("Content-Type", "text/plain")
-					w.WriteHeader(http.StatusForbidden)
-					msg := fmt.Sprintf("Moat: request blocked by Keep policy.\nHost: %s\n", host)
-					if result.Message != "" {
-						msg += result.Message + "\n"
-					}
-					fmt.Fprint(w, msg)
 					return
 				}
 			}

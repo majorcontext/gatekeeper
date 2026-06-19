@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,7 +40,7 @@ type llmPolicyResult struct {
 // engine. Handles both JSON and SSE (streaming) responses based on Content-Type.
 // Transparently decompresses gzip responses for evaluation.
 // Fail-closed: evaluation errors cause denial.
-func evaluateLLMResponse(eng *keeplib.Engine, body []byte, resp *http.Response) llmPolicyResult {
+func evaluateLLMResponse(ctx context.Context, eng *keeplib.Engine, body []byte, resp *http.Response) llmPolicyResult {
 	ct := resp.Header.Get("Content-Type")
 	isSSE := strings.Contains(ct, "text/event-stream")
 
@@ -71,14 +72,14 @@ func evaluateLLMResponse(eng *keeplib.Engine, body []byte, resp *http.Response) 
 	}
 
 	if isSSE {
-		return evaluateLLMStream(eng, evalBody)
+		return evaluateLLMStream(ctx, eng, evalBody)
 	}
-	return evaluateLLMJSON(eng, evalBody)
+	return evaluateLLMJSON(ctx, eng, evalBody)
 }
 
 // evaluateLLMJSON evaluates a non-streaming JSON response.
-func evaluateLLMJSON(eng *keeplib.Engine, body []byte) llmPolicyResult {
-	r, err := llm.EvaluateResponse(eng, llmCodec, body, "llm-gateway", llm.DecomposeConfig{})
+func evaluateLLMJSON(ctx context.Context, eng *keeplib.Engine, body []byte) llmPolicyResult {
+	r, err := llm.EvaluateResponse(ctx, eng, llmCodec, body, "llm-gateway", llm.DecomposeConfig{})
 	if err != nil {
 		slog.Warn("Keep LLM response evaluation error, denying (fail-closed)", "error", err)
 		return llmPolicyResult{
@@ -95,7 +96,7 @@ func evaluateLLMJSON(eng *keeplib.Engine, body []byte) llmPolicyResult {
 
 // evaluateLLMStream parses SSE events from the buffered body, evaluates them,
 // and returns the (possibly redacted) event list for forwarding.
-func evaluateLLMStream(eng *keeplib.Engine, body []byte) llmPolicyResult {
+func evaluateLLMStream(ctx context.Context, eng *keeplib.Engine, body []byte) llmPolicyResult {
 	reader := sse.NewReader(bytes.NewReader(body))
 	var events []sse.Event
 	for {
@@ -117,7 +118,7 @@ func evaluateLLMStream(eng *keeplib.Engine, body []byte) llmPolicyResult {
 		}
 	}
 
-	sr, err := llm.EvaluateStream(eng, llmCodec, events, "llm-gateway", llm.DecomposeConfig{})
+	sr, err := llm.EvaluateStream(ctx, eng, llmCodec, events, "llm-gateway", llm.DecomposeConfig{})
 	if err != nil {
 		slog.Warn("Keep LLM stream evaluation error, denying (fail-closed)", "error", err)
 		return llmPolicyResult{

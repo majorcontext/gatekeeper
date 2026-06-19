@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"net/http"
 	"testing"
@@ -33,7 +34,7 @@ rules:
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 	}
 
-	result := evaluateLLMResponse(eng, body, resp)
+	result := evaluateLLMResponse(context.Background(), eng, body, resp)
 	assert.False(t, result.Denied)
 	assert.Empty(t, result.Rule)
 	assert.Empty(t, result.Message)
@@ -60,7 +61,7 @@ rules:
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 	}
 
-	result := evaluateLLMResponse(eng, body, resp)
+	result := evaluateLLMResponse(context.Background(), eng, body, resp)
 	assert.True(t, result.Denied)
 	assert.Equal(t, "deny-edit", result.Rule)
 	assert.Contains(t, result.Message, "Editing blocked")
@@ -87,7 +88,7 @@ rules:
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 	}
 
-	result := evaluateLLMResponse(eng, body, resp)
+	result := evaluateLLMResponse(context.Background(), eng, body, resp)
 	assert.False(t, result.Denied)
 }
 
@@ -140,7 +141,7 @@ rules:
 		},
 	}
 
-	result := evaluateLLMResponse(eng, compressed, resp)
+	result := evaluateLLMResponse(context.Background(), eng, compressed, resp)
 	assert.True(t, result.Denied)
 	assert.Equal(t, "deny-edit", result.Rule)
 }
@@ -175,7 +176,7 @@ rules:
 		},
 	}
 
-	result := evaluateLLMResponse(eng, compressed, resp)
+	result := evaluateLLMResponse(context.Background(), eng, compressed, resp)
 	assert.True(t, result.Denied)
 	assert.Equal(t, "deny-edit", result.Rule)
 }
@@ -206,7 +207,7 @@ rules:
 		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 	}
 
-	result := evaluateLLMResponse(eng, []byte(sseBody), resp)
+	result := evaluateLLMResponse(context.Background(), eng, []byte(sseBody), resp)
 	assert.False(t, result.Denied)
 	assert.NotNil(t, result.Events, "SSE allowed response should return events for re-serialization")
 	assert.True(t, len(result.Events) > 0)
@@ -234,7 +235,7 @@ rules:
 	}
 
 	// Not valid gzip — should fail-closed.
-	result := evaluateLLMResponse(eng, []byte("not gzip data"), resp)
+	result := evaluateLLMResponse(context.Background(), eng, []byte("not gzip data"), resp)
 	assert.True(t, result.Denied)
 	assert.Equal(t, "evaluation-error", result.Rule)
 }
@@ -268,6 +269,6 @@ rules:
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 	}
 
-	result := evaluateLLMResponse(eng, []byte(body), resp)
+	result := evaluateLLMResponse(context.Background(), eng, []byte(body), resp)
 	assert.False(t, result.Denied)
 }
