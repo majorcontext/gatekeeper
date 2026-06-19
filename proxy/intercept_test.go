@@ -13,7 +13,10 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+
+	keeplib "github.com/majorcontext/keep"
 )
 
 // interceptTestSetup creates a proxy with TLS interception enabled and an HTTPS
@@ -680,6 +683,77 @@ func TestIntercept_CaptureHeaders_PreservesInjectedCredential(t *testing.T) {
 	// The injected credential must survive the capture header stripping.
 	if receivedAPIKey != "secret-key-123" {
 		t.Errorf("X-Api-Key = %q, want %q (injected credential should not be stripped)", receivedAPIKey, "secret-key-123")
+	}
+}
+
+// TestIntercept_HTTPBodyPolicy exercises http-scope request-body filtering
+// end-to-end through TLS interception: a body rule denies a matching request
+// before it reaches the backend (403 + X-Moat-Blocked), while a non-matching
+// body is forwarded intact.
+func TestIntercept_HTTPBodyPolicy(t *testing.T) {
+	var backendHits atomic.Int32
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendHits.Add(1)
+		io.Copy(io.Discard, r.Body)
+		w.Write([]byte("ok"))
+	}))
+
+	eng, err := keeplib.LoadFromBytes([]byte(httpBodyRules))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { eng.Close() })
+
+	setup.Proxy.SetContextResolver(func(token string) (*RunContextData, bool) {
+		if token == "tok" {
+			return &RunContextData{
+				Policy:      "permissive",
+				KeepEngines: map[string]*keeplib.Engine{"http": eng},
+			}, true
+		}
+		return nil, false
+	})
+
+	proxyURL := mustParseURL(setup.ProxyServer.URL)
+	proxyURL.User = url.UserPassword("alice", "tok")
+	clientCAs := x509.NewCertPool()
+	clientCAs.AppendCertsFromPEM(setup.CA.certPEM)
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: clientCAs},
+		},
+	}
+
+	// model == gpt-4 matches the deny rule: blocked before reaching the backend.
+	denyResp, err := client.Post(setup.Backend.URL+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"gpt-4"}`))
+	if err != nil {
+		t.Fatalf("deny request: %v", err)
+	}
+	denyResp.Body.Close()
+	if denyResp.StatusCode != http.StatusForbidden {
+		t.Errorf("denied request status = %d, want 403", denyResp.StatusCode)
+	}
+	if got := denyResp.Header.Get("X-Moat-Blocked"); got != "keep-policy" {
+		t.Errorf("X-Moat-Blocked = %q, want keep-policy", got)
+	}
+	if n := backendHits.Load(); n != 0 {
+		t.Errorf("backend reached %d times on denied request, want 0", n)
+	}
+
+	// A non-matching body is allowed and forwarded to the backend.
+	okResp, err := client.Post(setup.Backend.URL+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"claude"}`))
+	if err != nil {
+		t.Fatalf("allow request: %v", err)
+	}
+	okResp.Body.Close()
+	if okResp.StatusCode != 200 {
+		t.Errorf("allowed request status = %d, want 200", okResp.StatusCode)
+	}
+	if n := backendHits.Load(); n != 1 {
+		t.Errorf("backend hits = %d, want 1", n)
 	}
 }
 

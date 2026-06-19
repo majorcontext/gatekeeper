@@ -261,7 +261,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 				scope := "mcp-" + serverName
 				call := keeplib.NewMCPCall(mcpReq.Params.Name, mcpReq.Params.Arguments)
 				call.Context.Scope = scope
-				result, evalErr := keeplib.SafeEvaluate(eng, call, scope)
+				result, evalErr := keeplib.SafeEvaluate(r.Context(), eng, call, scope)
 				if evalErr != nil {
 					slog.Warn("Keep evaluation error for MCP call, denying (fail-closed)",
 						"server", serverName,

@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.7
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.41.5
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/majorcontext/keep v0.3.0
+	github.com/majorcontext/keep v0.5.0
 	github.com/stretchr/testify v1.11.1
 	github.com/xdg-go/scram v1.2.0
 	go.jetify.com/typeid v1.3.0
