@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -2488,5 +2489,39 @@ func TestServerPostgresUnknownResolver(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unknown resolver") {
 		t.Errorf("error = %q, want mention of 'unknown resolver'", err)
+	}
+}
+
+// ── multiHandler (slog fan-out) ───────────────────────────────────────────────
+
+// TestMultiHandler_WithAttrs verifies that WithAttrs propagates to all child
+// handlers, exercising the previously uncovered branch.
+func TestMultiHandler_WithAttrs(t *testing.T) {
+	h1 := slog.NewTextHandler(io.Discard, nil)
+	h2 := slog.NewTextHandler(io.Discard, nil)
+	mh := newMultiHandler(h1, h2)
+
+	derived := mh.WithAttrs([]slog.Attr{slog.String("k", "v")})
+	if derived == nil {
+		t.Fatal("WithAttrs returned nil")
+	}
+	// Derived handler should still respond to Enabled.
+	if !derived.Enabled(context.Background(), slog.LevelInfo) {
+		t.Error("derived handler Enabled(Info) = false, want true")
+	}
+}
+
+// TestMultiHandler_WithGroup verifies that WithGroup propagates to all child
+// handlers.
+func TestMultiHandler_WithGroup(t *testing.T) {
+	h1 := slog.NewTextHandler(io.Discard, nil)
+	mh := newMultiHandler(h1)
+
+	derived := mh.WithGroup("mygroup")
+	if derived == nil {
+		t.Fatal("WithGroup returned nil")
+	}
+	if !derived.Enabled(context.Background(), slog.LevelInfo) {
+		t.Error("derived handler Enabled(Info) = false, want true")
 	}
 }

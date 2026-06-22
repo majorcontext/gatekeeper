@@ -52,6 +52,7 @@ import (
 
 	keeplib "github.com/majorcontext/keep"
 	"go.jetify.com/typeid"
+	"golang.org/x/net/http2"
 )
 
 // contextKey is the type for request-scoped context values.
@@ -2152,9 +2153,14 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Advertise h2 first so it is preferred during ALPN negotiation;
+	// http/1.1 is kept as fallback for non-h2 clients.
+	// Ordering matters: ConfigureServer only appends missing protos, it
+	// does not reorder, so h2-preference must be established here.
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{*cert},
 		MinVersion:   tls.VersionTLS12,
+		NextProtos:   []string{http2.NextProtoTLS, "http/1.1"},
 	}
 	tlsClientConn := tls.Server(clientConn, tlsConfig)
 	if err := tlsClientConn.Handshake(); err != nil {
@@ -2168,23 +2174,35 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		}
 	}()
 
-	transport := &http.Transport{
-		Proxy: nil,
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			RootCAs:    p.upstreamCAs, // nil means system roots
-		},
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 5 * time.Minute,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		// Note: Do NOT set ForceAttemptHTTP2 here. This transport forwards
-		// HTTP/1.1 requests read from the intercepted TLS connection. Enabling
-		// HTTP/2 on the upstream side causes framing mismatches and hangs.
+	// Shared TLS config for upstream connections (both h2 and h1 paths).
+	upstreamTLS := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    p.upstreamCAs,
+	}
+
+	// Build an upstream transport matching the negotiated protocol.
+	// When the client negotiated h2 (e.g., gRPC), the request object is an
+	// h2 request and cannot be round-tripped via an HTTP/1.1 transport
+	// without framing errors, so we must forward upstream over h2 as well.
+	var transport http.RoundTripper
+	if tlsClientConn.ConnectionState().NegotiatedProtocol == http2.NextProtoTLS {
+		transport = &http2.Transport{TLSClientConfig: upstreamTLS}
+	} else {
+		transport = &http.Transport{
+			Proxy: nil,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSClientConfig:     upstreamTLS,
+			TLSHandshakeTimeout: 10 * time.Second,
+			// Do NOT set ForceAttemptHTTP2: this path handles HTTP/1.1
+			// requests. Enabling h2 upstream for h1 clients causes
+			// framing mismatches.
+			ResponseHeaderTimeout: 5 * time.Minute,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+		}
 	}
 
 	// Extract port from the CONNECT request for rule checking.
@@ -2538,6 +2556,13 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				ln.Close()
 			}
 		},
+	}
+	// Enable HTTP/2 on the inner server so h2 clients (e.g., gRPC) get
+	// proper framing.  h1 clients are unaffected — ConfigureServer
+	// falls back to the normal http.Handler when h2 is not negotiated.
+	if err := http2.ConfigureServer(srv, nil); err != nil {
+		slog.Warn("http2.ConfigureServer failed, falling back to HTTP/1.1",
+			"subsystem", "proxy", "host", host, "error", err)
 	}
 	_ = srv.Serve(ln)
 }
