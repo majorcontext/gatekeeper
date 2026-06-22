@@ -2184,21 +2184,38 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 	// When the client negotiated h2 (e.g., gRPC), the request object is an
 	// h2 request and cannot be round-tripped via an HTTP/1.1 transport
 	// without framing errors, so we must forward upstream over h2 as well.
+	//
+	// Limitation: http2.Transport never falls back to HTTP/1.1, so if the
+	// upstream only speaks HTTP/1.1 the connection will fail when the client
+	// has negotiated h2. For gRPC this is always correct (gRPC requires h2);
+	// for general h2 clients hitting h1-only upstreams it is a known
+	// limitation of the current implementation.
 	var transport http.RoundTripper
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
 	if tlsClientConn.ConnectionState().NegotiatedProtocol == http2.NextProtoTLS {
-		transport = &http2.Transport{TLSClientConfig: upstreamTLS}
+		transport = &http2.Transport{
+			TLSClientConfig: upstreamTLS,
+			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+				if cfg == nil {
+					cfg = upstreamTLS
+				}
+				return tls.DialWithDialer(dialer, network, addr, cfg)
+			},
+			ReadIdleTimeout: 30 * time.Second,
+			PingTimeout:     15 * time.Second,
+		}
 	} else {
 		transport = &http.Transport{
-			Proxy: nil,
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			TLSClientConfig:     upstreamTLS,
-			TLSHandshakeTimeout: 10 * time.Second,
+			Proxy:           nil,
+			DialContext:     dialer.DialContext,
+			TLSClientConfig: upstreamTLS,
 			// Do NOT set ForceAttemptHTTP2: this path handles HTTP/1.1
 			// requests. Enabling h2 upstream for h1 clients causes
 			// framing mismatches.
+			TLSHandshakeTimeout:   10 * time.Second,
 			ResponseHeaderTimeout: 5 * time.Minute,
 			MaxIdleConns:          100,
 			IdleConnTimeout:       90 * time.Second,
@@ -2563,6 +2580,11 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 	if err := http2.ConfigureServer(srv, nil); err != nil {
 		slog.Warn("http2.ConfigureServer failed, falling back to HTTP/1.1",
 			"subsystem", "proxy", "host", host, "error", err)
+		// If the client already negotiated h2 we cannot serve it correctly
+		// over h1 — close rather than produce a framing error.
+		if tlsClientConn.ConnectionState().NegotiatedProtocol == http2.NextProtoTLS {
+			return
+		}
 	}
 	_ = srv.Serve(ln)
 }

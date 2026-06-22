@@ -25,6 +25,16 @@ import (
 	"golang.org/x/net/http2"
 )
 
+// bufferedConn wraps a net.Conn with a pre-filled bufio.Reader so bytes
+// already consumed into the buffer (e.g., from reading the CONNECT response)
+// are not lost when the connection is handed to tls.Client.
+type bufferedConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (c *bufferedConn) Read(b []byte) (int, error) { return c.r.Read(b) }
+
 // newGRPCServer returns an httptest.Server that speaks HTTP/2 and handles
 // minimal unary gRPC calls on any path.  receivedHeaders captures all
 // request headers from the first call.
@@ -132,7 +142,10 @@ func newGRPCProxySetup(t *testing.T, receivedHeaders *http.Header) (transport *h
 				return nil, fmt.Errorf("write CONNECT: %w", err)
 			}
 			// http.ReadResponse handles partial reads and validates the status line.
-			cresp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+			// Wrap conn in a bufferedConn so any bytes pre-fetched by the
+			// bufio.Reader are not lost before the TLS handshake consumes them.
+			br := bufio.NewReader(conn)
+			cresp, err := http.ReadResponse(br, nil)
 			if err != nil {
 				conn.Close()
 				return nil, fmt.Errorf("read CONNECT response: %w", err)
@@ -149,7 +162,7 @@ func newGRPCProxySetup(t *testing.T, receivedHeaders *http.Header) (transport *h
 				ServerName: serverName,
 				NextProtos: []string{http2.NextProtoTLS},
 			}
-			tlsConn := tls.Client(conn, tlsCfg)
+			tlsConn := tls.Client(&bufferedConn{Conn: conn, r: br}, tlsCfg)
 			if err := tlsConn.HandshakeContext(ctx); err != nil {
 				conn.Close()
 				return nil, fmt.Errorf("TLS handshake: %w", err)
