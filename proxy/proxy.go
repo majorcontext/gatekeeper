@@ -2202,7 +2202,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				if cfg == nil {
 					cfg = upstreamTLS
 				}
-				return tls.DialWithDialer(dialer, network, addr, cfg)
+				return (&tls.Dialer{NetDialer: dialer, Config: cfg}).DialContext(ctx, network, addr)
 			},
 			ReadIdleTimeout: 30 * time.Second,
 			PingTimeout:     15 * time.Second,
