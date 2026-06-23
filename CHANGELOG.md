@@ -4,7 +4,7 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
-## v0.13.0 — 2026-06-23
+## v0.14.0 — 2026-06-23
 
 ### Added
 
