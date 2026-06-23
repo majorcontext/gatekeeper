@@ -798,3 +798,272 @@ func TestIntercept_UserID_ContextResolver(t *testing.T) {
 		t.Errorf("UserID = %q, want %q (CONNECT path)", logged.UserID, "alice")
 	}
 }
+
+// TestTunnel_PathRulesWarning exercises the code path where TLS interception
+// is disabled (no CA) but per-path rules are configured — the proxy should
+// fall through to the tunnel handler.
+func TestTunnel_PathRulesWarning(t *testing.T) {
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "ok")
+	}))
+	t.Cleanup(backend.Close)
+
+	p := NewProxy()
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		return &RunContextData{
+			Policy: "permissive",
+			PathRulesCheck: func(host string, port int) bool {
+				return true
+			},
+		}, true
+	})
+
+	proxyServer := httptest.NewServer(p)
+	t.Cleanup(proxyServer.Close)
+
+	backendCAs := x509.NewCertPool()
+	backendCAs.AddCert(backend.Certificate())
+
+	proxyURL := mustParseURL(proxyServer.URL)
+	proxyURL.User = url.UserPassword("user", "tok")
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: backendCAs},
+		},
+	}
+
+	resp, err := client.Get(backend.URL + "/path")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// newAnthropicInterceptSetup builds an intercept test setup where the backend
+// acts as a fake api.anthropic.com. The client sends requests to
+// https://api.anthropic.com:<backend-port> and the proxy rewrites the upstream
+// dial to 127.0.0.1:<backend-port> via the HostGateway mechanism, so the
+// host check (host == "api.anthropic.com") triggers the LLM policy path.
+func newAnthropicInterceptSetup(t *testing.T, llmEng *keeplib.Engine, backendHandler http.Handler) (client *http.Client, backendURL string) {
+	t.Helper()
+
+	ca, err := generateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	backend := httptest.NewTLSServer(backendHandler)
+	t.Cleanup(backend.Close)
+
+	upstreamCAs := x509.NewCertPool()
+	upstreamCAs.AddCert(backend.Certificate())
+
+	backendAddr := mustParseURL(backend.URL)
+	backendPort := backendAddr.Port()
+	backendPortInt := 0
+	fmt.Sscanf(backendPort, "%d", &backendPortInt)
+
+	p := NewProxy()
+	p.SetCA(ca)
+	p.SetUpstreamCAs(upstreamCAs)
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		if token != "llmtok" {
+			return nil, false
+		}
+		rc := &RunContextData{
+			Policy:           "permissive",
+			HostGateway:      "api.anthropic.com",
+			HostGatewayIP:    "127.0.0.1",
+			AllowedHostPorts: []int{backendPortInt},
+		}
+		if llmEng != nil {
+			rc.KeepEngines = map[string]*keeplib.Engine{"llm-gateway": llmEng}
+		}
+		return rc, true
+	})
+
+	proxyServer := httptest.NewServer(p)
+	t.Cleanup(proxyServer.Close)
+
+	clientCAs := x509.NewCertPool()
+	clientCAs.AppendCertsFromPEM(ca.certPEM)
+
+	proxyURL := mustParseURL(proxyServer.URL)
+	proxyURL.User = url.UserPassword("user", "llmtok")
+
+	client = &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: clientCAs},
+		},
+	}
+
+	backendURL = "https://api.anthropic.com:" + backendPort
+	return client, backendURL
+}
+
+// TestIntercept_LLMPolicy_DeniedLogged verifies that a denied LLM response is
+// recorded in the canonical request log with Denied=true.
+func TestIntercept_LLMPolicy_DeniedLogged(t *testing.T) {
+	eng, err := keeplib.LoadFromBytes([]byte(llmGatewayDenyEditPolicy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(eng.Close)
+
+	toolBody := `{"content":[{"type":"tool_use","id":"t1","name":"Edit","input":{"file_path":"/f"}}],"stop_reason":"tool_use"}`
+
+	ca, err := generateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, toolBody)
+	}))
+	t.Cleanup(backend.Close)
+
+	upstreamCAs := x509.NewCertPool()
+	upstreamCAs.AddCert(backend.Certificate())
+
+	backendPort := 0
+	fmt.Sscanf(mustParseURL(backend.URL).Port(), "%d", &backendPort)
+
+	p := NewProxy()
+	p.SetCA(ca)
+	p.SetUpstreamCAs(upstreamCAs)
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		if token != "logtest" {
+			return nil, false
+		}
+		return &RunContextData{
+			Policy:           "permissive",
+			HostGateway:      "api.anthropic.com",
+			HostGatewayIP:    "127.0.0.1",
+			AllowedHostPorts: []int{backendPort},
+			KeepEngines:      map[string]*keeplib.Engine{"llm-gateway": eng},
+		}, true
+	})
+
+	var logged RequestLogData
+	p.SetLogger(func(data RequestLogData) { logged = data })
+
+	proxyServer := httptest.NewServer(p)
+	t.Cleanup(proxyServer.Close)
+
+	clientCAs := x509.NewCertPool()
+	clientCAs.AppendCertsFromPEM(ca.certPEM)
+
+	proxyURL := mustParseURL(proxyServer.URL)
+	proxyURL.User = url.UserPassword("user", "logtest")
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: clientCAs},
+		},
+	}
+
+	resp, err := client.Post(
+		fmt.Sprintf("https://api.anthropic.com:%d/v1/messages", backendPort),
+		"application/json",
+		strings.NewReader(`{"model":"claude-opus-4-5"}`),
+	)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+	if !logged.Denied {
+		t.Errorf("RequestLogData.Denied = false, want true")
+	}
+}
+
+// TestIntercept_ResponseTransformer verifies that a registered response
+// transformer runs in the intercept path and can observe the response.
+func TestIntercept_ResponseTransformer(t *testing.T) {
+	var transformerCalled bool
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"original":true}`)
+	}))
+
+	setup.Proxy.AddResponseTransformer(setup.BackendHost, func(req, resp any) (any, bool) {
+		transformerCalled = true
+		return resp, false
+	})
+
+	resp, err := setup.Client.Get(setup.Backend.URL + "/data")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body)
+
+	if !transformerCalled {
+		t.Error("response transformer was not called")
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestIntercept_ResponseTransformer_NoMatch verifies that a transformer
+// registered for a different host does not affect other hosts.
+func TestIntercept_ResponseTransformer_NoMatch(t *testing.T) {
+	originalBody := `{"original":true}`
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, originalBody)
+	}))
+
+	setup.Proxy.AddResponseTransformer("other.example.com", func(req, resp any) (any, bool) {
+		t.Error("transformer called for wrong host")
+		return resp, false
+	})
+
+	resp, err := setup.Client.Get(setup.Backend.URL + "/data")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if string(body) != originalBody {
+		t.Errorf("body = %q, want %q (transformer should not apply)", string(body), originalBody)
+	}
+}
+
+// TestIntercept_SetTokenSubstitution verifies that the proxy-level
+// SetTokenSubstitution setter is wired into the intercept path.
+func TestIntercept_SetTokenSubstitution(t *testing.T) {
+	var receivedPath string
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		fmt.Fprint(w, "ok")
+	}))
+
+	setup.Proxy.SetTokenSubstitution(setup.BackendHost, "placeholder-token", "real-secret-value")
+
+	resp, err := setup.Client.Get(setup.Backend.URL + "/bot" + "placeholder-token" + "/getUpdates")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	resp.Body.Close()
+
+	if !strings.Contains(receivedPath, "real-secret-value") {
+		t.Errorf("path = %q, want real-secret-value substituted", receivedPath)
+	}
+	if strings.Contains(receivedPath, "placeholder-token") {
+		t.Errorf("path = %q, placeholder should have been replaced", receivedPath)
+	}
+}

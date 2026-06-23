@@ -3620,3 +3620,106 @@ func TestProxy_CaptureHeaders_AvailableInLogData(t *testing.T) {
 		t.Errorf("RequestHeaders[X-Workspace-Slug] = %q, want sneaky-plum", got)
 	}
 }
+
+// TestTunnel_ForwardsPlainHTTPS verifies that when the proxy has no CA
+// configured, a CONNECT request is forwarded as a raw TCP tunnel without
+// TLS interception.
+func TestTunnel_ForwardsPlainHTTPS(t *testing.T) {
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "tunneled")
+	}))
+	t.Cleanup(backend.Close)
+
+	p := NewProxy()
+	proxyServer := httptest.NewServer(p)
+	t.Cleanup(proxyServer.Close)
+
+	backendCAs := x509.NewCertPool()
+	backendCAs.AddCert(backend.Certificate())
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(mustParseURL(proxyServer.URL)),
+			TLSClientConfig: &tls.Config{RootCAs: backendCAs},
+		},
+	}
+
+	resp, err := client.Get(backend.URL + "/hello")
+	if err != nil {
+		t.Fatalf("GET through tunnel: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "tunneled" {
+		t.Errorf("body = %q, want %q", string(body), "tunneled")
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestTunnel_NetworkPolicyBlocked verifies that the network policy is enforced
+// even when no CA is set (tunnel mode).
+func TestTunnel_NetworkPolicyBlocked(t *testing.T) {
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "should not reach")
+	}))
+	t.Cleanup(backend.Close)
+
+	p := NewProxy()
+	p.SetNetworkPolicy("strict", nil, nil)
+	proxyServer := httptest.NewServer(p)
+	t.Cleanup(proxyServer.Close)
+
+	backendCAs := x509.NewCertPool()
+	backendCAs.AddCert(backend.Certificate())
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(mustParseURL(proxyServer.URL)),
+			TLSClientConfig: &tls.Config{RootCAs: backendCAs},
+		},
+	}
+
+	resp, err := client.Get(backend.URL + "/hello")
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Errorf("expected blocked response, got 200")
+	}
+}
+
+// TestTunnel_InvalidHostFormat verifies that a malformed CONNECT target
+// (missing port) returns a 400 Bad Request.
+func TestTunnel_InvalidHostFormat(t *testing.T) {
+	p := NewProxy()
+	proxyServer := httptest.NewServer(p)
+	t.Cleanup(proxyServer.Close)
+
+	conn, err := net.Dial("tcp", proxyServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+
+	fmt.Fprintf(conn, "CONNECT noporthost HTTP/1.1\r\nHost: noporthost\r\n\r\n")
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestNewTokenSubstitution verifies the exported constructor returns a usable substitution.
+func TestNewTokenSubstitution(t *testing.T) {
+	sub := NewTokenSubstitution("placeholder", "real")
+	if sub == nil {
+		t.Fatal("NewTokenSubstitution returned nil")
+	}
+}
