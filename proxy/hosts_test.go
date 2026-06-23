@@ -538,3 +538,38 @@ func TestMatchesPattern(t *testing.T) {
 		})
 	}
 }
+
+// TestParseAndMatchHostPattern exercises the exported wrappers for
+// parseHostPattern and matchesPattern.
+func TestParseAndMatchHostPattern(t *testing.T) {
+	cases := []struct {
+		pattern string
+		host    string
+		port    int
+		want    bool
+	}{
+		{"api.example.com", "api.example.com", 443, true},
+		{"api.example.com", "other.example.com", 443, false},
+		{"*.example.com", "sub.example.com", 443, true},
+		{"*.example.com", "example.com", 443, false},
+	}
+	for _, tc := range cases {
+		p := ParseHostPattern(tc.pattern)
+		got := MatchesHostPattern(p, tc.host, tc.port)
+		if got != tc.want {
+			t.Errorf("MatchesHostPattern(%q, %q, %d) = %v, want %v", tc.pattern, tc.host, tc.port, got, tc.want)
+		}
+	}
+}
+
+// TestRegisterGrantHosts verifies that registered grant hosts are retrievable.
+func TestRegisterGrantHosts(t *testing.T) {
+	RegisterGrantHosts("test-grant-coverage", []string{"coverage.example.com"})
+	hosts := GetHostsForGrant("test-grant-coverage")
+	if len(hosts) == 0 {
+		t.Fatal("GetHostsForGrant returned empty slice after RegisterGrantHosts")
+	}
+	if hosts[0] != "coverage.example.com" {
+		t.Errorf("hosts[0] = %q, want coverage.example.com", hosts[0])
+	}
+}

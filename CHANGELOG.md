@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.13.0 — 2026-06-23
+
+### Added
+
+- **HTTP/2 and gRPC support through TLS interception** — the CONNECT interception path now negotiates HTTP/2 via ALPN (`h2` advertised first, `http/1.1` as fallback); when a client negotiates h2 (e.g., a gRPC client), the inner `http.Server` handles the connection with `http2.ConfigureServer` for correct h2 framing, and the upstream transport switches to `http2.Transport` so requests are forwarded over h2 end-to-end; credential injection (arbitrary headers such as `x-modal-token-id` / `x-modal-token-secret`) works identically on h2 connections; HTTP/1.1 clients are unaffected — `http.Transport` is used unchanged when h2 is not negotiated ([#34](https://github.com/majorcontext/gatekeeper/pull/34))
+
 ## v0.12.0 — 2026-06-12
 
 ### Added
