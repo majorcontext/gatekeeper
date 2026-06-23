@@ -10,6 +10,16 @@ Gatekeeper is pre-1.0. The configuration schema and credential source interface 
 
 - **HTTP/2 and gRPC support through TLS interception** — the CONNECT interception path now negotiates HTTP/2 via ALPN (`h2` advertised first, `http/1.1` as fallback); when a client negotiates h2 (e.g., a gRPC client), the inner `http.Server` handles the connection with `http2.ConfigureServer` for correct h2 framing, and the upstream transport switches to `http2.Transport` so requests are forwarded over h2 end-to-end; credential injection (arbitrary headers such as `x-modal-token-id` / `x-modal-token-secret`) works identically on h2 connections; HTTP/1.1 clients are unaffected — `http.Transport` is used unchanged when h2 is not negotiated ([#34](https://github.com/majorcontext/gatekeeper/pull/34))
 
+## v0.13.0 — 2026-06-18
+
+### Added
+
+- **HTTP request body inspection in Keep policies** — http-scope Keep rules can now reference `params.body` to match on request body content (e.g. `params.body.model == 'gpt-4'`); the proxy buffers and JSON-parses the body, evaluates the rule, then restores `req.Body` so the upstream request is unchanged; zero overhead when no rule inspects the body (`RequiresBody` is false and the body is never touched); fail-closed: non-JSON content with a payload, malformed JSON, duplicate JSON keys, or bodies exceeding 10 MB are denied (403, `X-Moat-Blocked: keep-policy`); bodyless and empty requests pass through with `params.body == null` ([#33](https://github.com/majorcontext/gatekeeper/pull/33))
+
+### Changed
+
+- **`keep` upgraded v0.3.0 → v0.5.0** — `SafeEvaluate`, `Engine.Evaluate`, `llm.EvaluateResponse`, and `llm.EvaluateStream` now take a leading `context.Context`; all call sites in `proxy.go`, `mcp.go`, and `llmpolicy.go` updated to thread the request context through ([#33](https://github.com/majorcontext/gatekeeper/pull/33))
+
 ## v0.12.0 — 2026-06-12
 
 ### Added
