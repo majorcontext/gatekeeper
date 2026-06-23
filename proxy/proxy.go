@@ -372,6 +372,12 @@ type readCloserWrapper struct {
 // the captured data and a new ReadCloser that streams the full content.
 // For small bodies (<=MaxBodySize), the body is fully buffered.
 // For large bodies, only MaxBodySize is buffered; the rest streams through.
+//
+// captureBody does a blocking read-ahead, so it must only be used on bodies that
+// are already fully available — i.e. request bodies. For response bodies, which
+// may be produced incrementally (Server-Sent Events, ndjson, chunked JSON), use
+// capturingBody: a read-ahead there would withhold the response from the client
+// until MaxBodySize accumulated, starving streamed responses.
 func captureBody(body io.ReadCloser, contentType string) ([]byte, io.ReadCloser) {
 	if body == nil {
 		return nil, nil
@@ -405,6 +411,54 @@ func captureBody(body io.ReadCloser, contentType string) ([]byte, io.ReadCloser)
 	captured := captureBuf[:n]
 	fullBody := io.MultiReader(bytes.NewReader(captured), body)
 	return captured, &readCloserWrapper{Reader: fullBody, Closer: body}
+}
+
+// capturingBody wraps a response body, copying up to limit bytes into an
+// in-memory buffer as the body is read, then invoking onClose (if non-nil)
+// exactly once when the body is closed. Capture happens lazily as the downstream
+// consumer reads, so — unlike captureBody's read-ahead — it never blocks the
+// forwarding of a streamed response. Used for response-body logging on the
+// streaming proxy paths.
+//
+// Not safe for concurrent Read/Close; the proxy paths read the body to
+// completion and then close it, which is sequential.
+type capturingBody struct {
+	rc      io.ReadCloser
+	buf     bytes.Buffer
+	limit   int
+	onClose func(captured []byte)
+	closed  bool
+}
+
+func newCapturingBody(rc io.ReadCloser, limit int, onClose func(captured []byte)) *capturingBody {
+	return &capturingBody{rc: rc, limit: limit, onClose: onClose}
+}
+
+func (c *capturingBody) Read(p []byte) (int, error) {
+	n, err := c.rc.Read(p)
+	if n > 0 {
+		if room := c.limit - c.buf.Len(); room > 0 {
+			if room > n {
+				room = n
+			}
+			c.buf.Write(p[:room])
+		}
+	}
+	return n, err
+}
+
+// Captured returns the bytes buffered so far (up to limit).
+func (c *capturingBody) Captured() []byte { return c.buf.Bytes() }
+
+func (c *capturingBody) Close() error {
+	err := c.rc.Close()
+	if !c.closed {
+		c.closed = true
+		if c.onClose != nil {
+			c.onClose(c.buf.Bytes())
+		}
+	}
+	return err
 }
 
 // FilterHeaders creates a copy of headers with sensitive values filtered.
@@ -1832,44 +1886,35 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Forward request
 	resp, err := httpTransport.RoundTrip(outReq)
-	duration := time.Since(start)
 
-	// Capture response body and headers
-	var respBody []byte
-	var respHeaders http.Header
-	statusCode := http.StatusBadGateway
-	var responseSize int64 = -1
-	if resp != nil {
-		respHeaders = resp.Header.Clone()
-		respBody, resp.Body = captureBody(resp.Body, resp.Header.Get("Content-Type"))
-		statusCode = resp.StatusCode
-		responseSize = resp.ContentLength
-	}
-
-	p.logRequest(r, RequestLogData{
+	// Fields shared by the error and success log lines.
+	logData := RequestLogData{
 		Method:          r.Method,
 		URL:             r.URL.String(),
 		Host:            host,
 		Path:            r.URL.Path,
 		RequestType:     "http",
-		StatusCode:      statusCode,
-		Duration:        duration,
-		Err:             err,
 		RequestHeaders:  originalReqHeaders,
-		ResponseHeaders: respHeaders,
 		RequestBody:     reqBody,
-		ResponseBody:    respBody,
 		RequestSize:     r.ContentLength,
-		ResponseSize:    responseSize,
+		ResponseSize:    -1,
 		InjectedHeaders: credResult.InjectedHeaders,
 		Grants:          credResult.Grants,
-	})
+	}
 
 	if err != nil {
+		logData.StatusCode = http.StatusBadGateway
+		logData.Duration = time.Since(start)
+		logData.Err = err
+		p.logRequest(r, logData)
 		http.Error(w, "moat proxy: upstream request failed", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
+
+	logData.StatusCode = resp.StatusCode
+	logData.ResponseHeaders = resp.Header.Clone()
+	logData.ResponseSize = resp.ContentLength
 
 	for key, values := range resp.Header {
 		for _, value := range values {
@@ -1877,7 +1922,20 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+
+	// Stream to the client, capturing a bounded sample for logging without a
+	// blocking read-ahead (which would starve a streamed response). The log line
+	// is written after the body completes. Non-text bodies carry no useful
+	// sample, so they stream straight through.
+	if isTextContentType(resp.Header.Get("Content-Type")) {
+		cb := newCapturingBody(resp.Body, MaxBodySize, nil)
+		_, _ = io.Copy(w, cb)
+		logData.ResponseBody = cb.Captured()
+	} else {
+		_, _ = io.Copy(w, resp.Body)
+	}
+	logData.Duration = time.Since(start)
+	p.logRequest(r, logData)
 }
 
 func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
@@ -2334,9 +2392,6 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			if logURL == "" {
 				logURL = req.URL.String()
 			}
-			var respBody []byte
-			respBody, resp.Body = captureBody(resp.Body, resp.Header.Get("Content-Type"))
-
 			// Use pre-injection headers so credential values don't appear in logs.
 			preHeaders, _ := req.Context().Value(interceptPreInjHeadersKey{}).(http.Header)
 			if preHeaders == nil {
@@ -2344,7 +2399,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			}
 			reqBody, _ := req.Context().Value(interceptReqBodyKey{}).([]byte)
 
-			p.logRequest(r, RequestLogData{
+			logData := RequestLogData{
 				RequestID:       req.Header.Get("X-Request-Id"),
 				Method:          req.Method,
 				URL:             logURL,
@@ -2352,11 +2407,9 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				Path:            req.URL.Path,
 				RequestType:     "connect",
 				StatusCode:      resp.StatusCode,
-				Duration:        time.Since(reqStartFromContext(req.Context())),
 				RequestHeaders:  preHeaders,
 				ResponseHeaders: resp.Header.Clone(),
 				RequestBody:     reqBody,
-				ResponseBody:    respBody,
 				RequestSize:     req.ContentLength,
 				ResponseSize:    resp.ContentLength,
 				AuthInjected:    len(credResult.InjectedHeaders) > 0,
@@ -2364,7 +2417,31 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				Grants:          credResult.Grants,
 				Denied:          llmDenied,
 				DenyReason:      llmDenyReason,
-			})
+			}
+			reqStart := reqStartFromContext(req.Context())
+
+			// For text responses (SSE, ndjson, chunked JSON, …) defer the canonical
+			// log line until the body is read and closed, capturing a bounded sample
+			// as it streams. A blocking read-ahead here would withhold the status
+			// line and every chunk from the client until the sample filled, starving
+			// streamed responses and tripping the client's first-byte timeout.
+			//
+			// The deferred line is emitted exactly once: httputil.ReverseProxy
+			// closes the response body unconditionally (success and copy-error
+			// paths), so onClose always runs. Responses with no useful streamed
+			// sample are logged synchronously instead: non-text bodies, and protocol
+			// upgrades (101), whose body is the hijacked connection rather than a
+			// readable stream.
+			if isTextContentType(resp.Header.Get("Content-Type")) && resp.StatusCode != http.StatusSwitchingProtocols {
+				resp.Body = newCapturingBody(resp.Body, MaxBodySize, func(captured []byte) {
+					logData.ResponseBody = captured
+					logData.Duration = time.Since(reqStart)
+					p.logRequest(r, logData)
+				})
+			} else {
+				logData.Duration = time.Since(reqStart)
+				p.logRequest(r, logData)
+			}
 
 			return nil
 		},
