@@ -19,6 +19,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestProxy_ForwardsRequests(t *testing.T) {
@@ -1405,6 +1406,93 @@ func TestCaptureBody_NilBody(t *testing.T) {
 	}
 	if newBody != nil {
 		t.Errorf("newBody = %v, want nil", newBody)
+	}
+}
+
+// blockingBody delivers one initial chunk, then blocks on Read until released.
+// It mimics a streaming upstream that has emitted an early chunk (status line,
+// first record, keepalive ping) but not yet MaxBodySize bytes of body — e.g.
+// during a long time-to-first-token.
+type blockingBody struct {
+	first   []byte
+	sent    bool
+	release chan struct{}
+}
+
+func (b *blockingBody) Read(p []byte) (int, error) {
+	if !b.sent {
+		b.sent = true
+		return copy(p, b.first), nil
+	}
+	<-b.release
+	return 0, io.EOF
+}
+
+func (b *blockingBody) Close() error { return nil }
+
+// TestCapturingBody_StreamsAndCaptures verifies the full body passes through
+// while a bounded sample is captured, and onClose fires exactly once with it.
+func TestCapturingBody_StreamsAndCaptures(t *testing.T) {
+	full := strings.Repeat("a", MaxBodySize+500)
+	var got []byte
+	var calls int
+	cb := newCapturingBody(io.NopCloser(strings.NewReader(full)), MaxBodySize, func(c []byte) {
+		calls++
+		got = c
+	})
+
+	streamed, err := io.ReadAll(cb)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(streamed) != full {
+		t.Errorf("streamed %d bytes, want %d (body must pass through in full)", len(streamed), len(full))
+	}
+
+	if err := cb.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := cb.Close(); err != nil { // second close must not re-fire onClose
+		t.Fatalf("second close: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("onClose called %d times, want 1", calls)
+	}
+	if len(got) != MaxBodySize {
+		t.Errorf("captured %d bytes, want %d (bounded sample)", len(got), MaxBodySize)
+	}
+}
+
+// TestCapturingBody_NeverBlocksOnSlowStream is the regression guard for the
+// first-byte-timeout bug: a streamed body that delivers one record then blocks
+// must not trigger a read-ahead. capturingBody reads only what the consumer
+// requests, so the first record is available immediately — regardless of content
+// type. This uses a non-SSE stream (application/x-ndjson) to show the fix is not
+// keyed on a media-type allowlist.
+func TestCapturingBody_NeverBlocksOnSlowStream(t *testing.T) {
+	first := []byte(`{"chunk":1}` + "\n")
+	body := &blockingBody{first: first, release: make(chan struct{})}
+	defer close(body.release)
+	cb := newCapturingBody(body, MaxBodySize, nil)
+
+	done := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 64)
+		n, _ := cb.Read(buf)
+		done <- buf[:n]
+	}()
+
+	select {
+	case got := <-done:
+		if !bytes.Equal(got, first) {
+			t.Errorf("first read = %q, want %q", got, first)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("capturingBody.Read blocked instead of returning the available record")
+	}
+
+	if !bytes.Equal(cb.Captured(), first) {
+		t.Errorf("captured = %q, want %q", cb.Captured(), first)
 	}
 }
 

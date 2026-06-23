@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.14.1 — 2026-06-23
+
+### Fixed
+
+- **Streamed responses are no longer buffered during capture** — the response-body log sampler did a blocking read of up to `MaxBodySize` (8 KB) before forwarding, so any incrementally-produced text response (Server-Sent Events, `application/x-ndjson`, chunked JSON, …) had its status line and every chunk — including the keepalive pings an upstream sends during a long time-to-first-token — withheld from the client until 8 KB accumulated, or until the stream ended for responses under 8 KB. The client received nothing, tripped its first-byte timeout, and retried in a loop; most visibly on large or cache-cold LLM streaming requests (e.g. `/v1/messages`), which worked when sent directly (un-proxied). The sampler now captures text responses lazily via a non-blocking tee instead of a blocking read-ahead, so a slow or streamed response (SSE, ndjson, chunked JSON) is forwarded immediately rather than withheld. The canonical log line for a text response is now written when the body completes rather than when its headers arrive; non-text and non-streaming responses are unchanged. This does **not** apply to hosts with an `llm-gateway` Keep engine: response-policy evaluation reads the full body before forwarding, so streams on those hosts are still buffered end-to-end ([#37](https://github.com/majorcontext/gatekeeper/pull/37))
+
 ## v0.14.0 — 2026-06-23
 
 ### Added

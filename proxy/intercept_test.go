@@ -15,9 +15,30 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	keeplib "github.com/majorcontext/keep"
 )
+
+// captureLog installs a logger that records logged requests and returns a
+// function that waits for the next one. The canonical log line for a text
+// response is written when its body is closed (capture streams lazily), so
+// tests must wait for it rather than read a shared variable synchronously.
+func captureLog(t *testing.T, p *Proxy) func() RequestLogData {
+	t.Helper()
+	ch := make(chan RequestLogData, 8)
+	p.SetLogger(func(d RequestLogData) { ch <- d })
+	return func() RequestLogData {
+		t.Helper()
+		select {
+		case d := <-ch:
+			return d
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for canonical log line")
+			return RequestLogData{}
+		}
+	}
+}
 
 // interceptTestSetup creates a proxy with TLS interception enabled and an HTTPS
 // backend server. The proxy is configured to trust the backend's TLS cert and
@@ -110,17 +131,16 @@ func TestIntercept_CredentialInjectionCanonicalLog(t *testing.T) {
 
 	setup.Proxy.SetCredentialWithGrant(setup.BackendHost, "Authorization", "Bearer granted-token", "my-grant")
 
-	var logged RequestLogData
-	setup.Proxy.SetLogger(func(data RequestLogData) {
-		logged = data
-	})
+	waitLog := captureLog(t, setup.Proxy)
 
 	resp, err := setup.Client.Get(setup.Backend.URL + "/resource")
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
+	io.ReadAll(resp.Body)
 	resp.Body.Close()
 
+	logged := waitLog()
 	if !logged.AuthInjected {
 		t.Error("expected AuthInjected=true")
 	}
@@ -249,17 +269,16 @@ func TestIntercept_CanonicalLogFields(t *testing.T) {
 
 	setup.Proxy.SetCredentialWithGrant(setup.BackendHost, "Authorization", "Bearer tok", "test-grant")
 
-	var logged RequestLogData
-	setup.Proxy.SetLogger(func(data RequestLogData) {
-		logged = data
-	})
+	waitLog := captureLog(t, setup.Proxy)
 
 	resp, err := setup.Client.Get(setup.Backend.URL + "/some/path")
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
+	io.ReadAll(resp.Body)
 	resp.Body.Close()
 
+	logged := waitLog()
 	if logged.Method != "GET" {
 		t.Errorf("Method = %q, want GET", logged.Method)
 	}
@@ -625,10 +644,7 @@ func TestIntercept_CaptureHeaders_StrippedBeforeForwarding(t *testing.T) {
 
 	setup.Proxy.SetCaptureHeaders([]string{"X-Workspace-Slug", "X-Request-Source"})
 
-	var logged RequestLogData
-	setup.Proxy.SetLogger(func(data RequestLogData) {
-		logged = data
-	})
+	waitLog := captureLog(t, setup.Proxy)
 
 	req, _ := http.NewRequest("GET", setup.Backend.URL+"/test", nil)
 	req.Header.Set("X-Workspace-Slug", "sneaky-plum")
@@ -641,6 +657,7 @@ func TestIntercept_CaptureHeaders_StrippedBeforeForwarding(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	io.ReadAll(resp.Body)
+	logged := waitLog()
 
 	// Verify capture headers were stripped before forwarding.
 	if receivedHeaders.Get("X-Workspace-Slug") != "" {
@@ -769,10 +786,7 @@ func TestIntercept_UserID_ContextResolver(t *testing.T) {
 		return nil, false
 	})
 
-	var logged RequestLogData
-	setup.Proxy.SetLogger(func(data RequestLogData) {
-		logged = data
-	})
+	waitLog := captureLog(t, setup.Proxy)
 
 	// Rebuild the client with proxy auth credentials (user:token).
 	proxyURL := mustParseURL(setup.ProxyServer.URL)
@@ -793,6 +807,7 @@ func TestIntercept_UserID_ContextResolver(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	io.ReadAll(resp.Body)
+	logged := waitLog()
 
 	if logged.UserID != "alice" {
 		t.Errorf("UserID = %q, want %q (CONNECT path)", logged.UserID, "alice")
@@ -951,8 +966,7 @@ func TestIntercept_LLMPolicy_DeniedLogged(t *testing.T) {
 		}, true
 	})
 
-	var logged RequestLogData
-	p.SetLogger(func(data RequestLogData) { logged = data })
+	waitLog := captureLog(t, p)
 
 	proxyServer := httptest.NewServer(p)
 	t.Cleanup(proxyServer.Close)
@@ -979,6 +993,7 @@ func TestIntercept_LLMPolicy_DeniedLogged(t *testing.T) {
 	}
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
+	logged := waitLog()
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", resp.StatusCode)
