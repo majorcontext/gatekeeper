@@ -10,9 +10,9 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It sits 
 
 ## Key capabilities
 
-- **Credential injection** — Resolve credentials from environment variables, static values, AWS Secrets Manager, GCP Secret Manager, or GitHub App tokens, then inject them as HTTP headers for matching hosts.
+- **Credential injection** — Resolve credentials from environment variables, static values, host command output, AWS Secrets Manager, GCP Secret Manager, or GitHub App tokens, then inject them as HTTP headers for matching hosts.
 - **TLS interception** — Man-in-the-middle proxy with per-host certificate generation from a configured CA. The proxy terminates TLS, reads plaintext requests, injects credentials, and forwards to the real server.
-- **Multiple credential sources** — Pluggable backend system. Environment variables and static values for development. AWS Secrets Manager, GCP Secret Manager, and GitHub App tokens for production. RFC 8693 token exchange for multi-user deployments.
+- **Multiple credential sources** — Pluggable backend system. Environment variables, static values, and host commands (`process`) for development and local helpers. AWS Secrets Manager, GCP Secret Manager, and GitHub App tokens for production. RFC 8693 token exchange for multi-user deployments.
 - **Network policy** — Allow or deny traffic by host pattern. `permissive` mode allows all traffic. `strict` mode denies all traffic except explicitly allowed hosts.
 - **MCP relay** — Forward Model Context Protocol requests to upstream servers with credential injection and SSE streaming.
 - **Observability** — OpenTelemetry traces, metrics, and logs. Canonical log lines per request. Configured entirely via standard `OTEL_*` environment variables.
@@ -35,6 +35,7 @@ The client must trust the proxy's CA certificate. Generate one with the included
 |---|---|---|
 | Environment variable | `env` | Local development, CI |
 | Static value | `static` | Fixed API keys |
+| Process | `process` | Host command output (keychain CLIs, `op`, `credential_process` helpers); auto-refresh |
 | AWS Secrets Manager | `aws-secretsmanager` | AWS-hosted credentials |
 | GCP Secret Manager | `gcp-secretmanager` | GCP-hosted credentials |
 | GCP service account | `gcp-service-account` | Short-lived GCP access tokens with auto-refresh |

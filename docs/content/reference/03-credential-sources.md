@@ -1,6 +1,6 @@
 ---
 title: "Source types"
-description: "Reference for all credential source types including env, static, AWS Secrets Manager, GCP Secret Manager, GCP service accounts, GitHub App, and token exchange."
+description: "Reference for all credential source types including env, static, process, AWS Secrets Manager, GCP Secret Manager, GCP service accounts, GitHub App, and token exchange."
 keywords: ["gatekeeper", "credential sources", "source types", "configuration reference"]
 ---
 
@@ -14,13 +14,14 @@ Each credential entry in gatekeeper.yaml includes a `source` block that determin
 |------|-------------|---------|
 | `env` | Read from an environment variable | No |
 | `static` | Literal inline value | No |
+| `process` | Run a host command, use its stdout | Yes (auto-refresh; expiry read from `credential_process`-format JSON, else fixed interval) |
 | `aws-secretsmanager` | Fetch from AWS Secrets Manager | No |
 | `gcp-secretmanager` | Fetch from GCP Secret Manager | No |
 | `gcp-service-account` | Mint GCP OAuth2 access token from a service account key | Yes (auto-refresh before expiry) |
 | `github-app` | Generate GitHub App installation token | Yes (auto-refresh before expiry) |
 | `token-exchange` | RFC 8693 token exchange | Yes (per-request, cached with TTL) |
 
-Sources marked **Refresh: Yes** have credentials that expire. `github-app` and `gcp-service-account` implement background credential refresh — gatekeeper re-fetches at 75% of TTL (minimum 30 seconds) and hot-swaps without downtime. `token-exchange` uses per-request lazy caching: on cache miss, gatekeeper calls the STS and caches the result for the token's TTL.
+Sources marked **Refresh: Yes** have credentials that expire. `process`, `github-app`, and `gcp-service-account` implement background credential refresh — gatekeeper re-fetches at 75% of TTL (minimum 30 seconds) and hot-swaps without downtime. `token-exchange` uses per-request lazy caching: on cache miss, gatekeeper calls the STS and caches the result for the token's TTL.
 
 ---
 
@@ -70,6 +71,53 @@ The credential value.
 - **Default:** —
 
 > **Note:** Avoid committing secrets in config files. Prefer `env` or a secret manager source for production deployments.
+
+---
+
+## process
+
+Run a host command and use its stdout as the credential value. Any helper
+that prints a credential works: OS keychain CLIs, `pass`, 1Password's `op`,
+or an AWS `credential_process` helper.
+
+```yaml
+credentials:
+  - host: api.example.com
+    header: x-api-key
+    source:
+      type: process
+      command: "op read op://vault/example/api-key"
+```
+
+### command
+
+Shell command to run with `sh -c`. Stdout (trimmed) becomes the credential
+value.
+
+- **Type:** `string`
+- **Required:** Yes
+- **Default:** —
+
+### Behavior
+
+- **Expiry-aware refresh.** When stdout is AWS `credential_process`-format
+  JSON with an `Expiration` field (RFC 3339), the credential refreshes on
+  that expiry (at 75% of the remaining lifetime, like other refreshing
+  sources). The JSON is passed through as the credential value; consumers
+  that need the individual fields parse it themselves. Output without expiry
+  information refreshes every 5 minutes.
+- **Sanitization.** Control characters that are invalid in HTTP header
+  values (RFC 7230) are stripped, with a warning logged (count only — the
+  value is never logged).
+- **Failures.** A non-zero exit fails the fetch; stderr is included in the
+  error (truncated) so helper failures such as an expired SSO session are
+  diagnosable. Empty output is an error. Failed refreshes retry with the
+  standard backoff.
+
+> **Security:** The command runs on the host with gatekeeper's privileges.
+> Only configure commands you trust, from config files you own. Embedding
+> operators (like moat) must not accept this field from repository-controlled
+> config.
 
 ---
 

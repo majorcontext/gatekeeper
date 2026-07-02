@@ -611,3 +611,41 @@ func TestResolveSourceTokenExchangeExtraneousFields(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveSourceProcess(t *testing.T) {
+	src, err := ResolveSource(SourceConfig{Type: "process", Command: "printf 'proc-token'"})
+	if err != nil {
+		t.Fatalf("ResolveSource() error: %v", err)
+	}
+	if src.Type() != "process" {
+		t.Fatalf("Type() = %q, want %q", src.Type(), "process")
+	}
+	val, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch() error: %v", err)
+	}
+	if val != "proc-token" {
+		t.Fatalf("Fetch() = %q, want %q", val, "proc-token")
+	}
+}
+
+func TestResolveSourceProcessMissingCommand(t *testing.T) {
+	_, err := ResolveSource(SourceConfig{Type: "process"})
+	if err == nil {
+		t.Fatal("expected error for missing command field, got nil")
+	}
+}
+
+func TestResolveSourceProcessExtraneousField(t *testing.T) {
+	_, err := ResolveSource(SourceConfig{Type: "process", Command: "printf x", Var: "SOME_VAR"})
+	if err == nil {
+		t.Fatal("expected error for extraneous field on process source, got nil")
+	}
+}
+
+func TestResolveSourceEnvRejectsCommandField(t *testing.T) {
+	_, err := ResolveSource(SourceConfig{Type: "env", Var: "SOME_VAR", Command: "printf x"})
+	if err == nil {
+		t.Fatal("expected error: env source must reject the process-only command field")
+	}
+}

@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## Unreleased
+
+### Added
+
+- **`process` credential source** — run a host command (`sh -c`) and use its stdout as the credential value; any helper that prints a credential works (OS keychain CLIs, `pass`, 1Password's `op`, AWS `credential_process` helpers). Implements `RefreshingSource`: when the output is AWS `credential_process`-format JSON, the credential refreshes on the embedded `Expiration` (at the standard 75%-of-TTL schedule); other output refreshes every 5 minutes. Header-invalid control characters are stripped from the output (logged as a count, never the value); stderr is included (truncated) in fetch errors for diagnosability, stdout never; the command string is config-owned and must not be accepted from untrusted config by embedding operators ([#NNN](https://github.com/majorcontext/gatekeeper/pull/NNN))
+
 ## v0.14.1 — 2026-06-23
 
 ### Fixed
