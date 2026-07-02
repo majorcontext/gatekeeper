@@ -14,7 +14,7 @@ Each credential entry in gatekeeper.yaml includes a `source` block that determin
 |------|-------------|---------|
 | `env` | Read from an environment variable | No |
 | `static` | Literal inline value | No |
-| `process` | Run a host command, use its stdout | Yes (auto-refresh; expiry read from `credential_process`-format JSON, else fixed interval) |
+| `process` | Run a host command, use its stdout | Yes (auto-refresh; expiry read from `credential_process`-format JSON, else configurable `ttl`) |
 | `aws-secretsmanager` | Fetch from AWS Secrets Manager | No |
 | `gcp-secretmanager` | Fetch from GCP Secret Manager | No |
 | `gcp-service-account` | Mint GCP OAuth2 access token from a service account key | Yes (auto-refresh before expiry) |
@@ -98,17 +98,36 @@ value.
 - **Required:** Yes
 - **Default:** —
 
+### ttl
+
+Refresh interval when the command output carries no expiry information, as
+a Go duration (`90s`, `30m`, `12h`). Must be positive.
+
+- **Type:** `string`
+- **Required:** No
+- **Default:** `5m`
+
+Like all refreshing sources, gatekeeper re-fetches at 75% of TTL (floor 30
+seconds), so the default re-runs the command every 3m45s. Set a longer
+`ttl` for helpers that are expensive or interactive (biometric prompts,
+rate limits) and serve values that rarely change.
+
 ### Behavior
 
 - **Expiry-aware refresh.** When stdout is AWS `credential_process`-format
-  JSON with an `Expiration` field (RFC 3339), the credential refreshes on
-  that expiry (at 75% of the remaining lifetime, like other refreshing
-  sources). The JSON is passed through as the credential value; consumers
-  that need the individual fields parse it themselves. Output without expiry
-  information refreshes every 5 minutes.
+  JSON — recognized by its exact-case `Version`, `AccessKeyId`, and
+  `Expiration` (RFC 3339) keys — the credential refreshes on that expiry,
+  and `ttl` is ignored. The JSON is passed through as the credential value;
+  consumers that need the individual fields parse it themselves. Other JSON
+  output is treated as an opaque credential and refreshes on `ttl`.
+- **Expired output is an error.** If the reported `Expiration` is already
+  in the past, the fetch fails (with the timestamp in the error) instead of
+  installing credentials that would be rejected upstream; the standard
+  retry backoff applies.
 - **Sanitization.** Control characters that are invalid in HTTP header
-  values (RFC 7230) are stripped, with a warning logged (count only — the
-  value is never logged).
+  values (RFC 7230) are stripped. A warning is logged (count only — the
+  value is never logged) when non-whitespace control bytes were present;
+  trailing newlines and pretty-printed JSON are normal and do not warn.
 - **Failures.** A non-zero exit fails the fetch; stderr is included in the
   error (truncated) so helper failures such as an expired SSO session are
   diagnosable. Empty output is an error. Failed refreshes retry with the

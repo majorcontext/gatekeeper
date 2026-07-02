@@ -1,8 +1,10 @@
 package credentialsource
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -33,15 +35,81 @@ func TestProcessSourceTTLFromSTSExpiration(t *testing.T) {
 	}
 }
 
-func TestProcessSourceTTLExpiredCredential(t *testing.T) {
+func TestProcessSourceExpiredCredentialIsError(t *testing.T) {
+	// Installing known-expired credentials would 401 every request for a
+	// full refresh interval; failing the fetch engages the refresh loop's
+	// backoff instead.
 	exp := time.Now().Add(-time.Minute)
+	src := NewProcessSource("printf '%s' '"+stsOutput(exp)+"'", 0)
+
+	_, err := src.Fetch(context.Background())
+	if err == nil {
+		t.Fatal("expected error for already-expired credentials, got nil")
+	}
+	if !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("error should say the credentials are expired, got: %v", err)
+	}
+}
+
+func TestProcessSourceNearExpiryStillServes(t *testing.T) {
+	exp := time.Now().Add(2 * time.Minute)
 	src := NewProcessSource("printf '%s' '"+stsOutput(exp)+"'", 0)
 
 	if _, err := src.Fetch(context.Background()); err != nil {
 		t.Fatalf("Fetch() error: %v", err)
 	}
-	if ttl := src.TTL(); ttl != 0 {
-		t.Fatalf("TTL() = %v, want 0 for already-expired credential (forces immediate refresh)", ttl)
+	if ttl := src.TTL(); ttl <= time.Minute || ttl > 2*time.Minute {
+		t.Fatalf("TTL() = %v, want ~2m for near-expiry credential", ttl)
+	}
+}
+
+func TestProcessSourceIgnoresNonCredentialProcessJSON(t *testing.T) {
+	// encoding/json matches field names case-insensitively, so without a
+	// format check any JSON containing an unrelated expiration field would
+	// hijack the refresh schedule.
+	src := NewProcessSource(`printf '{"token": "abc", "expiration": "2020-01-01T00:00:00Z"}'`, 0)
+
+	if _, err := src.Fetch(context.Background()); err != nil {
+		t.Fatalf("Fetch() error: %v", err)
+	}
+	if ttl := src.TTL(); ttl != DefaultProcessTTL {
+		t.Fatalf("TTL() = %v, want default %v: expiry sniffing must require credential_process shape", ttl, DefaultProcessTTL)
+	}
+}
+
+// captureLogs redirects slog's default logger to a buffer for the test.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+func TestProcessSourceNoWarningForWhitespace(t *testing.T) {
+	// Virtually every CLI ends stdout with \n, and pretty-printed JSON has
+	// interior newlines; neither means the helper is emitting garbage.
+	logs := captureLogs(t)
+	src := NewProcessSource(`printf '{\n  "Version": 1,\n  "AccessKeyId": "A",\n  "SecretAccessKey": "s"\n}\n'`, 0)
+
+	if _, err := src.Fetch(context.Background()); err != nil {
+		t.Fatalf("Fetch() error: %v", err)
+	}
+	if strings.Contains(logs.String(), "control characters") {
+		t.Fatalf("whitespace-only stripping must not warn; logs: %s", logs.String())
+	}
+}
+
+func TestProcessSourceWarnsOnGarbageControlChars(t *testing.T) {
+	logs := captureLogs(t)
+	src := NewProcessSource(`printf 'tok\aen'`, 0)
+
+	if _, err := src.Fetch(context.Background()); err != nil {
+		t.Fatalf("Fetch() error: %v", err)
+	}
+	if !strings.Contains(logs.String(), "control characters") {
+		t.Fatalf("non-whitespace control bytes should warn; logs: %s", logs.String())
 	}
 }
 

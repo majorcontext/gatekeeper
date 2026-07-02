@@ -81,6 +81,7 @@ type SourceConfig struct {
 	Var     string `yaml:"var,omitempty"`     // for env source
 	Value   string `yaml:"value,omitempty"`   // for static source
 	Command string `yaml:"command,omitempty"` // for process source: host command run with `sh -c`
+	TTL     string `yaml:"ttl,omitempty"`     // for process source: refresh interval when output has no expiry (Go duration, default 5m)
 	Secret  string `yaml:"secret,omitempty"`  // for aws-secretsmanager, gcp-secretmanager; for gcp-service-account, the secret holding the key JSON
 	Region  string `yaml:"region,omitempty"`  // for aws-secretsmanager
 	Project string `yaml:"project,omitempty"` // for gcp-secretmanager, gcp-service-account
