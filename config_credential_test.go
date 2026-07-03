@@ -9,7 +9,9 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestResolveSourceEnv(t *testing.T) {
@@ -598,6 +600,8 @@ func TestResolveSourceTokenExchangeExtraneousFields(t *testing.T) {
 		{"with installation_id", SourceConfig{Type: "token-exchange", Endpoint: "http://x", ClientID: "gk", ClientSecretEnv: "TEST_TE_SECRET2", SubjectHeader: "X-S", InstallationID: "extra"}},
 		{"with private_key_path", SourceConfig{Type: "token-exchange", Endpoint: "http://x", ClientID: "gk", ClientSecretEnv: "TEST_TE_SECRET2", SubjectHeader: "X-S", PrivateKeyPath: "extra"}},
 		{"with private_key_env", SourceConfig{Type: "token-exchange", Endpoint: "http://x", ClientID: "gk", ClientSecretEnv: "TEST_TE_SECRET2", SubjectHeader: "X-S", PrivateKeyEnv: "extra"}},
+		{"with command", SourceConfig{Type: "token-exchange", Endpoint: "http://x", ClientID: "gk", ClientSecretEnv: "TEST_TE_SECRET2", SubjectHeader: "X-S", Command: "extra"}},
+		{"with ttl", SourceConfig{Type: "token-exchange", Endpoint: "http://x", ClientID: "gk", ClientSecretEnv: "TEST_TE_SECRET2", SubjectHeader: "X-S", TTL: "90s"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -609,5 +613,81 @@ func TestResolveSourceTokenExchangeExtraneousFields(t *testing.T) {
 				t.Fatal("expected error for extraneous fields")
 			}
 		})
+	}
+}
+
+func TestResolveSourceProcess(t *testing.T) {
+	src, err := ResolveSource(SourceConfig{Type: "process", Command: "printf 'proc-token'"})
+	if err != nil {
+		t.Fatalf("ResolveSource() error: %v", err)
+	}
+	if src.Type() != "process" {
+		t.Fatalf("Type() = %q, want %q", src.Type(), "process")
+	}
+	val, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch() error: %v", err)
+	}
+	if val != "proc-token" {
+		t.Fatalf("Fetch() = %q, want %q", val, "proc-token")
+	}
+}
+
+func TestResolveSourceProcessTTL(t *testing.T) {
+	src, err := ResolveSource(SourceConfig{Type: "process", Command: "printf 'proc-token'", TTL: "90s"})
+	if err != nil {
+		t.Fatalf("ResolveSource() error: %v", err)
+	}
+	if _, err := src.Fetch(context.Background()); err != nil {
+		t.Fatalf("Fetch() error: %v", err)
+	}
+	rs, ok := src.(interface{ TTL() time.Duration })
+	if !ok {
+		t.Fatal("process source should implement RefreshingSource")
+	}
+	if got := rs.TTL(); got != 90*time.Second {
+		t.Fatalf("TTL() = %v, want configured 90s", got)
+	}
+}
+
+func TestResolveSourceProcessInvalidTTL(t *testing.T) {
+	for _, ttl := range []string{"banana", "-5s", "0s"} {
+		t.Run(ttl, func(t *testing.T) {
+			_, err := ResolveSource(SourceConfig{Type: "process", Command: "printf x", TTL: ttl})
+			if err == nil {
+				t.Fatalf("expected error for ttl %q, got nil", ttl)
+			}
+			if !strings.Contains(err.Error(), "ttl") {
+				t.Fatalf("error should mention ttl, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestResolveSourceEnvRejectsTTLField(t *testing.T) {
+	_, err := ResolveSource(SourceConfig{Type: "env", Var: "SOME_VAR", TTL: "90s"})
+	if err == nil {
+		t.Fatal("expected error: env source must reject the process-only ttl field")
+	}
+}
+
+func TestResolveSourceProcessMissingCommand(t *testing.T) {
+	_, err := ResolveSource(SourceConfig{Type: "process"})
+	if err == nil {
+		t.Fatal("expected error for missing command field, got nil")
+	}
+}
+
+func TestResolveSourceProcessExtraneousField(t *testing.T) {
+	_, err := ResolveSource(SourceConfig{Type: "process", Command: "printf x", Var: "SOME_VAR"})
+	if err == nil {
+		t.Fatal("expected error for extraneous field on process source, got nil")
+	}
+}
+
+func TestResolveSourceEnvRejectsCommandField(t *testing.T) {
+	_, err := ResolveSource(SourceConfig{Type: "env", Var: "SOME_VAR", Command: "printf x"})
+	if err == nil {
+		t.Fatal("expected error: env source must reject the process-only command field")
 	}
 }

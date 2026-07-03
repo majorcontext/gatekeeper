@@ -81,6 +81,16 @@ source:
   value: "Bearer sk-..."
 ```
 
+### Process
+
+Runs a host command and uses its stdout as the credential. If the output is AWS `credential_process`-format JSON with an `Expiration`, the credential refreshes automatically on that expiry.
+
+```yaml
+source:
+  type: process
+  command: "op read op://vault/example/api-key"
+```
+
 ### AWS Secrets Manager
 
 ```yaml

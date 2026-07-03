@@ -34,6 +34,7 @@ type CredentialSource interface {
 
 | Source | Config | Behavior |
 |---|---|---|
+| `process` | `command: "op read op://vault/item/field"` | Runs a host command, uses its stdout |
 | `aws-secretsmanager` | `secret: my-secret`, `region: us-east-1` | Fetches from AWS Secrets Manager |
 | `gcp-secretmanager` | `secret: my-secret`, `project: my-project` | Fetches from GCP Secret Manager |
 | `gcp-service-account` | key location, `scopes` | Mints GCP OAuth2 access tokens from a service account key |
@@ -56,7 +57,7 @@ type RefreshingSource interface {
 - **Failure backoff.** On fetch failure, gatekeeper retries with exponential backoff starting at 1 second, doubling each attempt, capped at 60 seconds. A random jitter (up to 25% of the backoff) is added to prevent thundering herds.
 - **Hot-swap.** Refreshed credentials are applied to the proxy immediately via `SetCredentialWithGrant`. In-flight requests use the previous value; subsequent requests use the new one.
 
-The `github-app` and `gcp-service-account` sources are `RefreshingSource`s. Both produce tokens that expire after one hour, so gatekeeper refreshes them every 45 minutes.
+The `github-app` and `gcp-service-account` sources are `RefreshingSource`s. Both produce tokens that expire after one hour, so gatekeeper refreshes them every 45 minutes. The `process` source is also a `RefreshingSource`: when its command output is AWS `credential_process`-format JSON, TTL is the time until the embedded `Expiration`; otherwise it reports a fixed interval (`ttl` in the source config, default 5 minutes).
 
 ## Source Deduplication
 
