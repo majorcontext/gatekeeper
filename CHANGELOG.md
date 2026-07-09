@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## Unreleased
+
+### Fixed
+
+- **A client placeholder no longer selects the wrong credential, and the canonical log line no longer over-reports grants** — `injectCredentials`' placeholder pass tested `req.Header.Get(c.Name)` *after* earlier iterations had already written that header, so when several credentials for a host shared a header name and the client sent a placeholder for it, every same-named credential passed the "client sent this" check. Three consequences: the last credential in config order silently won the wire regardless of which grant the placeholder meant to select; `Grants` recorded every same-named credential as injected, so audit logs named credentials that never left the proxy; and `Injected` (used for cache invalidation since v0.15.0) listed credentials the destination never saw. Client-sent headers are now sampled once, before any injection, and exactly one credential is chosen per header name by a tie-break that does not depend on config order. **Behavior change:** the two selection paths break the tie in opposite directions — auto-injection still prefers a non-`claude` grant, while placeholder selection now prefers `claude`, since the claude grant is Claude Code's OAuth flow and a client that explicitly sends the header is asking for exactly it. Previously a placeholder could never reliably select it ([#40](https://github.com/majorcontext/gatekeeper/issues/40))
+
 ## v0.15.0 — 2026-07-09
 
 ### Added
