@@ -102,6 +102,15 @@ go vet ./...
 go build -o gatekeeper ./cmd/gatekeeper/
 ```
 
+## Testing
+
+Always work test-first. Write the test, run it and confirm it fails, then write the implementation and confirm it passes. This holds even for small bug fixes where the fix looks obvious — a test written after the fix can pass without ever having demonstrated the bug. The failing run is the evidence that the test is testing something.
+
+- **Confirm the test fails for the right reason.** Prefer a failure that demonstrates the defect over one that is merely a compile error. If asserting against a not-yet-existing constant would only produce `undefined: X`, pin the expected value in the test instead, so it compiles and fails on behavior. A red state of `cached TTL = 7h56m12s, want <= 1m0s` names the bug; `undefined: maxTokenTTL` does not.
+- **If you wrote the fix first, back it out.** `git checkout -- <file>`, write the test, watch it fail, then re-apply.
+- **When a clean red is impossible** — adding a new struct field or method makes the compile error unavoidable — mutation-check afterward: neuter the implementation (make the new method a no-op), confirm the test fails, restore. This catches tests that pass vacuously.
+- **Regression tests should encode the incident.** Name the real values from the bug report in the test, so the failure output reads like the original symptom.
+
 ## Code Style
 
 - Follow standard Go conventions and `go fmt` formatting

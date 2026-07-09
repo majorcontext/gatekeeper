@@ -129,13 +129,16 @@ When `actor_token_from` is configured on any credential, gatekeeper requires all
 
 Gatekeeper caches tokens per `(subject_token, actor_token)` pair:
 
-- If `expires_in` is returned by the STS, the token is cached until expiry.
-- If `expires_in` is `0` or omitted, a default TTL of 5 minutes is applied.
+- If `expires_in` is returned by the STS, the token is cached until expiry, **capped at 1 minute**.
+- If `expires_in` is `0` or omitted, the cap is used.
 - Concurrent requests for the same subject are coalesced into a single STS call via singleflight.
 - Expired entries are evicted lazily on the next exchange.
 - There is no proactive refresh. When a cached token expires, the next request triggers a new exchange.
+- When the destination rejects an injected credential with `401` or `403`, the cache entry is dropped so the next request exchanges afresh. The failed request is **not** retried. Evictions are rate-limited to one per key per 10 seconds.
 
-For high-throughput scenarios, set `expires_in` to a reasonable TTL (e.g., `3600` for one hour) to avoid per-request STS calls.
+The cap exists because a long `expires_in` only means the token *may* live that long, not that it stays valid. The upstream credential behind the exchange can be revoked, rotated, or re-authorized at any moment, and gatekeeper has no way to learn of it. Honoring a multi-hour `expires_in` meant a rotated credential kept being injected — and kept being rejected — for hours.
+
+A consequence: `expires_in` values above the cap no longer reduce STS request volume. Sizing the STS for roughly one exchange per subject per minute is the safe assumption.
 
 ## STS Endpoint Requirements
 
@@ -168,7 +171,7 @@ grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_tok
 | `access_token`      | string | Yes      | The token gatekeeper injects upstream                |
 | `issued_token_type` | string | No       | Token type URI of the issued token                   |
 | `token_type`        | string | No       | Informational; gatekeeper uses its own prefix config |
-| `expires_in`        | int    | No       | TTL in seconds. Defaults to 300 if omitted           |
+| `expires_in`        | int    | No       | TTL in seconds, capped at 60. Defaults to the cap if omitted |
 
 `access_token` must be non-empty. Gatekeeper treats an empty value as an error.
 
@@ -194,7 +197,7 @@ Gatekeeper treats any non-200 status as a failure and returns HTTP 502 to the cl
 - [ ] Read `resource` if present -- the target API
 - [ ] Look up or mint an access token for the given subject and resource
 - [ ] Return JSON with a non-empty `access_token`
-- [ ] Set `expires_in` to enable caching
+- [ ] Set `expires_in` to enable caching (values above 60s are capped)
 - [ ] Return non-200 for invalid/expired/unknown subjects
 - [ ] Handle concurrent requests (idempotency or internal locking)
 - [ ] *(Optional)* Validate `actor_token` against `subject_token` to prevent impersonation

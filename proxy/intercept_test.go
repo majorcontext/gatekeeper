@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -121,6 +122,86 @@ func TestIntercept_CredentialInjection(t *testing.T) {
 	}
 	if receivedAuth != "Bearer test-token-123" {
 		t.Errorf("Authorization = %q, want %q", receivedAuth, "Bearer test-token-123")
+	}
+}
+
+// A destination that rejects an injected credential is the only signal
+// gatekeeper gets that a cached token has gone stale (the upstream credential
+// behind it was rotated or re-authorized). Without this, the proxy keeps
+// injecting the dead token until its cache entry expires on its own.
+func TestIntercept_UpstreamAuthFailureInvalidatesCredential(t *testing.T) {
+	tests := []struct {
+		name            string
+		status          int
+		wantInvalidated bool
+	}{
+		{"unauthorized", http.StatusUnauthorized, true},
+		{"forbidden", http.StatusForbidden, true},
+		{"success", http.StatusOK, false},
+		{"server error", http.StatusInternalServerError, false},
+		{"not found", http.StatusNotFound, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				w.Write([]byte("body"))
+			}))
+
+			var invalidated atomic.Int32
+			setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+				return []credentialHeader{{
+					Name:       "Authorization",
+					Value:      "Bearer stale-token",
+					Grant:      "github-user",
+					Invalidate: func() { invalidated.Add(1) },
+				}}, nil
+			})
+
+			// /info/refs is the first request of the git push protocol, and where
+			// the reported 403 surfaced.
+			resp, err := setup.Client.Get(setup.Backend.URL + "/meetneptune/web.git/info/refs")
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			defer resp.Body.Close()
+			io.ReadAll(resp.Body)
+
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.status)
+			}
+
+			got := invalidated.Load()
+			want := int32(0)
+			if tc.wantInvalidated {
+				want = 1
+			}
+			if got != want {
+				t.Errorf("Invalidate called %d times, want %d (upstream returned %d)", got, want, tc.status)
+			}
+		})
+	}
+}
+
+// A credential with no Invalidate hook (a static header, say) must not crash
+// the response path when the upstream rejects it.
+func TestIntercept_UpstreamAuthFailureWithoutInvalidateHook(t *testing.T) {
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+
+	setup.Proxy.SetCredentialWithGrant(setup.BackendHost, "Authorization", "Bearer static", "static-grant")
+
+	resp, err := setup.Client.Get(setup.Backend.URL + "/x")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
 	}
 }
 

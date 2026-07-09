@@ -64,7 +64,7 @@ A JSON response per [RFC 8693 §2.2.1](https://datatracker.ietf.org/doc/html/rfc
 | `access_token`      | string | **Yes**  | The token gatekeeper injects into the upstream request            |
 | `issued_token_type` | string | No       | Token type URI of the issued token                                |
 | `token_type`        | string | No       | How the token should be used (informational; gatekeeper uses its own prefix config) |
-| `expires_in`        | int    | No       | TTL in seconds. Gatekeeper caches the token per subject until expiry. If omitted, the token is not cached (re-exchanged on every request). |
+| `expires_in`        | int    | No       | TTL in seconds. Gatekeeper caches the token per subject until expiry, capped at 1 minute. If omitted, the cap is used. |
 
 **Important:** `access_token` must be non-empty. Gatekeeper treats an empty `access_token` as an error.
 
@@ -87,11 +87,12 @@ Use standard OAuth error responses for debugging clarity:
 
 Gatekeeper caches tokens per `(subject_token, actor_token)` pair within each credential source instance:
 
-- If `expires_in` is provided, the token is cached until expiry. No refresh is attempted — when the cache entry expires, the next request triggers a new exchange.
-- If `expires_in` is `0` or omitted, a default TTL of 5 minutes is applied.
+- If `expires_in` is provided, the token is cached until expiry, capped at 1 minute. No refresh is attempted — when the cache entry expires, the next request triggers a new exchange.
+- If `expires_in` is `0` or omitted, the cap is used.
 - There is no proactive refresh or sliding window. Expired entries are replaced on the next request.
+- A `401` or `403` from the destination drops the cache entry, so the next request exchanges afresh. Evictions are rate-limited to one per key per 10 seconds.
 
-For high-throughput scenarios, set `expires_in` to a reasonable TTL (e.g., 3600 for one hour) to avoid per-request STS calls.
+The cap bounds how long a rotated or revoked upstream credential keeps being injected. Because of it, an `expires_in` above 60 seconds does not reduce STS request volume — size the endpoint for roughly one exchange per subject per minute.
 
 ## Gatekeeper Configuration Reference
 
@@ -213,7 +214,7 @@ By default, `actor_token_type` is `urn:ietf:params:oauth:token-type:access_token
 - [ ] Read `resource` if present — this identifies the target API the token will be used against
 - [ ] Look up or mint an access token for the given subject and resource
 - [ ] Return a JSON response with at minimum `access_token` (non-empty string)
-- [ ] Set `expires_in` to enable client-side caching and reduce request volume
+- [ ] Set `expires_in` to enable client-side caching (gatekeeper caps it at 60s)
 - [ ] Return non-200 with an error body for invalid/expired/unknown subjects
 - [ ] Handle concurrent requests for the same subject (idempotency or internal locking)
 - [ ] *(Optional)* Validate `actor_token` against `subject_token` to prevent impersonation (see [Preventing Subject Impersonation](#preventing-subject-impersonation))

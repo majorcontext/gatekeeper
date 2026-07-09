@@ -516,6 +516,15 @@ type credentialHeader struct {
 	Name  string // Header name (e.g., "Authorization", "x-api-key")
 	Value string // Header value (e.g., "Bearer token", "sk-ant-...")
 	Grant string // Grant name for logging (e.g., "github", "anthropic")
+
+	// Invalidate, when non-nil, drops whatever cached state produced Value so
+	// the next request re-resolves it. The proxy calls it when the destination
+	// rejects the credential (401/403), which usually means the credential was
+	// rotated or re-authorized upstream and the cached copy is stale. Sources
+	// are expected to rate-limit their own evictions: a 403 does not reliably
+	// distinguish a stale credential from an authorized-but-forbidden request.
+	// Nil for credentials with no cache behind them (e.g. static headers).
+	Invalidate func()
 }
 
 // extraHeader holds an additional header to inject for a host.
@@ -1237,6 +1246,32 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 	return p.getCredentials(host), nil
 }
 
+// invalidateCredentialsOnAuthFailure drops the cached state behind each
+// injected credential when the destination rejected it. A 401 or 403 is the
+// only signal gatekeeper gets that a credential resolved from a cache has gone
+// stale — the upstream credential behind it was rotated or re-authorized while
+// the cache entry was still live. Without this, the proxy keeps injecting the
+// dead credential until the entry expires on its own, which can be hours.
+//
+// This is deliberately evict-only: the failed request is not retried. Its body
+// has already been consumed by the time the response arrives, and the requests
+// that surface this (a git push, say) are not idempotent. The next request
+// re-resolves and succeeds.
+//
+// Statuses other than 401/403 are left alone; a 5xx says nothing about the
+// credential. Sources rate-limit their own evictions, since a 403 also covers
+// rate limits and genuinely-forbidden requests.
+func invalidateCredentialsOnAuthFailure(creds []credentialHeader, statusCode int) {
+	if statusCode != http.StatusUnauthorized && statusCode != http.StatusForbidden {
+		return
+	}
+	for _, cred := range creds {
+		if cred.Invalidate != nil {
+			cred.Invalidate()
+		}
+	}
+}
+
 // getExtraHeadersForRequest returns extra headers for a host, checking
 // RunContextData first, then falling back to the proxy's own map.
 func (p *Proxy) getExtraHeadersForRequest(r *http.Request, host string) []extraHeader {
@@ -1912,6 +1947,8 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	invalidateCredentialsOnAuthFailure(creds, resp.StatusCode)
+
 	logData.StatusCode = resp.StatusCode
 	logData.ResponseHeaders = resp.Header.Clone()
 	logData.ResponseSize = resp.ContentLength
@@ -2359,6 +2396,13 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		Transport: transport,
 		ModifyResponse: func(resp *http.Response) error {
 			req := resp.Request
+
+			// The destination rejected us: if the credential came from a cache,
+			// drop it so the next request re-resolves rather than replaying a
+			// credential the destination has already refused.
+			if creds, ok := req.Context().Value(interceptCredsKey{}).([]credentialHeader); ok {
+				invalidateCredentialsOnAuthFailure(creds, resp.StatusCode)
+			}
 
 			// Track LLM policy denials for the canonical log line.
 			var llmDenied bool

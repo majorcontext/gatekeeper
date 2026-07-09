@@ -189,6 +189,296 @@ func TestTokenExchange_CacheExpiry(t *testing.T) {
 	}
 }
 
+// wantMaxTTL is the ceiling the token cache must respect. Asserted independently
+// of the production constant so that raising the cap is a deliberate, visible change.
+const wantMaxTTL = time.Minute
+
+// cachedTTL returns the remaining lifetime of the cache entry for subject/actor.
+func cachedTTL(t *testing.T, src *TokenExchangeSource, subject, actor string) time.Duration {
+	t.Helper()
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	entry, ok := src.cache[tokenCacheKey{subject: subject, actor: actor}]
+	if !ok {
+		t.Fatalf("no cache entry for subject %q actor %q", subject, actor)
+	}
+	return time.Until(entry.expiresAt)
+}
+
+// The STS may advertise a very long expires_in — Neptune returns the remaining
+// lifetime of the underlying GitHub token, which can be hours. That token can be
+// revoked or rotated upstream at any moment, so caching it for the full window
+// means gatekeeper keeps injecting a stale credential (and the destination keeps
+// returning 403) long after the user has reconnected their account.
+func TestTokenExchange_CacheTTLCappedBelowAdvertisedExpiry(t *testing.T) {
+	// Observed in production: expires_in of ~8 hours.
+	const advertisedExpiresIn = 28573
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "gho_stale",
+			"token_type":   "Bearer",
+			"expires_in":   advertisedExpiresIn,
+		})
+	}))
+	defer srv.Close()
+
+	src := NewTokenExchangeSource(TokenExchangeConfig{
+		Endpoint:     srv.URL,
+		ClientID:     "gk",
+		ClientSecret: "secret",
+	})
+
+	if _, err := src.Resolve(context.Background(), "usr_abc", "", ""); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	// However long the STS claims, a rotated credential must not stay cached
+	// for more than the cap.
+	if ttl := cachedTTL(t, src, "usr_abc", ""); ttl > wantMaxTTL {
+		t.Errorf("cached TTL = %v, want <= %v (STS advertised %ds)", ttl, wantMaxTTL, advertisedExpiresIn)
+	}
+}
+
+// A short expires_in must still be honored — the cap is a ceiling, not a floor.
+func TestTokenExchange_CacheTTLHonorsShortExpiry(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "gho_short",
+			"token_type":   "Bearer",
+			"expires_in":   5,
+		})
+	}))
+	defer srv.Close()
+
+	src := NewTokenExchangeSource(TokenExchangeConfig{
+		Endpoint:     srv.URL,
+		ClientID:     "gk",
+		ClientSecret: "secret",
+	})
+
+	if _, err := src.Resolve(context.Background(), "usr_abc", "", ""); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if ttl := cachedTTL(t, src, "usr_abc", ""); ttl > 5*time.Second {
+		t.Errorf("cached TTL = %v, want <= 5s (the advertised expires_in)", ttl)
+	}
+}
+
+// An STS that omits expires_in must not produce a zero-TTL (uncacheable) or
+// unbounded entry.
+func TestTokenExchange_CacheTTLMissingExpiry(t *testing.T) {
+	var callCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "gho_no_expiry",
+			"token_type":   "Bearer",
+		})
+	}))
+	defer srv.Close()
+
+	src := NewTokenExchangeSource(TokenExchangeConfig{
+		Endpoint:     srv.URL,
+		ClientID:     "gk",
+		ClientSecret: "secret",
+	})
+
+	if _, err := src.Resolve(context.Background(), "usr_abc", "", ""); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if _, err := src.Resolve(context.Background(), "usr_abc", "", ""); err != nil {
+		t.Fatalf("second Resolve: %v", err)
+	}
+
+	if n := callCount.Load(); n != 1 {
+		t.Errorf("STS calls = %d, want 1 (missing expires_in should still cache)", n)
+	}
+	if ttl := cachedTTL(t, src, "usr_abc", ""); ttl <= 0 || ttl > wantMaxTTL {
+		t.Errorf("cached TTL = %v, want in (0, %v]", ttl, wantMaxTTL)
+	}
+}
+
+// rotatingSTS returns a server handing out token_v1, token_v2, ... one per call.
+func rotatingSTS(t *testing.T, calls *atomic.Int32) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": fmt.Sprintf("token_v%d", n),
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// When the destination rejects an injected credential, the cached token is the
+// prime suspect: the upstream credential behind the exchange was rotated or
+// re-authorized, and the cache is still serving the pre-rotation token. Dropping
+// the entry lets the next request pick up the fresh one.
+func TestTokenExchange_InvalidateForcesReExchange(t *testing.T) {
+	var calls atomic.Int32
+	srv := rotatingSTS(t, &calls)
+
+	src := NewTokenExchangeSource(TokenExchangeConfig{
+		Endpoint:     srv.URL,
+		ClientID:     "gk",
+		ClientSecret: "secret",
+	})
+
+	token1, err := src.Resolve(context.Background(), "usr_abc", "ak", "")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if token1 != "token_v1" {
+		t.Fatalf("token1 = %q, want token_v1", token1)
+	}
+
+	src.Invalidate("usr_abc", "ak")
+
+	token2, err := src.Resolve(context.Background(), "usr_abc", "ak", "")
+	if err != nil {
+		t.Fatalf("Resolve after Invalidate: %v", err)
+	}
+	if token2 != "token_v2" {
+		t.Errorf("token2 = %q, want token_v2 (Invalidate should force re-exchange)", token2)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Errorf("STS calls = %d, want 2", n)
+	}
+}
+
+// Invalidate must only drop the entry it names — one caller's 403 must not
+// evict every other subject's token.
+func TestTokenExchange_InvalidateScopedToKey(t *testing.T) {
+	var calls atomic.Int32
+	srv := rotatingSTS(t, &calls)
+
+	src := NewTokenExchangeSource(TokenExchangeConfig{
+		Endpoint:     srv.URL,
+		ClientID:     "gk",
+		ClientSecret: "secret",
+	})
+
+	if _, err := src.Resolve(context.Background(), "alice", "", ""); err != nil {
+		t.Fatalf("Resolve alice: %v", err)
+	}
+	bob1, err := src.Resolve(context.Background(), "bob", "", "")
+	if err != nil {
+		t.Fatalf("Resolve bob: %v", err)
+	}
+
+	src.Invalidate("alice", "")
+
+	bob2, err := src.Resolve(context.Background(), "bob", "", "")
+	if err != nil {
+		t.Fatalf("Resolve bob after invalidating alice: %v", err)
+	}
+	if bob2 != bob1 {
+		t.Errorf("bob's token = %q, want %q (unchanged — only alice was invalidated)", bob2, bob1)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Errorf("STS calls = %d, want 2 (bob should still be cached)", n)
+	}
+}
+
+// Gatekeeper cannot tell a "re-authorize" 403 from a rate-limit or
+// permission-denied 403 — the request logger only records the status code. So a
+// client looping on a URL that always 403s must not turn into one STS exchange
+// per request. Invalidate is rate-limited per key.
+func TestTokenExchange_InvalidateCooldown(t *testing.T) {
+	var calls atomic.Int32
+	srv := rotatingSTS(t, &calls)
+
+	src := NewTokenExchangeSource(TokenExchangeConfig{
+		Endpoint:     srv.URL,
+		ClientID:     "gk",
+		ClientSecret: "secret",
+	})
+	src.invalidateCooldown = time.Hour // no second eviction should get through
+
+	if _, err := src.Resolve(context.Background(), "usr_abc", "", ""); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	// First 403: evicts, so the next request re-exchanges.
+	src.Invalidate("usr_abc", "")
+	if _, err := src.Resolve(context.Background(), "usr_abc", "", ""); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("STS calls = %d, want 2 after first Invalidate", n)
+	}
+
+	// A burst of further 403s within the cooldown must not each force an exchange.
+	for range 20 {
+		src.Invalidate("usr_abc", "")
+		if _, err := src.Resolve(context.Background(), "usr_abc", "", ""); err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+	}
+	if n := calls.Load(); n != 2 {
+		t.Errorf("STS calls = %d, want 2 (cooldown should suppress the burst)", n)
+	}
+}
+
+// An Invalidate racing an in-flight Exchange must not be undone by that
+// exchange writing its (pre-invalidation) result into the cache.
+func TestTokenExchange_InvalidateDuringInflightResolve(t *testing.T) {
+	var calls atomic.Int32
+	entered := make(chan struct{})
+	release := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if n == 1 {
+			close(entered)
+			<-release
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": fmt.Sprintf("token_v%d", n),
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	src := NewTokenExchangeSource(TokenExchangeConfig{
+		Endpoint:     srv.URL,
+		ClientID:     "gk",
+		ClientSecret: "secret",
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := src.Resolve(context.Background(), "usr_abc", "", ""); err != nil {
+			t.Errorf("Resolve: %v", err)
+		}
+	}()
+
+	<-entered
+	src.Invalidate("usr_abc", "") // lands while the exchange is in flight
+	close(release)
+	<-done
+
+	// The in-flight result predates the invalidation, so it must not be cached.
+	src.mu.Lock()
+	_, cached := src.cache[tokenCacheKey{subject: "usr_abc"}]
+	src.mu.Unlock()
+	if cached {
+		t.Error("in-flight exchange re-cached a token across an Invalidate")
+	}
+}
+
 func TestTokenExchange_STSError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
