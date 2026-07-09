@@ -261,27 +261,24 @@ func TestIntercept_AuthFailureInvalidatesOnlyPlaceholderSelectedCredential(t *te
 	}
 }
 
-// Placeholder selection combined with a shared header name: injectCredentials'
-// first pass re-reads the header after a prior iteration overwrote it, so every
-// same-named credential passes its "client sent this header" check and the last
-// one in slice order lands on the wire. Only that last writer — the credential
-// the destination actually rejected — may be evicted.
-//
-// (The wire-selection and grant-logging consequences of that re-read are
-// pre-existing and deliberately left alone here; see the injectCredentials
-// follow-up. This pins the invalidation behavior only.)
+// Placeholder selection combined with a shared header name: exactly one
+// credential reaches the destination, so exactly one may be evicted on a 403.
+// The credential that lost the tie was never sent, and evicting it would drop a
+// cache entry the destination never saw — and, because eviction is
+// cooldown-gated per key, could suppress its own legitimate eviction later.
 func TestIntercept_AuthFailureInvalidatesOnlyWireCredentialWithPlaceholder(t *testing.T) {
 	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 	}))
 
-	var firstInvalidated, lastInvalidated atomic.Int32
+	var claudeInvalidated, loserInvalidated atomic.Int32
 	setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
 		return []credentialHeader{
+			// A client-sent placeholder selects the claude grant.
 			{Name: "Authorization", Value: "Bearer claude", Grant: "claude",
-				Invalidate: func() { firstInvalidated.Add(1) }},
+				Invalidate: func() { claudeInvalidated.Add(1) }},
 			{Name: "Authorization", Value: "Bearer github", Grant: "github-user",
-				Invalidate: func() { lastInvalidated.Add(1) }},
+				Invalidate: func() { loserInvalidated.Add(1) }},
 		}, nil
 	})
 
@@ -298,13 +295,13 @@ func TestIntercept_AuthFailureInvalidatesOnlyWireCredentialWithPlaceholder(t *te
 	defer resp.Body.Close()
 	io.ReadAll(resp.Body)
 
-	// "Bearer github" is what reached the destination, so it is the credential
+	// "Bearer claude" is what reached the destination, so it is the credential
 	// the 403 refers to.
-	if got := lastInvalidated.Load(); got != 1 {
+	if got := claudeInvalidated.Load(); got != 1 {
 		t.Errorf("on-the-wire credential Invalidate called %d times, want 1", got)
 	}
-	if got := firstInvalidated.Load(); got != 0 {
-		t.Errorf("overwritten credential Invalidate called %d times, want 0", got)
+	if got := loserInvalidated.Load(); got != 0 {
+		t.Errorf("credential that lost the tie Invalidate called %d times, want 0", got)
 	}
 }
 

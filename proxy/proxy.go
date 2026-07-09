@@ -1073,91 +1073,114 @@ type credentialInjectionResult struct {
 	Grants          []string        // Grant names of injected credentials
 	// Injected holds the credentials whose values are actually on the request,
 	// one per header name. This is narrower than InjectedHeaders: when several
-	// credentials share a header name, only the one whose value survived — the
-	// de-duplication winner, or the last writer when a client placeholder
-	// matched several — appears here. Consumers acting on a credential's
-	// identity (invalidation) must use this, not the header name set.
+	// credentials share a header name, only the one that won the tie appears
+	// here. Consumers acting on a credential's identity (invalidation) must use
+	// this, not the header name set.
 	Injected []credentialHeader
 }
 
-// injectCredentials replaces credential headers in the request. For each
-// credential, if the client already sent that header (e.g., a placeholder),
-// the proxy replaces it with the real value. When no placeholder matches,
-// credentials are injected unconditionally for transparent auth. If multiple
-// credentials share the same header name and no placeholder matched, the
-// "claude" grant is skipped in favor of the other — claude uses OAuth and
-// should only be injected when Claude Code explicitly sends a placeholder.
-// When credentials have different header names, all are auto-injected.
-// Returns a credentialInjectionResult with the set of lower-cased header
-// names that were injected and the grant names used.
+// injectCredentials replaces credential headers in the request.
+//
+// A credential is selected in one of two ways:
+//
+//   - Placeholder selection. If the client already sent a credential's header
+//     (any non-empty value), that credential is chosen and its real value
+//     replaces what the client sent. This lets a client pick which grant to use
+//     when several target the same host.
+//   - Auto-injection. If the client sent none of the credentials' headers, all
+//     of them are injected unconditionally, for transparent auth.
+//
+// Exactly one credential is injected per header name. When several share a
+// header name the tie is broken by grant, and the two paths break it in
+// opposite directions: auto-injection prefers a non-"claude" grant, while
+// placeholder selection prefers "claude". The claude grant is Claude Code's
+// OAuth flow, so it must not be injected transparently, but a client that
+// explicitly sends the header is asking for exactly it. The winner does not
+// depend on the order credentials appear in.
+//
+// Client-sent headers are sampled once, before anything is written. Testing the
+// request as it is mutated would let a credential injected by an earlier
+// iteration look like a placeholder the client sent, selecting several
+// same-named credentials at once.
+//
+// Returns a credentialInjectionResult naming the headers injected, the
+// credentials whose values reached the wire, and their grants. Grants and
+// Injected describe only what was sent — never a credential that lost the tie.
 func injectCredentials(req *http.Request, creds []credentialHeader, host, method, path string) credentialInjectionResult {
 	if len(creds) == 0 {
 		return credentialInjectionResult{}
 	}
 
-	injected := make(map[string]bool, len(creds))
-	var grants []string
-	// onWire tracks, per lower-cased header name, the credential whose value the
-	// request actually carries. Writing the same header twice leaves only the
-	// last writer on the wire, so only it may be treated as injected.
-	onWire := make(map[string]credentialHeader, len(creds))
-
-	// First pass: inject credentials where the client sent a matching
-	// placeholder header. This lets the client choose which credential
-	// to use when multiple grants target the same host.
+	// Sample the client's headers before any injection mutates them.
+	clientSent := make(map[string]bool, len(creds))
 	for _, c := range creds {
 		if req.Header.Get(c.Name) != "" {
-			req.Header.Set(c.Name, c.Value)
-			injected[strings.ToLower(c.Name)] = true
-			onWire[strings.ToLower(c.Name)] = c
-			if c.Grant != "" {
-				grants = append(grants, c.Grant)
-			}
-			slog.Debug("credential injected",
-				"subsystem", "proxy",
-				"action", "inject",
-				"grant", c.Grant,
-				"host", host,
-				"header", c.Name,
-				"method", method,
-				"path", path)
+			clientSent[strings.ToLower(c.Name)] = true
 		}
 	}
 
-	// If no placeholder matched, inject unconditionally for transparent auth.
-	// When multiple credentials share the same header name, prefer the
-	// non-"claude" grant — the claude grant is for Claude Code's OAuth flow
-	// and should only be injected when explicitly requested via placeholder.
-	if len(injected) == 0 {
-		byHeader := make(map[string]credentialHeader, len(creds))
-		for _, c := range creds {
+	// selectWinners maps each eligible header name to the index of the single
+	// credential that will be injected for it. Iterating creds in order makes
+	// the choice independent of map iteration order.
+	selectWinners := func(eligible func(headerKey string) bool, preferClaude bool) map[string]int {
+		winners := make(map[string]int, len(creds))
+		for i, c := range creds {
 			key := strings.ToLower(c.Name)
-			if existing, ok := byHeader[key]; !ok || existing.Grant == "claude" {
-				byHeader[key] = c
+			if !eligible(key) {
+				continue
+			}
+			j, seen := winners[key]
+			if !seen {
+				winners[key] = i
+				continue
+			}
+			incumbent := creds[j].Grant == "claude"
+			challenger := c.Grant == "claude"
+			if preferClaude && challenger && !incumbent {
+				winners[key] = i
+			} else if !preferClaude && incumbent && !challenger {
+				winners[key] = i
 			}
 		}
-		for _, c := range byHeader {
-			req.Header.Set(c.Name, c.Value)
-			injected[strings.ToLower(c.Name)] = true
-			onWire[strings.ToLower(c.Name)] = c
-			if c.Grant != "" {
-				grants = append(grants, c.Grant)
-			}
-			slog.Debug("credential auto-injected",
-				"subsystem", "proxy",
-				"action", "inject-auto",
-				"grant", c.Grant,
-				"host", host,
-				"header", c.Name,
-				"method", method,
-				"path", path)
-		}
+		return winners
 	}
 
-	injectedCreds := make([]credentialHeader, 0, len(onWire))
-	for _, c := range onWire {
-		injectedCreds = append(injectedCreds, c)
+	winners := selectWinners(func(key string) bool { return clientSent[key] }, true)
+	autoInjected := len(winners) == 0
+	if autoInjected {
+		winners = selectWinners(func(string) bool { return true }, false)
 	}
+
+	injected := make(map[string]bool, len(winners))
+	grants := make([]string, 0, len(winners))
+	injectedCreds := make([]credentialHeader, 0, len(winners))
+
+	msg, action := "credential injected", "inject"
+	if autoInjected {
+		msg, action = "credential auto-injected", "inject-auto"
+	}
+
+	for i, c := range creds {
+		key := strings.ToLower(c.Name)
+		if w, ok := winners[key]; !ok || w != i {
+			continue
+		}
+		req.Header.Set(c.Name, c.Value)
+		injected[key] = true
+		injectedCreds = append(injectedCreds, c)
+		if c.Grant != "" {
+			grants = append(grants, c.Grant)
+		}
+		slog.Debug(msg,
+			"subsystem", "proxy",
+			"action", action,
+			"grant", c.Grant,
+			"host", host,
+			"header", c.Name,
+			"method", method,
+			"path", path)
+	}
+
 	return credentialInjectionResult{InjectedHeaders: injected, Grants: grants, Injected: injectedCreds}
 }
 
