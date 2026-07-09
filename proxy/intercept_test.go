@@ -261,6 +261,53 @@ func TestIntercept_AuthFailureInvalidatesOnlyPlaceholderSelectedCredential(t *te
 	}
 }
 
+// Placeholder selection combined with a shared header name: injectCredentials'
+// first pass re-reads the header after a prior iteration overwrote it, so every
+// same-named credential passes its "client sent this header" check and the last
+// one in slice order lands on the wire. Only that last writer — the credential
+// the destination actually rejected — may be evicted.
+//
+// (The wire-selection and grant-logging consequences of that re-read are
+// pre-existing and deliberately left alone here; see the injectCredentials
+// follow-up. This pins the invalidation behavior only.)
+func TestIntercept_AuthFailureInvalidatesOnlyWireCredentialWithPlaceholder(t *testing.T) {
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+
+	var firstInvalidated, lastInvalidated atomic.Int32
+	setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		return []credentialHeader{
+			{Name: "Authorization", Value: "Bearer claude", Grant: "claude",
+				Invalidate: func() { firstInvalidated.Add(1) }},
+			{Name: "Authorization", Value: "Bearer github", Grant: "github-user",
+				Invalidate: func() { lastInvalidated.Add(1) }},
+		}, nil
+	})
+
+	req, err := http.NewRequest("GET", setup.Backend.URL+"/info/refs", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "placeholder")
+
+	resp, err := setup.Client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body)
+
+	// "Bearer github" is what reached the destination, so it is the credential
+	// the 403 refers to.
+	if got := lastInvalidated.Load(); got != 1 {
+		t.Errorf("on-the-wire credential Invalidate called %d times, want 1", got)
+	}
+	if got := firstInvalidated.Load(); got != 0 {
+		t.Errorf("overwritten credential Invalidate called %d times, want 0", got)
+	}
+}
+
 // A credential with no Invalidate hook (a static header, say) must not crash
 // the response path when the upstream rejects it.
 func TestIntercept_UpstreamAuthFailureWithoutInvalidateHook(t *testing.T) {

@@ -1071,11 +1071,12 @@ func (p *Proxy) getCredentialResolver(host string) CredentialResolver {
 type credentialInjectionResult struct {
 	InjectedHeaders map[string]bool // Lower-cased header names that were injected
 	Grants          []string        // Grant names of injected credentials
-	// Injected holds the credentials actually placed on the request. This is
-	// narrower than InjectedHeaders: when several credentials share a header
-	// name, only the one that won de-duplication appears here. Consumers acting
-	// on a credential's identity (invalidation) must use this, not the header
-	// name set.
+	// Injected holds the credentials whose values are actually on the request,
+	// one per header name. This is narrower than InjectedHeaders: when several
+	// credentials share a header name, only the one whose value survived — the
+	// de-duplication winner, or the last writer when a client placeholder
+	// matched several — appears here. Consumers acting on a credential's
+	// identity (invalidation) must use this, not the header name set.
 	Injected []credentialHeader
 }
 
@@ -1096,7 +1097,10 @@ func injectCredentials(req *http.Request, creds []credentialHeader, host, method
 
 	injected := make(map[string]bool, len(creds))
 	var grants []string
-	var injectedCreds []credentialHeader
+	// onWire tracks, per lower-cased header name, the credential whose value the
+	// request actually carries. Writing the same header twice leaves only the
+	// last writer on the wire, so only it may be treated as injected.
+	onWire := make(map[string]credentialHeader, len(creds))
 
 	// First pass: inject credentials where the client sent a matching
 	// placeholder header. This lets the client choose which credential
@@ -1105,7 +1109,7 @@ func injectCredentials(req *http.Request, creds []credentialHeader, host, method
 		if req.Header.Get(c.Name) != "" {
 			req.Header.Set(c.Name, c.Value)
 			injected[strings.ToLower(c.Name)] = true
-			injectedCreds = append(injectedCreds, c)
+			onWire[strings.ToLower(c.Name)] = c
 			if c.Grant != "" {
 				grants = append(grants, c.Grant)
 			}
@@ -1135,7 +1139,7 @@ func injectCredentials(req *http.Request, creds []credentialHeader, host, method
 		for _, c := range byHeader {
 			req.Header.Set(c.Name, c.Value)
 			injected[strings.ToLower(c.Name)] = true
-			injectedCreds = append(injectedCreds, c)
+			onWire[strings.ToLower(c.Name)] = c
 			if c.Grant != "" {
 				grants = append(grants, c.Grant)
 			}
@@ -1150,6 +1154,10 @@ func injectCredentials(req *http.Request, creds []credentialHeader, host, method
 		}
 	}
 
+	injectedCreds := make([]credentialHeader, 0, len(onWire))
+	for _, c := range onWire {
+		injectedCreds = append(injectedCreds, c)
+	}
 	return credentialInjectionResult{InjectedHeaders: injected, Grants: grants, Injected: injectedCreds}
 }
 
