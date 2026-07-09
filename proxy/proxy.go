@@ -1071,6 +1071,12 @@ func (p *Proxy) getCredentialResolver(host string) CredentialResolver {
 type credentialInjectionResult struct {
 	InjectedHeaders map[string]bool // Lower-cased header names that were injected
 	Grants          []string        // Grant names of injected credentials
+	// Injected holds the credentials actually placed on the request. This is
+	// narrower than InjectedHeaders: when several credentials share a header
+	// name, only the one that won de-duplication appears here. Consumers acting
+	// on a credential's identity (invalidation) must use this, not the header
+	// name set.
+	Injected []credentialHeader
 }
 
 // injectCredentials replaces credential headers in the request. For each
@@ -1090,6 +1096,7 @@ func injectCredentials(req *http.Request, creds []credentialHeader, host, method
 
 	injected := make(map[string]bool, len(creds))
 	var grants []string
+	var injectedCreds []credentialHeader
 
 	// First pass: inject credentials where the client sent a matching
 	// placeholder header. This lets the client choose which credential
@@ -1098,6 +1105,7 @@ func injectCredentials(req *http.Request, creds []credentialHeader, host, method
 		if req.Header.Get(c.Name) != "" {
 			req.Header.Set(c.Name, c.Value)
 			injected[strings.ToLower(c.Name)] = true
+			injectedCreds = append(injectedCreds, c)
 			if c.Grant != "" {
 				grants = append(grants, c.Grant)
 			}
@@ -1127,6 +1135,7 @@ func injectCredentials(req *http.Request, creds []credentialHeader, host, method
 		for _, c := range byHeader {
 			req.Header.Set(c.Name, c.Value)
 			injected[strings.ToLower(c.Name)] = true
+			injectedCreds = append(injectedCreds, c)
 			if c.Grant != "" {
 				grants = append(grants, c.Grant)
 			}
@@ -1141,7 +1150,7 @@ func injectCredentials(req *http.Request, creds []credentialHeader, host, method
 		}
 	}
 
-	return credentialInjectionResult{InjectedHeaders: injected, Grants: grants}
+	return credentialInjectionResult{InjectedHeaders: injected, Grants: grants, Injected: injectedCreds}
 }
 
 // mergeExtraHeaders injects extra headers into a request. If the request
@@ -1247,7 +1256,14 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 }
 
 // invalidateCredentialsOnAuthFailure drops the cached state behind each
-// injected credential when the destination rejected it. A 401 or 403 is the
+// credential that was injected into the rejected request. Pass
+// credentialInjectionResult.Injected, never the full candidate list for the
+// host: only one credential wins when several share a header name, and evicting
+// the losers would drop cache entries that had no part in this request — and,
+// since sources rate-limit evictions per key, could suppress a loser's own
+// legitimate eviction later.
+//
+// A 401 or 403 is the
 // only signal gatekeeper gets that a credential resolved from a cache has gone
 // stale — the upstream credential behind it was rotated or re-authorized while
 // the cache entry was still live. Without this, the proxy keeps injecting the
@@ -1947,7 +1963,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	invalidateCredentialsOnAuthFailure(creds, resp.StatusCode)
+	invalidateCredentialsOnAuthFailure(credResult.Injected, resp.StatusCode)
 
 	logData.StatusCode = resp.StatusCode
 	logData.ResponseHeaders = resp.Header.Clone()
@@ -2399,9 +2415,10 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 
 			// The destination rejected us: if the credential came from a cache,
 			// drop it so the next request re-resolves rather than replaying a
-			// credential the destination has already refused.
-			if creds, ok := req.Context().Value(interceptCredsKey{}).([]credentialHeader); ok {
-				invalidateCredentialsOnAuthFailure(creds, resp.StatusCode)
+			// credential the destination has already refused. Rewrite stored the
+			// injection result, so this evicts only what was actually sent.
+			if cr, ok := req.Context().Value(interceptCredResultKey{}).(credentialInjectionResult); ok {
+				invalidateCredentialsOnAuthFailure(cr.Injected, resp.StatusCode)
 			}
 
 			// Track LLM policy denials for the canonical log line.

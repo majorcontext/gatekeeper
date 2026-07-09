@@ -138,7 +138,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	invalidateCredentialsOnAuthFailure(creds, resp.StatusCode)
+	invalidateCredentialsOnAuthFailure(credResult.Injected, resp.StatusCode)
 
 	// Copy response headers
 	for key, values := range resp.Header {

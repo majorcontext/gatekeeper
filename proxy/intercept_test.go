@@ -184,6 +184,83 @@ func TestIntercept_UpstreamAuthFailureInvalidatesCredential(t *testing.T) {
 	}
 }
 
+// Only the credential actually placed on the wire may be invalidated. When two
+// credentials for a host share a header name, injectCredentials picks one
+// winner via its byHeader de-dup — evicting the loser's cache entry would drop
+// a credential that had nothing to do with this request, and (because eviction
+// is cooldown-gated per key) could suppress the loser's own legitimate eviction
+// later.
+func TestIntercept_AuthFailureInvalidatesOnlyInjectedCredential(t *testing.T) {
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+
+	var winnerInvalidated, loserInvalidated atomic.Int32
+	setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		return []credentialHeader{
+			// Same header name: the "claude" grant loses to the other.
+			{Name: "Authorization", Value: "Bearer claude", Grant: "claude",
+				Invalidate: func() { loserInvalidated.Add(1) }},
+			{Name: "Authorization", Value: "Bearer github", Grant: "github-user",
+				Invalidate: func() { winnerInvalidated.Add(1) }},
+		}, nil
+	})
+
+	resp, err := setup.Client.Get(setup.Backend.URL + "/info/refs")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body)
+
+	if got := winnerInvalidated.Load(); got != 1 {
+		t.Errorf("injected credential Invalidate called %d times, want 1", got)
+	}
+	if got := loserInvalidated.Load(); got != 0 {
+		t.Errorf("uninjected credential Invalidate called %d times, want 0", got)
+	}
+}
+
+// When credentials use distinct header names and the client sends a placeholder
+// selecting one of them, only the selected one is injected — and only it may be
+// invalidated.
+func TestIntercept_AuthFailureInvalidatesOnlyPlaceholderSelectedCredential(t *testing.T) {
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+
+	var selected, unselected atomic.Int32
+	setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		return []credentialHeader{
+			{Name: "Authorization", Value: "Bearer real", Grant: "a",
+				Invalidate: func() { selected.Add(1) }},
+			{Name: "X-Api-Key", Value: "real-key", Grant: "b",
+				Invalidate: func() { unselected.Add(1) }},
+		}, nil
+	})
+
+	req, err := http.NewRequest("GET", setup.Backend.URL+"/x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A placeholder for one credential selects it; the other is not injected.
+	req.Header.Set("Authorization", "placeholder")
+
+	resp, err := setup.Client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body)
+
+	if got := selected.Load(); got != 1 {
+		t.Errorf("selected credential Invalidate called %d times, want 1", got)
+	}
+	if got := unselected.Load(); got != 0 {
+		t.Errorf("unselected credential Invalidate called %d times, want 0", got)
+	}
+}
+
 // A credential with no Invalidate hook (a static header, say) must not crash
 // the response path when the upstream rejects it.
 func TestIntercept_UpstreamAuthFailureWithoutInvalidateHook(t *testing.T) {
