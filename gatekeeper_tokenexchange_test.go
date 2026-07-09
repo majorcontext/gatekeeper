@@ -58,6 +58,112 @@ func TestNewTokenExchangeResolver(t *testing.T) {
 	}
 }
 
+// Regression: a user's GitHub OAuth token went stale, so the STS handed
+// gatekeeper an unauthorized token; gatekeeper cached it for the full
+// expires_in (~8h, GitHub's remaining token lifetime). The user reconnected
+// their GitHub account and the STS began returning a working token, but the
+// proxy kept injecting the cached pre-reconnect one, and every push got a 403
+// from github.com on /info/refs until the process was restarted.
+//
+// Invoking the credential's Invalidate hook — as the proxy now does on a 401 or
+// 403 from the destination — must drop the stale entry so the next request
+// carries the reconnected token.
+func TestNewTokenExchangeResolver_InvalidateOnAuthFailureRecovers(t *testing.T) {
+	var exchanges atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := exchanges.Add(1)
+		token := "gho_stale_pre_reconnect"
+		if n > 1 {
+			token = "gho_fresh_post_reconnect"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": token,
+			"token_type":   "Bearer",
+			"expires_in":   28573, // what Neptune's STS returned in the incident
+		})
+	}))
+	defer srv.Close()
+
+	// The production config from the incident report.
+	resolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
+		Endpoint:       srv.URL,
+		ClientID:       "gk",
+		ClientSecret:   "secret",
+		SubjectFrom:    "proxy-auth",
+		ActorTokenFrom: "proxy-auth-password",
+		Grant:          "github-user",
+		Header:         "Authorization",
+		Prefix:         "x-access-token",
+		Format:         "basic",
+	})
+
+	newReq := func() *http.Request {
+		req := httptest.NewRequest("GET", "https://github.com/meetneptune/web.git/info/refs", nil)
+		req.SetBasicAuth("usr_abc", "ak_run_token")
+		req.Header.Set("Proxy-Authorization", req.Header.Get("Authorization"))
+		req.Header.Del("Authorization")
+		return req
+	}
+
+	req := newReq()
+	creds, err := resolver(context.Background(), req, req, "github.com")
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	if len(creds) != 1 {
+		t.Fatalf("got %d creds, want 1", len(creds))
+	}
+	if !strings.Contains(decodeBasic(t, creds[0].Value), "gho_stale_pre_reconnect") {
+		t.Fatalf("first credential = %q, want the stale token", creds[0].Value)
+	}
+
+	// Without invalidation the stale token is served for the full ~8h TTL.
+	req = newReq()
+	again, err := resolver(context.Background(), req, req, "github.com")
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	if again[0].Value != creds[0].Value {
+		t.Fatalf("expected the cached token on a repeat request")
+	}
+	if n := exchanges.Load(); n != 1 {
+		t.Fatalf("STS exchanges = %d, want 1 (second request should be cached)", n)
+	}
+
+	// github.com answers /info/refs with 403; the proxy calls Invalidate.
+	if creds[0].Invalidate == nil {
+		t.Fatal("token-exchange credential has no Invalidate hook")
+	}
+	creds[0].Invalidate()
+
+	req = newReq()
+	recovered, err := resolver(context.Background(), req, req, "github.com")
+	if err != nil {
+		t.Fatalf("resolver after invalidate: %v", err)
+	}
+	if got := decodeBasic(t, recovered[0].Value); !strings.Contains(got, "gho_fresh_post_reconnect") {
+		t.Errorf("credential after invalidate = %q, want the reconnected token", got)
+	}
+	if n := exchanges.Load(); n != 2 {
+		t.Errorf("STS exchanges = %d, want 2", n)
+	}
+}
+
+// decodeBasic returns the decoded user:pass of a "Basic <b64>" header value.
+func decodeBasic(t *testing.T, headerValue string) string {
+	t.Helper()
+	encoded, ok := strings.CutPrefix(headerValue, "Basic ")
+	if !ok {
+		t.Fatalf("header value %q is not Basic-encoded", headerValue)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decoding %q: %v", encoded, err)
+	}
+	return string(decoded)
+}
+
 func TestNewTokenExchangeResolver_NoSubjectHeader(t *testing.T) {
 	resolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
 		Endpoint:      "http://unused",

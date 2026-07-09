@@ -34,7 +34,8 @@ type TokenExchangeResponse struct {
 }
 
 // TokenExchangeSource exchanges a subject token for an access token via
-// RFC 8693. It caches tokens per subject with TTL from the STS response.
+// RFC 8693. It caches tokens per subject with TTL from the STS response,
+// capped at maxTokenTTL.
 type TokenExchangeSource struct {
 	endpoint         string
 	clientID         string
@@ -44,9 +45,19 @@ type TokenExchangeSource struct {
 	actorTokenType   string
 	client           *http.Client
 
+	// invalidateCooldown bounds how often a given key may be evicted by
+	// Invalidate. Overridden in tests.
+	invalidateCooldown time.Duration
+
 	mu    sync.Mutex
 	cache map[tokenCacheKey]cachedToken
-	sf    singleflight.Group
+	// cacheGen increments on every Invalidate. A Resolve that captured an
+	// older generation must not write its result: the exchange may have been
+	// issued before the upstream credential rotated, so caching it would
+	// re-stale the entry the invalidation just cleared.
+	cacheGen        uint64
+	lastInvalidated map[tokenCacheKey]time.Time
+	sf              singleflight.Group
 }
 
 type tokenCacheKey struct {
@@ -70,14 +81,16 @@ func NewTokenExchangeSource(cfg TokenExchangeConfig) *TokenExchangeSource {
 		actorTokenType = "urn:ietf:params:oauth:token-type:access_token"
 	}
 	return &TokenExchangeSource{
-		endpoint:         cfg.Endpoint,
-		clientID:         cfg.ClientID,
-		clientSecret:     cfg.ClientSecret,
-		resource:         cfg.Resource,
-		subjectTokenType: subjectTokenType,
-		actorTokenType:   actorTokenType,
-		client:           &http.Client{Timeout: 30 * time.Second},
-		cache:            make(map[tokenCacheKey]cachedToken),
+		endpoint:           cfg.Endpoint,
+		clientID:           cfg.ClientID,
+		clientSecret:       cfg.ClientSecret,
+		resource:           cfg.Resource,
+		subjectTokenType:   subjectTokenType,
+		actorTokenType:     actorTokenType,
+		client:             &http.Client{Timeout: 30 * time.Second},
+		cache:              make(map[tokenCacheKey]cachedToken),
+		lastInvalidated:    make(map[tokenCacheKey]time.Time),
+		invalidateCooldown: defaultInvalidateCooldown,
 	}
 }
 
@@ -130,10 +143,62 @@ func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken, actorT
 	return &result, nil
 }
 
-const defaultTokenTTL = 5 * time.Minute
+// maxTokenTTL caps how long an exchanged token is cached, regardless of the
+// expires_in the STS advertises. A long expires_in only means the token may
+// live that long, not that it stays valid: the upstream credential behind the
+// exchange can be revoked or rotated at any time, and gatekeeper has no way to
+// learn of it. Capping bounds how long a stale credential keeps being injected
+// after such a change. Resolve is singleflighted, so the extra STS calls are
+// coalesced and cheap.
+const maxTokenTTL = time.Minute
+
+// defaultInvalidateCooldown bounds how often one key may force a re-exchange.
+//
+// Invalidate's trigger is an upstream rejection, which gatekeeper can only see
+// as a status code — a GitHub 403 means "re-authorize the app", but equally
+// "secondary rate limit" or "no write access to this repo". A client looping on
+// a request that always fails would otherwise drive one STS exchange per
+// request, so evictions for a given key are rate-limited. The cost is bounded
+// recovery latency: at worst one cooldown passes before a genuinely rotated
+// credential is picked up.
+const defaultInvalidateCooldown = 10 * time.Second
+
+// Invalidate drops the cached token for the given subject and actor, so the
+// next Resolve performs a fresh exchange. Callers invoke it when the
+// destination rejects an injected credential, which usually means the upstream
+// credential behind the exchange was rotated or re-authorized and the cached
+// token predates that change.
+//
+// Evictions are rate-limited per key (see defaultInvalidateCooldown); calls
+// within the cooldown are no-ops. Invalidate is safe to call when no entry is
+// cached — it still bars any in-flight exchange from caching a result that
+// predates it.
+func (s *TokenExchangeSource) Invalidate(subjectToken, actorToken string) {
+	ck := tokenCacheKey{subject: subjectToken, actor: actorToken}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	if last, ok := s.lastInvalidated[ck]; ok && now.Sub(last) < s.invalidateCooldown {
+		return
+	}
+	s.lastInvalidated[ck] = now
+
+	delete(s.cache, ck)
+	s.cacheGen++
+
+	// Bound the bookkeeping map: entries past their cooldown carry no meaning.
+	for k, t := range s.lastInvalidated {
+		if now.Sub(t) >= s.invalidateCooldown {
+			delete(s.lastInvalidated, k)
+		}
+	}
+}
 
 // Resolve returns a credential for the given subject, using the cache when
-// possible. Concurrent requests for the same subject are coalesced into a
+// possible. Cache entries live for the STS-advertised expires_in, capped at
+// maxTokenTTL. Concurrent requests for the same subject are coalesced into a
 // single STS call via singleflight. When actorToken is non-empty, it is
 // forwarded to the STS as the RFC 8693 actor_token parameter and included
 // in the cache key. When requestID is non-empty, it is forwarded as
@@ -156,6 +221,7 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorTo
 			s.mu.Unlock()
 			return cached.accessToken, nil
 		}
+		gen := s.cacheGen
 		s.mu.Unlock()
 
 		// WithoutCancel strips both cancellation and deadline from the parent.
@@ -171,8 +237,8 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorTo
 		}
 
 		ttl := time.Duration(result.ExpiresIn) * time.Second
-		if ttl <= 0 {
-			ttl = defaultTokenTTL
+		if ttl <= 0 || ttl > maxTokenTTL {
+			ttl = maxTokenTTL
 		}
 
 		s.mu.Lock()
@@ -182,9 +248,15 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorTo
 				delete(s.cache, k)
 			}
 		}
-		s.cache[ck] = cachedToken{
-			accessToken: result.AccessToken,
-			expiresAt:   now.Add(ttl),
+		// Only cache when no Invalidate ran while the exchange was in flight.
+		// Otherwise this token may predate the rotation that prompted the
+		// invalidation, and writing it would re-stale the entry that was just
+		// cleared. The caller still gets this token; only the caching is skipped.
+		if s.cacheGen == gen {
+			s.cache[ck] = cachedToken{
+				accessToken: result.AccessToken,
+				expiresAt:   now.Add(ttl),
+			}
 		}
 		s.mu.Unlock()
 

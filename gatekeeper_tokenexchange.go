@@ -77,6 +77,10 @@ func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialR
 			Name:  header,
 			Value: value,
 			Grant: cfg.Grant,
+			// The destination rejecting this token means the credential behind
+			// the exchange was rotated or re-authorized; drop the cached copy so
+			// the next request exchanges afresh. The source rate-limits this.
+			Invalidate: func() { src.Invalidate(subject, actorToken) },
 		}}, nil
 	}
 }

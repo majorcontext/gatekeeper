@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -121,6 +122,210 @@ func TestIntercept_CredentialInjection(t *testing.T) {
 	}
 	if receivedAuth != "Bearer test-token-123" {
 		t.Errorf("Authorization = %q, want %q", receivedAuth, "Bearer test-token-123")
+	}
+}
+
+// A destination that rejects an injected credential is the only signal
+// gatekeeper gets that a cached token has gone stale (the upstream credential
+// behind it was rotated or re-authorized). Without this, the proxy keeps
+// injecting the dead token until its cache entry expires on its own.
+func TestIntercept_UpstreamAuthFailureInvalidatesCredential(t *testing.T) {
+	tests := []struct {
+		name            string
+		status          int
+		wantInvalidated bool
+	}{
+		{"unauthorized", http.StatusUnauthorized, true},
+		{"forbidden", http.StatusForbidden, true},
+		{"success", http.StatusOK, false},
+		{"server error", http.StatusInternalServerError, false},
+		{"not found", http.StatusNotFound, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				w.Write([]byte("body"))
+			}))
+
+			var invalidated atomic.Int32
+			setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+				return []credentialHeader{{
+					Name:       "Authorization",
+					Value:      "Bearer stale-token",
+					Grant:      "github-user",
+					Invalidate: func() { invalidated.Add(1) },
+				}}, nil
+			})
+
+			// /info/refs is the first request of the git push protocol, and where
+			// the reported 403 surfaced.
+			resp, err := setup.Client.Get(setup.Backend.URL + "/meetneptune/web.git/info/refs")
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			defer resp.Body.Close()
+			io.ReadAll(resp.Body)
+
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.status)
+			}
+
+			got := invalidated.Load()
+			want := int32(0)
+			if tc.wantInvalidated {
+				want = 1
+			}
+			if got != want {
+				t.Errorf("Invalidate called %d times, want %d (upstream returned %d)", got, want, tc.status)
+			}
+		})
+	}
+}
+
+// Only the credential actually placed on the wire may be invalidated. When two
+// credentials for a host share a header name, injectCredentials picks one
+// winner via its byHeader de-dup — evicting the loser's cache entry would drop
+// a credential that had nothing to do with this request, and (because eviction
+// is cooldown-gated per key) could suppress the loser's own legitimate eviction
+// later.
+func TestIntercept_AuthFailureInvalidatesOnlyInjectedCredential(t *testing.T) {
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+
+	var winnerInvalidated, loserInvalidated atomic.Int32
+	setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		return []credentialHeader{
+			// Same header name: the "claude" grant loses to the other.
+			{Name: "Authorization", Value: "Bearer claude", Grant: "claude",
+				Invalidate: func() { loserInvalidated.Add(1) }},
+			{Name: "Authorization", Value: "Bearer github", Grant: "github-user",
+				Invalidate: func() { winnerInvalidated.Add(1) }},
+		}, nil
+	})
+
+	resp, err := setup.Client.Get(setup.Backend.URL + "/info/refs")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body)
+
+	if got := winnerInvalidated.Load(); got != 1 {
+		t.Errorf("injected credential Invalidate called %d times, want 1", got)
+	}
+	if got := loserInvalidated.Load(); got != 0 {
+		t.Errorf("uninjected credential Invalidate called %d times, want 0", got)
+	}
+}
+
+// When credentials use distinct header names and the client sends a placeholder
+// selecting one of them, only the selected one is injected — and only it may be
+// invalidated.
+func TestIntercept_AuthFailureInvalidatesOnlyPlaceholderSelectedCredential(t *testing.T) {
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+
+	var selected, unselected atomic.Int32
+	setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		return []credentialHeader{
+			{Name: "Authorization", Value: "Bearer real", Grant: "a",
+				Invalidate: func() { selected.Add(1) }},
+			{Name: "X-Api-Key", Value: "real-key", Grant: "b",
+				Invalidate: func() { unselected.Add(1) }},
+		}, nil
+	})
+
+	req, err := http.NewRequest("GET", setup.Backend.URL+"/x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A placeholder for one credential selects it; the other is not injected.
+	req.Header.Set("Authorization", "placeholder")
+
+	resp, err := setup.Client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body)
+
+	if got := selected.Load(); got != 1 {
+		t.Errorf("selected credential Invalidate called %d times, want 1", got)
+	}
+	if got := unselected.Load(); got != 0 {
+		t.Errorf("unselected credential Invalidate called %d times, want 0", got)
+	}
+}
+
+// Placeholder selection combined with a shared header name: injectCredentials'
+// first pass re-reads the header after a prior iteration overwrote it, so every
+// same-named credential passes its "client sent this header" check and the last
+// one in slice order lands on the wire. Only that last writer — the credential
+// the destination actually rejected — may be evicted.
+//
+// (The wire-selection and grant-logging consequences of that re-read are
+// pre-existing and deliberately left alone here; see the injectCredentials
+// follow-up. This pins the invalidation behavior only.)
+func TestIntercept_AuthFailureInvalidatesOnlyWireCredentialWithPlaceholder(t *testing.T) {
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+
+	var firstInvalidated, lastInvalidated atomic.Int32
+	setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		return []credentialHeader{
+			{Name: "Authorization", Value: "Bearer claude", Grant: "claude",
+				Invalidate: func() { firstInvalidated.Add(1) }},
+			{Name: "Authorization", Value: "Bearer github", Grant: "github-user",
+				Invalidate: func() { lastInvalidated.Add(1) }},
+		}, nil
+	})
+
+	req, err := http.NewRequest("GET", setup.Backend.URL+"/info/refs", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "placeholder")
+
+	resp, err := setup.Client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body)
+
+	// "Bearer github" is what reached the destination, so it is the credential
+	// the 403 refers to.
+	if got := lastInvalidated.Load(); got != 1 {
+		t.Errorf("on-the-wire credential Invalidate called %d times, want 1", got)
+	}
+	if got := firstInvalidated.Load(); got != 0 {
+		t.Errorf("overwritten credential Invalidate called %d times, want 0", got)
+	}
+}
+
+// A credential with no Invalidate hook (a static header, say) must not crash
+// the response path when the upstream rejects it.
+func TestIntercept_UpstreamAuthFailureWithoutInvalidateHook(t *testing.T) {
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+
+	setup.Proxy.SetCredentialWithGrant(setup.BackendHost, "Authorization", "Bearer static", "static-grant")
+
+	resp, err := setup.Client.Get(setup.Backend.URL + "/x")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
 	}
 }
 
