@@ -144,3 +144,24 @@ This module (`github.com/majorcontext/gatekeeper`) was extracted from moat's `in
 - Use `gh pr create` with default flags only (no `--base`, `--head`, etc.)
 - If `gh pr create` fails, report the error to the operator immediately
 - Do not attempt to work around failures by adding flags or changing configuration
+
+## Responding to Review Feedback
+
+- **Resolve a review thread once its finding is addressed.** Reply explaining what changed (or why nothing did), then resolve it. A thread left open after the fix has landed reads as unaddressed.
+- Resolving requires GraphQL — `gh pr review` cannot do it:
+
+```bash
+# List threads and their IDs
+gh api graphql -f query='{repository(owner:"majorcontext",name:"gatekeeper"){
+  pullRequest(number:NN){reviewThreads(first:20){nodes{id isResolved}}}}}'
+
+# Reply to a thread, then resolve it
+gh api graphql -f query='mutation($tid:ID!,$body:String!){
+  addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$tid,body:$body}){comment{url}}}' \
+  -f tid=THREAD_ID -f body='...'
+gh api graphql -f query='mutation($tid:ID!){
+  resolveReviewThread(input:{threadId:$tid}){thread{isResolved}}}' -f tid=THREAD_ID
+```
+
+- Verify a reviewer's claim before acting on it, and say so if the suggested fix is wrong. A reviewer can correctly identify a bug while proposing a remedy that does not fix it.
+- Do not silently expand a PR's scope to fix pre-existing bugs a review surfaces. Note them, and ask whether to fold them in or track separately.
