@@ -4321,3 +4321,75 @@ func TestProxy_GetCredentialsForRequest_WildcardSpecificityIgnoresPort(t *testin
 		t.Fatalf("grant = %v, want pinned-grant (port-pinned key beats port-less at equal domain)", creds)
 	}
 }
+
+// TestProxy_GetCredentialsForRequest_FoldTierPortPrecedence verifies that
+// the case-insensitive exact tier keeps the verbatim tiers' precedence: a
+// key fold-matching the full host:port beats a key fold-matching only the
+// bare host, so request-host casing cannot flip which credential is sent.
+func TestProxy_GetCredentialsForRequest_FoldTierPortPrecedence(t *testing.T) {
+	p := NewProxy()
+	rc := &RunContextData{
+		Credentials: map[string][]credentialHeader{
+			"API.example.com":      {{Name: "Authorization", Value: "Bearer portless", Grant: "portless-grant"}},
+			"API.example.com:8443": {{Name: "Authorization", Value: "Bearer pinned", Grant: "pinned-grant"}},
+		},
+	}
+	req := httptest.NewRequest("GET", "https://api.example.com:8443/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
+
+	// Repeat: a map-iteration-order-dependent pick must not pass by luck.
+	for i := range 100 {
+		creds, err := p.getCredentialsForRequest(req, req, "api.example.com:8443")
+		if err != nil {
+			t.Fatalf("getCredentialsForRequest: %v", err)
+		}
+		if len(creds) != 1 || creds[0].Grant != "pinned-grant" {
+			t.Fatalf("iteration %d: creds = %v, want pinned-grant (host:port fold match must beat bare fold match)", i, creds)
+		}
+	}
+}
+
+// TestProxy_HostKeyedMaps_EmptyEntryOptOut verifies presence-based exact
+// matching for the companion host-keyed maps: an embedder-supplied explicit
+// empty/nil entry for host:port opts that port out, suppressing both the
+// bare-host entry and any wildcard entry — the pre-wildcard behavior for
+// these maps, which embedders may rely on to keep secrets off specific
+// ports. (Credentials keep their historical len>0 gating instead; see
+// TestProxy_GetCredentialsForRequest_EmptyExactEntryFallsThrough.)
+func TestProxy_HostKeyedMaps_EmptyEntryOptOut(t *testing.T) {
+	const optedOut = "internal.example.com:8443"
+	p := NewProxy()
+	rc := &RunContextData{
+		ExtraHeaders: map[string][]extraHeader{
+			"internal.example.com": {{Name: "X-Secret", Value: "s3cret"}},
+			optedOut:               nil,
+		},
+		RemoveHeaders: map[string][]string{
+			"*.example.com": {"X-Strip"},
+			optedOut:        nil,
+		},
+		TokenSubstitutions: map[string]*tokenSubstitution{
+			"internal.example.com": {placeholder: "PLACEHOLDER", realToken: "real"},
+			optedOut:               nil,
+		},
+		ResponseTransformers: map[string][]ResponseTransformer{
+			"internal.example.com": {func(req, resp any) (any, bool) { return resp, false }},
+			optedOut:               nil,
+		},
+	}
+	req := httptest.NewRequest("GET", "https://"+optedOut+"/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
+
+	if got := p.getExtraHeadersForRequest(req, optedOut); len(got) != 0 {
+		t.Errorf("getExtraHeadersForRequest(%q) = %v, want none (explicit nil entry opts the port out)", optedOut, got)
+	}
+	if got := p.getRemoveHeadersForRequest(req, optedOut); len(got) != 0 {
+		t.Errorf("getRemoveHeadersForRequest(%q) = %v, want none (explicit nil entry opts the port out)", optedOut, got)
+	}
+	if sub := p.getTokenSubstitutionForRequest(req, optedOut); sub != nil {
+		t.Errorf("getTokenSubstitutionForRequest(%q) = %v, want nil (explicit nil entry opts the port out)", optedOut, sub)
+	}
+	if got := p.getResponseTransformersForRequest(req, optedOut); len(got) != 0 {
+		t.Errorf("getResponseTransformersForRequest(%q) returned %d transformers, want none (explicit nil entry opts the port out)", optedOut, len(got))
+	}
+}
