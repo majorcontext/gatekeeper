@@ -4208,37 +4208,11 @@ func TestNewTokenSubstitution(t *testing.T) {
 	}
 }
 
-// TestProxy_GetCredentialsForRequest_OutrankedResolverStillSanitizes verifies
-// that a matched resolver always runs — even when a better-matched static
-// credential will win — because resolvers may mutate the request (e.g. strip
-// subject-identity headers) and skipping them would leak those headers
-// upstream alongside the static credential.
-func TestProxy_GetCredentialsForRequest_OutrankedResolverStillSanitizes(t *testing.T) {
-	p := NewProxy()
-	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
-	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-		innerReq.Header.Del("X-Subject-Token")
-		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "resolver-grant"}}, nil
-	})
-	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
-	req.Header.Set("X-Subject-Token", "caller-identity")
-
-	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest: %v", err)
-	}
-	if len(creds) != 1 || creds[0].Grant != "static-grant" {
-		t.Fatalf("grant = %v, want static-grant (exact static must still win)", creds)
-	}
-	if got := req.Header.Get("X-Subject-Token"); got != "" {
-		t.Fatalf("X-Subject-Token = %q, want removed (outranked resolver must still run for its request-sanitizing side effects)", got)
-	}
-}
-
 // TestProxy_GetCredentialsForRequest_OutrankedResolverErrorFallsThrough
-// verifies that an error from a resolver whose match is outranked by a
-// static credential does not fail the request — the static credential is
-// used, since the resolver's result was not going to be injected anyway.
+// verifies that a failing resolver cannot break requests whose credential a
+// better-matched static entry already decides: the outranked resolver is
+// skipped (see OutrankedResolverNotCalled), so its error never surfaces and
+// the static credential is used.
 func TestProxy_GetCredentialsForRequest_OutrankedResolverErrorFallsThrough(t *testing.T) {
 	p := NewProxy()
 	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
@@ -4518,5 +4492,199 @@ func TestProxy_HandleHTTP_PortPinnedCredentialKey(t *testing.T) {
 	resp.Body.Close()
 	if receivedAuth != "Bearer port-pinned" {
 		t.Errorf("Authorization = %q, want %q (port-pinned key must match on the plain-HTTP path)", receivedAuth, "Bearer port-pinned")
+	}
+}
+
+// TestProxy_HandleHTTP_LogsExcludeResolverStrippedHeaders verifies that the
+// plain-HTTP request log snapshots headers after the credential resolver has
+// run, so a subject-identity token the resolver strips (e.g. a
+// token-exchange subject header) never reaches the request log — credential
+// values must never be logged.
+func TestProxy_HandleHTTP_LogsExcludeResolverStrippedHeaders(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	host := mustParseURL(backend.URL).Hostname()
+	p.SetCredentialResolver(host, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		innerReq.Header.Del("X-Subject-Token")
+		return []credentialHeader{{Name: "Authorization", Value: "Bearer exchanged", Grant: "exchange-grant"}}, nil
+	})
+
+	var mu sync.Mutex
+	var logged []RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, data)
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxyServer.URL))},
+	}
+
+	req, _ := http.NewRequest("GET", backend.URL+"/", nil)
+	req.Header.Set("X-Subject-Token", "super-secret-subject-jwt")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logged) == 0 {
+		t.Fatal("no request was logged")
+	}
+	for _, data := range logged {
+		if got := data.RequestHeaders.Get("X-Subject-Token"); got != "" {
+			t.Fatalf("request log contains X-Subject-Token = %q; resolver-stripped credentials must not be logged", got)
+		}
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_BracketedIPv6Host verifies that a
+// bracketed, portless IPv6 lookup host like "[::1]" matches an
+// embedder-supplied key stored in canonical unbracketed form ("::1").
+func TestProxy_GetCredentialsForRequest_BracketedIPv6Host(t *testing.T) {
+	p := NewProxy()
+	rc := &RunContextData{
+		Credentials: map[string][]credentialHeader{
+			"::1": {{Name: "Authorization", Value: "Bearer v6", Grant: "v6-grant"}},
+		},
+	}
+	req := httptest.NewRequest("GET", "http://[::1]/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
+
+	for _, host := range []string{"[::1]", "[::1]:8080"} {
+		creds, err := p.getCredentialsForRequest(req, req, host)
+		if err != nil {
+			t.Fatalf("getCredentialsForRequest(%q): %v", host, err)
+		}
+		if len(creds) != 1 || creds[0].Grant != "v6-grant" {
+			t.Fatalf("getCredentialsForRequest(%q) = %v, want v6-grant credential", host, creds)
+		}
+	}
+}
+
+// TestProxy_HandleHTTP_DefaultPortPinnedKey verifies that the plain-HTTP
+// path presents a port-bearing lookup host even when the client omits the
+// scheme-default port, so a key pinned to ":80" fires for
+// "http://host/" and not only for "http://host:80/".
+func TestProxy_HandleHTTP_DefaultPortPinnedKey(t *testing.T) {
+	var mu sync.Mutex
+	var receivedAuth string
+	orig := httpTransport
+	defer func() { httpTransport = orig }()
+	httpTransport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		mu.Lock()
+		receivedAuth = req.Header.Get("Authorization")
+		mu.Unlock()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("ok")),
+			Request:    req,
+		}, nil
+	})
+
+	p := NewProxy()
+	p.mu.Lock()
+	p.credentials["internal.example.com:80"] = []credentialHeader{{Name: "Authorization", Value: "Bearer default-port", Grant: "port80-grant"}}
+	p.mu.Unlock()
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxyServer.URL))},
+	}
+
+	resp, err := client.Get("http://internal.example.com/")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if receivedAuth != "Bearer default-port" {
+		t.Errorf("Authorization = %q, want %q (:80-pinned key must fire when the client omits the default port)", receivedAuth, "Bearer default-port")
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestProxy_GetCredentialsForRequest_OutrankedResolverNotCalled verifies
+// that a resolver whose match is outranked by a static credential is not
+// invoked at all — its external call (e.g. an STS round trip) must not add
+// latency to requests that will use the static credential — while the
+// request sanitization it declared at registration is still applied.
+func TestProxy_GetCredentialsForRequest_OutrankedResolverNotCalled(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
+	var invoked atomic.Bool
+	p.SetCredentialResolverWithStripHeaders("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		invoked.Store(true)
+		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "resolver-grant"}}, nil
+	}, "X-Subject-Token")
+
+	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
+	req.Header.Set("X-Subject-Token", "caller-identity")
+
+	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if invoked.Load() {
+		t.Fatal("outranked resolver was invoked (its external call must not stall static-credential hosts)")
+	}
+	if len(creds) != 1 || creds[0].Grant != "static-grant" {
+		t.Fatalf("creds = %v, want static-grant", creds)
+	}
+	if got := req.Header.Get("X-Subject-Token"); got != "" {
+		t.Fatalf("X-Subject-Token = %q, want removed (declared strip headers apply even when the resolver is skipped)", got)
+	}
+
+	// For hosts where the resolver is not outranked it runs normally.
+	req2 := httptest.NewRequest("GET", "https://other.example.com/", nil)
+	creds, err = p.getCredentialsForRequest(req2, req2, "other.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest(other): %v", err)
+	}
+	if !invoked.Load() {
+		t.Fatal("resolver did not run for a non-outranked host")
+	}
+	if len(creds) != 1 || creds[0].Grant != "resolver-grant" {
+		t.Fatalf("creds = %v, want resolver-grant", creds)
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_PortPinnedExactBeatsBareResolver
+// verifies cross-map specificity within the exact tier: a port-pinned exact
+// static credential outranks a bare-host resolver for a port-bearing
+// request host, matching both the in-map exact ordering (host:port before
+// bare) and the wildcard tier's port-pinned-beats-port-less rule.
+func TestProxy_GetCredentialsForRequest_PortPinnedExactBeatsBareResolver(t *testing.T) {
+	p := NewProxy()
+	p.mu.Lock()
+	p.credentials["api.example.com:8443"] = []credentialHeader{{Name: "Authorization", Value: "Bearer pinned", Grant: "pinned-grant"}}
+	p.mu.Unlock()
+	p.SetCredentialResolver("api.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver", Grant: "resolver-grant"}}, nil
+	})
+	req := httptest.NewRequest("GET", "https://api.example.com:8443/", nil)
+
+	creds, err := p.getCredentialsForRequest(req, req, "api.example.com:8443")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "pinned-grant" {
+		t.Fatalf("creds = %v, want pinned-grant (port-pinned exact static must outrank bare-host resolver)", creds)
 	}
 }

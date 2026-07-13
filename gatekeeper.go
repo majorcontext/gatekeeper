@@ -491,7 +491,10 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 				return fmt.Errorf("credential for %s: %w", cred.Host, err)
 			}
 			if resolver != nil {
-				s.proxy.SetCredentialResolver(cred.Host, resolver)
+				// Declare the subject header so the proxy still strips it
+				// when a better-matched static credential outranks (and
+				// therefore skips) this resolver.
+				s.proxy.SetCredentialResolverWithStripHeaders(cred.Host, resolver, credentialResolverStripHeaders(cred)...)
 				continue
 			}
 		}

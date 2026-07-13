@@ -107,6 +107,17 @@ func extractProxyAuthCredentials(r *http.Request) (username, password string) {
 	return u, p
 }
 
+// credentialResolverStripHeaders returns the request headers a dynamic
+// credential's resolver consumes and removes, for declaration at
+// registration time. For token-exchange sources this is the configured
+// subject header (empty when the subject comes from proxy auth).
+func credentialResolverStripHeaders(cred CredentialConfig) []string {
+	if cred.Source.Type == "token-exchange" && cred.Source.SubjectHeader != "" {
+		return []string{cred.Source.SubjectHeader}
+	}
+	return nil
+}
+
 func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, error) {
 	cfg := cred.Source
 	if cfg.Endpoint == "" {
