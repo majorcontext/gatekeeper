@@ -79,12 +79,23 @@ func matchesPattern(pattern hostPattern, host string, port int) bool {
 	if pattern.isWildcard {
 		// Wildcard matching: *.example.com matches api.example.com, foo.bar.example.com
 		// The host must end with .{pattern.host}
-		suffix := "." + pattern.host // already lowercase from parsing
-		return strings.HasSuffix(strings.ToLower(host), suffix)
+		return hostHasSuffixFold(host, "."+pattern.host)
 	}
 
 	// Exact host match
 	return strings.EqualFold(pattern.host, host)
+}
+
+// hostHasSuffixFold reports whether host ends with suffix, ignoring case.
+// This is the wildcard-suffix rule for network allow patterns
+// (matchesPattern); matchWildcardHostKey in proxy.go applies the same rule
+// against pre-lowered inputs for its per-key scan — a semantic change to
+// one must be mirrored in the other. Implemented via ToLower rather than
+// byte-length slicing: characters whose lowercase form has a different byte
+// length (e.g. U+1E9E ẞ → U+00DF ß) would make a fixed-length slice split
+// mid-rune and wrongly reject.
+func hostHasSuffixFold(host, suffix string) bool {
+	return strings.HasSuffix(strings.ToLower(host), strings.ToLower(suffix))
 }
 
 // grantHosts maps grant names to their allowed host patterns.

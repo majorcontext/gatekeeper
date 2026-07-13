@@ -567,6 +567,9 @@ func MatchesHostPattern(pattern HostPattern, host string, port int) bool {
 }
 
 // RunContextData holds per-run credential data resolved by ContextResolver.
+// The host-keyed maps are read without synchronization on every request —
+// including linear scans for wildcard and case-fold matching — so they must
+// not be mutated after the RunContextData is registered with the proxy.
 type RunContextData struct {
 	RunID                string
 	Credentials          map[string][]credentialHeader
@@ -834,7 +837,10 @@ func (p *Proxy) SetCredentialWithGrant(host, headerName, headerValue, grant stri
 // SetCredentialResolver registers a dynamic credential resolver for a host.
 // Unlike static credentials, resolvers are called per-request and may make
 // external calls (e.g., RFC 8693 token exchange). Only one resolver per host
-// is supported; calling again for the same host replaces the previous resolver.
+// is supported; calling again for the same host replaces the previous
+// resolver. Passing a nil resolver disables resolution for that host: the
+// nil entry matches and terminates the lookup, so a broader (bare-host or
+// wildcard) resolver does not apply.
 func (p *Proxy) SetCredentialResolver(host string, resolver CredentialResolver) {
 	if !isValidHost(host) {
 		slog.Debug("ignoring invalid host for credential resolver",
@@ -902,28 +908,16 @@ func (p *Proxy) SetTokenSubstitution(host, placeholder, realToken string) {
 func (p *Proxy) getTokenSubstitution(host string) *tokenSubstitution {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	if sub, ok := p.tokenSubstitutions[host]; ok {
-		return sub
-	}
-	h, _, _ := net.SplitHostPort(host)
-	if h != "" {
-		return p.tokenSubstitutions[h]
-	}
-	return nil
+	sub, _ := lookupHostKeyed(p.tokenSubstitutions, host, presenceUsable)
+	return sub
 }
 
 // getRemoveHeaders returns header names to remove for a host.
 func (p *Proxy) getRemoveHeaders(host string) []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	if headers, ok := p.removeHeaders[host]; ok {
-		return headers
-	}
-	h, _, _ := net.SplitHostPort(host)
-	if h != "" {
-		return p.removeHeaders[h]
-	}
-	return nil
+	headers, _ := lookupHostKeyed(p.removeHeaders, host, presenceUsable)
+	return headers
 }
 
 // maxTokenSubBodySize is the maximum request body size for token substitution.
@@ -1031,40 +1025,207 @@ func (p *Proxy) SetNetworkPolicyWithRules(policy string, allows []string, grants
 	}
 }
 
-// getCredentials returns all credential headers for a host.
-// Returns a copy of the slice to avoid data races with concurrent
-// SetCredentialWithGrant calls (e.g., token refresh).
-func (p *Proxy) getCredentials(host string) []credentialHeader {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	creds := p.credentials[host]
-	if len(creds) == 0 {
-		h, _, _ := net.SplitHostPort(host)
-		if h != "" {
-			creds = p.credentials[h]
+// bareHost strips the port from a host:port string, returning the host
+// unchanged when it has no port.
+func bareHost(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil && h != "" {
+		return h
+	}
+	return host
+}
+
+// matchWildcardHostKey reports whether a wildcard host map key like
+// "*.example.com" matches the request host, given the pre-lowercased host
+// and bare (port-stripped) host. "*.example.com" matches "api.example.com"
+// and "a.b.example.com", never "example.com" itself. This applies the same
+// suffix rule as hostHasSuffixFold (matchesPattern's wildcard branch),
+// inlined against the pre-lowered inputs so the per-key scan does not
+// re-lower the host — a semantic change to one must be mirrored in the
+// other. A port-less key matches the port-stripped host (any port); a key
+// carrying a port ("*.example.com:8443") matches the full host:port, so the
+// port must match exactly.
+func matchWildcardHostKey(key, lowerHost, lowerBare string) bool {
+	if !strings.HasPrefix(key, "*.") {
+		return false
+	}
+	suffix := strings.ToLower(key[1:]) // "*.example.com" -> ".example.com"
+	return strings.HasSuffix(lowerBare, suffix) ||
+		(lowerHost != lowerBare && strings.HasSuffix(lowerHost, suffix))
+}
+
+// compareWildcardKeySpecificity ranks two wildcard keys that match the same
+// host: positive when a is more specific than b, negative when less, zero
+// when equally specific. Specificity is the length of the key's domain part
+// — a port suffix must not make a domain-broader key outrank a
+// domain-narrower one — then a port-pinned key beats a port-less one. Both
+// in-map selection (lookupHostKeyed) and cross-map ranking
+// (hostMatch.outranks) use this single comparator so they cannot diverge.
+func compareWildcardKeySpecificity(a, b string) int {
+	da, db := bareHost(a), bareHost(b)
+	if len(da) != len(db) {
+		return len(da) - len(db)
+	}
+	aPinned, bPinned := len(a) > len(da), len(b) > len(db)
+	if aPinned != bPinned {
+		if aPinned {
+			return 1
+		}
+		return -1
+	}
+	return 0
+}
+
+// moreSpecificWildcardKey reports whether wildcard key a should be preferred
+// over b when both match the same host: higher specificity first, then the
+// lexicographically smallest key so the pick never depends on map iteration
+// order.
+func moreSpecificWildcardKey(a, b string) bool {
+	if c := compareWildcardKeySpecificity(a, b); c != 0 {
+		return c > 0
+	}
+	return a < b
+}
+
+// hostMatchTier classifies how lookupHostKeyed matched a host against a key.
+// Order matters: higher tiers outrank lower ones. A verbatim (case-exact)
+// key match outranks a case-fold match, which outranks a wildcard match.
+type hostMatchTier int
+
+const (
+	hostMatchNone hostMatchTier = iota
+	hostMatchWildcard
+	hostMatchExactFold
+	hostMatchExact
+)
+
+// hostMatch records how a lookup matched, for callers that rank matches
+// from different maps against each other (e.g. static credentials vs
+// credential resolvers).
+type hostMatch struct {
+	tier hostMatchTier
+	key  string
+}
+
+// outranks reports whether m is a strictly better match than other for the
+// same host: verbatim exact beats case-fold exact beats wildcard, and
+// between wildcards compareWildcardKeySpecificity decides. Equal-rank
+// matches do not outrank each other (the caller's own preference order
+// breaks that tie).
+func (m hostMatch) outranks(other hostMatch) bool {
+	if m.tier != other.tier {
+		return m.tier > other.tier
+	}
+	return m.tier == hostMatchWildcard && compareWildcardKeySpecificity(m.key, other.key) > 0
+}
+
+// lookupHostKeyed resolves a host against a map keyed by exact hostnames or
+// "*." wildcard patterns, skipping entries the usable predicate rejects
+// (embedder-supplied maps may hold empty slices or nil values, which must
+// not shadow a key from a later tier). Exact keys win over wildcard keys:
+// the host is tried verbatim, then port-stripped, then case-insensitively;
+// only when every exact tier misses is the most specific (longest) matching
+// wildcard key used, ranked by moreSpecificWildcardKey. In the fold tier, a
+// key matching the full host:port beats a key matching only the bare host
+// (mirroring the verbatim tiers' order), and any remaining tie goes to the
+// lexicographically smallest key so the pick never depends on map iteration
+// order. The fallback scan is linear in the number of configured host keys;
+// it runs only when the verbatim and bare lookups miss, and the maps are
+// config-scale, not request-scale.
+func lookupHostKeyed[V any](m map[string]V, host string, usable func(V) bool) (V, hostMatch) {
+	if v, ok := m[host]; ok && usable(v) {
+		return v, hostMatch{hostMatchExact, host}
+	}
+	bare := bareHost(host)
+	if bare != host {
+		if v, ok := m[bare]; ok && usable(v) {
+			return v, hostMatch{hostMatchExact, bare}
 		}
 	}
+	lowerHost, lowerBare := strings.ToLower(host), strings.ToLower(bare)
+	var best V
+	var bestKey string
+	tier := hostMatchNone
+	bestFoldsHost := false // best fold key matches the full host:port, not just bare
+	for key, v := range m {
+		if !usable(v) {
+			continue
+		}
+		// The case-insensitive exact tier must fold both the bare host and
+		// the full host:port — port-bearing keys are expressible in
+		// embedder-built RunContextData maps. A host:port fold match beats
+		// a bare fold match, as in the verbatim tiers. Folding is via
+		// ToLower so this tier agrees with the wildcard tier's semantics
+		// (EqualFold's simple folding differs for e.g. U+017F ſ).
+		lowerKey := strings.ToLower(key)
+		if foldsHost := host != bare && lowerKey == lowerHost; foldsHost || lowerKey == lowerBare {
+			if tier != hostMatchExactFold ||
+				(foldsHost && !bestFoldsHost) ||
+				(foldsHost == bestFoldsHost && key < bestKey) {
+				bestKey, best, tier, bestFoldsHost = key, v, hostMatchExactFold, foldsHost
+			}
+			continue
+		}
+		if tier == hostMatchExactFold {
+			continue
+		}
+		if matchWildcardHostKey(key, lowerHost, lowerBare) &&
+			(tier == hostMatchNone || moreSpecificWildcardKey(key, bestKey)) {
+			bestKey, best, tier = key, v, hostMatchWildcard
+		}
+	}
+	return best, hostMatch{tier, bestKey}
+}
+
+// Usable predicates for lookupHostKeyed. Credentials use nonEmptySlice,
+// preserving their historical len>0 gating: an empty entry falls through to
+// the next tier. The companion maps (extra headers, remove-headers, token
+// substitutions, response transformers) use presenceUsable, preserving
+// their historical presence gating: an explicit empty or nil entry matches
+// and terminates the lookup, letting embedders opt a specific host:port out
+// of a broader key's behavior.
+func nonEmptySlice[T any](v []T) bool { return len(v) > 0 }
+
+func presenceUsable[V any](V) bool { return true }
+
+// getCredentials returns all credential headers for a host; see
+// lookupHostKeyed for the matching rules.
+func (p *Proxy) getCredentials(host string) []credentialHeader {
+	creds, _ := p.getCredentialsMatch(host)
+	return creds
+}
+
+// getCredentialsMatch is getCredentials plus the match rank, for callers
+// that weigh exact static credentials against wildcard-keyed resolvers.
+// Returns a copy of the slice to avoid data races with concurrent
+// SetCredentialWithGrant calls (e.g., token refresh).
+func (p *Proxy) getCredentialsMatch(host string) ([]credentialHeader, hostMatch) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	creds, match := lookupHostKeyed(p.credentials, host, nonEmptySlice)
 	if len(creds) == 0 {
-		return nil
+		return nil, hostMatch{}
 	}
 	out := make([]credentialHeader, len(creds))
 	copy(out, creds)
-	return out
+	return out, match
 }
 
-// getCredentialResolver returns the dynamic resolver for a host, with
-// host:port fallback matching the same logic as getCredentials.
+// getCredentialResolver returns the dynamic resolver for a host; see
+// lookupHostKeyed for the matching rules.
 func (p *Proxy) getCredentialResolver(host string) CredentialResolver {
+	r, _ := p.getCredentialResolverMatch(host)
+	return r
+}
+
+// getCredentialResolverMatch is getCredentialResolver plus the match rank.
+// The lookup is presence-based: SetCredentialResolver(host, nil) plants a
+// nil entry that matches and terminates the lookup, disabling resolution
+// for that host even when a broader (bare-host or wildcard) resolver exists
+// — the same opt-out semantics as the companion maps.
+func (p *Proxy) getCredentialResolverMatch(host string) (CredentialResolver, hostMatch) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	if r, ok := p.credentialResolvers[host]; ok {
-		return r
-	}
-	h, _, _ := net.SplitHostPort(host)
-	if h != "" {
-		return p.credentialResolvers[h]
-	}
-	return nil
+	return lookupHostKeyed(p.credentialResolvers, host, presenceUsable)
 }
 
 // credentialInjectionResult holds the outcome of credential injection.
@@ -1215,29 +1376,16 @@ func mergeExtraHeaders(req *http.Request, host string, headers []extraHeader) {
 func (p *Proxy) getExtraHeaders(host string) []extraHeader {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	if headers, ok := p.extraHeaders[host]; ok {
-		return headers
-	}
-	h, _, _ := net.SplitHostPort(host)
-	if h != "" {
-		return p.extraHeaders[h]
-	}
-	return nil
+	headers, _ := lookupHostKeyed(p.extraHeaders, host, presenceUsable)
+	return headers
 }
 
 // getResponseTransformers returns response transformers for a host.
 func (p *Proxy) getResponseTransformers(host string) []ResponseTransformer {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-
-	if transformers, ok := p.responseTransformers[host]; ok {
-		return transformers
-	}
-	h, _, _ := net.SplitHostPort(host)
-	if h != "" {
-		return p.responseTransformers[h]
-	}
-	return nil
+	transformers, _ := lookupHostKeyed(p.responseTransformers, host, presenceUsable)
+	return transformers
 }
 
 // getRunContext extracts per-run context data from the request context.
@@ -1251,39 +1399,54 @@ func getRunContext(r *http.Request) *RunContextData {
 
 // getCredentialsForRequest returns all credentials for a host. When
 // RunContextData is present, only its credentials are used (the caller
-// owns the full credential set for that run). Otherwise, dynamic
-// credential resolvers are tried first — if a resolver returns
-// credentials, those are used. If the resolver returns nil (e.g., no
-// subject identity found), the proxy falls through to static credentials
-// for the same host. This enables patterns like "per-user OAuth via
-// token-exchange, with a bot identity fallback."
+// owns the full credential set for that run). Otherwise a matching dynamic
+// resolver always runs — resolvers may inspect and mutate the request
+// (e.g., strip subject-identity headers), and those side effects must
+// happen regardless of which credential wins. Which credentials are then
+// injected is decided by match rank: a static credential whose key match
+// outranks the resolver's (an exact key over a wildcard, or a more specific
+// wildcard over a broader one) wins, and an outranked resolver's error is
+// not fatal. At equal or lower static rank the resolver's credentials win
+// when it returns any; if it returns nil (e.g., no subject identity found),
+// the proxy falls through to static credentials for the same host. This
+// enables patterns like "per-user OAuth via token-exchange, with a bot
+// identity fallback."
 //
 // ctxReq carries the RunContextData (the CONNECT request for intercepted
 // connections, or the same request for plain HTTP). innerReq is the actual
-// request the resolver may inspect and modify (e.g., strip subject headers).
+// request the resolver may inspect and modify.
 func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
 	if rc := getRunContext(ctxReq); rc != nil {
-		if creds := rc.Credentials[host]; len(creds) > 0 {
-			return creds, nil
-		}
-		h, _, _ := net.SplitHostPort(host)
-		if h != "" {
-			if creds := rc.Credentials[h]; len(creds) > 0 {
-				return creds, nil
-			}
-		}
-		return nil, nil
-	}
-	if resolver := p.getCredentialResolver(host); resolver != nil {
-		creds, err := resolver(innerReq.Context(), ctxReq, innerReq, host)
-		if err != nil {
-			return nil, err
-		}
+		creds, _ := lookupHostKeyed(rc.Credentials, host, nonEmptySlice)
 		if len(creds) > 0 {
 			return creds, nil
 		}
+		return nil, nil
 	}
-	return p.getCredentials(host), nil
+	resolver, resolverMatch := p.getCredentialResolverMatch(host)
+	if resolver == nil {
+		return p.getCredentials(host), nil
+	}
+	resolved, resolveErr := resolver(innerReq.Context(), ctxReq, innerReq, host)
+	// Read static credentials after the resolver has run, not before: a
+	// token refresh landing while a slow resolver was out must be seen.
+	staticCreds, staticMatch := p.getCredentialsMatch(host)
+	if staticMatch.outranks(resolverMatch) {
+		if resolveErr != nil {
+			slog.Debug("ignoring error from outranked credential resolver",
+				"subsystem", "proxy",
+				"host", host,
+				"error", resolveErr)
+		}
+		return staticCreds, nil
+	}
+	if resolveErr != nil {
+		return nil, resolveErr
+	}
+	if len(resolved) > 0 {
+		return resolved, nil
+	}
+	return staticCreds, nil
 }
 
 // invalidateCredentialsOnAuthFailure drops the cached state behind each
@@ -1323,14 +1486,8 @@ func invalidateCredentialsOnAuthFailure(creds []credentialHeader, statusCode int
 // RunContextData first, then falling back to the proxy's own map.
 func (p *Proxy) getExtraHeadersForRequest(r *http.Request, host string) []extraHeader {
 	if rc := getRunContext(r); rc != nil {
-		if headers, ok := rc.ExtraHeaders[host]; ok {
-			return headers
-		}
-		h, _, _ := net.SplitHostPort(host)
-		if h != "" {
-			return rc.ExtraHeaders[h]
-		}
-		return nil
+		headers, _ := lookupHostKeyed(rc.ExtraHeaders, host, presenceUsable)
+		return headers
 	}
 	return p.getExtraHeaders(host)
 }
@@ -1339,14 +1496,8 @@ func (p *Proxy) getExtraHeadersForRequest(r *http.Request, host string) []extraH
 // RunContextData first, then falling back to the proxy's own map.
 func (p *Proxy) getRemoveHeadersForRequest(r *http.Request, host string) []string {
 	if rc := getRunContext(r); rc != nil {
-		if headers, ok := rc.RemoveHeaders[host]; ok {
-			return headers
-		}
-		h, _, _ := net.SplitHostPort(host)
-		if h != "" {
-			return rc.RemoveHeaders[h]
-		}
-		return nil
+		headers, _ := lookupHostKeyed(rc.RemoveHeaders, host, presenceUsable)
+		return headers
 	}
 	return p.getRemoveHeaders(host)
 }
@@ -1355,14 +1506,8 @@ func (p *Proxy) getRemoveHeadersForRequest(r *http.Request, host string) []strin
 // checking RunContextData first, then falling back to the proxy's own map.
 func (p *Proxy) getTokenSubstitutionForRequest(r *http.Request, host string) *tokenSubstitution {
 	if rc := getRunContext(r); rc != nil {
-		if sub, ok := rc.TokenSubstitutions[host]; ok {
-			return sub
-		}
-		h, _, _ := net.SplitHostPort(host)
-		if h != "" {
-			return rc.TokenSubstitutions[h]
-		}
-		return nil
+		sub, _ := lookupHostKeyed(rc.TokenSubstitutions, host, presenceUsable)
+		return sub
 	}
 	return p.getTokenSubstitution(host)
 }
@@ -1371,14 +1516,8 @@ func (p *Proxy) getTokenSubstitutionForRequest(r *http.Request, host string) *to
 // checking RunContextData first, then falling back to the proxy's own map.
 func (p *Proxy) getResponseTransformersForRequest(r *http.Request, host string) []ResponseTransformer {
 	if rc := getRunContext(r); rc != nil {
-		if transformers, ok := rc.ResponseTransformers[host]; ok {
-			return transformers
-		}
-		h, _, _ := net.SplitHostPort(host)
-		if h != "" {
-			return rc.ResponseTransformers[h]
-		}
-		return nil
+		transformers, _ := lookupHostKeyed(rc.ResponseTransformers, host, presenceUsable)
+		return transformers
 	}
 	return p.getResponseTransformers(host)
 }
@@ -1828,26 +1967,11 @@ func (p *Proxy) writeHostBlockedResponse(w http.ResponseWriter, host string, por
 func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
-	// Extract host and infer port from scheme
+	// Extract host and infer port from scheme. lookupHost keeps the port
+	// (when the URL carries one) so port-pinned host keys can match;
+	// host stays bare for policy checks and logging.
 	host := r.URL.Hostname()
-	creds, err := p.getCredentialsForRequest(r, r, host)
-	if err != nil {
-		http.Error(w, "credential resolution failed", http.StatusBadGateway)
-		p.logRequest(r, RequestLogData{
-			Method:         r.Method,
-			URL:            r.URL.String(),
-			Host:           host,
-			Path:           r.URL.Path,
-			RequestType:    "http",
-			StatusCode:     http.StatusBadGateway,
-			Duration:       time.Since(start),
-			RequestHeaders: r.Header.Clone(),
-			RequestSize:    r.ContentLength,
-			ResponseSize:   -1,
-			Err:            err,
-		})
-		return
-	}
+	lookupHost := r.URL.Host
 
 	// Capture request body and headers before forwarding
 	var reqBody []byte
@@ -1903,6 +2027,30 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve credentials only after the policy check: resolvers can have
+	// external side effects (e.g. token-exchange round trips), which a
+	// client must not be able to trigger through policy-denied hosts —
+	// and a denied client must see the policy denial, not a resolver
+	// error. Same order as the CONNECT interception path.
+	creds, err := p.getCredentialsForRequest(r, r, lookupHost)
+	if err != nil {
+		http.Error(w, "credential resolution failed", http.StatusBadGateway)
+		p.logRequest(r, RequestLogData{
+			Method:         r.Method,
+			URL:            r.URL.String(),
+			Host:           host,
+			Path:           r.URL.Path,
+			RequestType:    "http",
+			StatusCode:     http.StatusBadGateway,
+			Duration:       time.Since(start),
+			RequestHeaders: r.Header.Clone(),
+			RequestSize:    r.ContentLength,
+			ResponseSize:   -1,
+			Err:            err,
+		})
+		return
+	}
+
 	// Rewrite synthetic host-gateway hostname to actual IP for forwarding.
 	// The container uses a synthetic hostname (only in its /etc/hosts),
 	// but the proxy runs on the host where that name doesn't resolve.
@@ -1929,7 +2077,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Inject any additional headers configured for this host.
 	// Merges with existing values (comma-separated) to preserve client
 	// headers like anthropic-beta that support multiple flags.
-	mergeExtraHeaders(outReq, host, p.getExtraHeadersForRequest(r, host))
+	mergeExtraHeaders(outReq, host, p.getExtraHeadersForRequest(r, lookupHost))
 
 	outReq.Header.Del("Proxy-Connection")
 	outReq.Header.Del("Proxy-Authorization")
@@ -1939,7 +2087,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// when multiple grants target the same host — e.g., "claude" registers
 	// RemoveRequestHeader("x-api-key") for OAuth, but if "anthropic" also
 	// injected x-api-key, the injected header must survive.
-	for _, headerName := range p.getRemoveHeadersForRequest(r, host) {
+	for _, headerName := range p.getRemoveHeadersForRequest(r, lookupHost) {
 		if credResult.InjectedHeaders[strings.ToLower(headerName)] {
 			continue
 		}
@@ -1958,7 +2106,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Apply token substitution if configured.
 	// Substitution targets outReq (not r), so r.URL.String() used for logging
 	// below still contains the placeholder, not the real token.
-	if sub := p.getTokenSubstitutionForRequest(r, host); sub != nil {
+	if sub := p.getTokenSubstitutionForRequest(r, lookupHost); sub != nil {
 		p.applyTokenSubstitution(outReq, sub)
 	}
 
@@ -2409,7 +2557,9 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			pr.Out.Header.Del("Proxy-Authorization")
 
 			// Remove configured headers (but not injected credential headers).
-			for _, headerName := range p.getRemoveHeadersForRequest(r, host) {
+			// r.Host is the CONNECT target with its port, so port-pinned
+			// host keys can match; the lookup falls back to the bare host.
+			for _, headerName := range p.getRemoveHeadersForRequest(r, r.Host) {
 				if credResult.InjectedHeaders[strings.ToLower(headerName)] {
 					continue
 				}
@@ -2431,7 +2581,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			*pr.Out = *pr.Out.WithContext(ctx)
 
 			// Token substitution.
-			if sub := p.getTokenSubstitutionForRequest(r, host); sub != nil {
+			if sub := p.getTokenSubstitutionForRequest(r, r.Host); sub != nil {
 				p.applyTokenSubstitution(pr.Out, sub)
 			}
 
@@ -2466,7 +2616,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			}
 
 			// Response transformers.
-			if transformers := p.getResponseTransformersForRequest(r, host); len(transformers) > 0 {
+			if transformers := p.getResponseTransformersForRequest(r, r.Host); len(transformers) > 0 {
 				for _, transformer := range transformers {
 					if newRespInterface, transformed := transformer(req, resp); transformed {
 						if newResp, ok := newRespInterface.(*http.Response); ok {
@@ -2691,7 +2841,9 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		p.injectMCPCredentialsWithContext(r, req)
 
 		// Resolve credentials before forwarding so errors are caught early.
-		creds, credErr := p.getCredentialsForRequest(r, req, host)
+		// r.Host is the CONNECT target with its port, so port-pinned host
+		// keys can match; the lookup falls back to the bare host.
+		creds, credErr := p.getCredentialsForRequest(r, req, r.Host)
 		if credErr != nil {
 			w.Header().Set("Content-Type", "text/plain")
 			w.WriteHeader(http.StatusBadGateway)

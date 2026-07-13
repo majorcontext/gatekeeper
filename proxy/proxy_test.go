@@ -1184,6 +1184,402 @@ func TestProxy_SetCredential_UsesAuthorizationHeader(t *testing.T) {
 	}
 }
 
+// TestProxy_GetCredentials_WildcardKey verifies that a credential registered
+// under a wildcard host key like "*.box.example.com" matches real subdomains
+// using the same suffix rule as network allow patterns: any subdomain at any
+// depth matches, but the apex domain does not. Exact keys take precedence
+// over wildcard keys.
+func TestProxy_GetCredentials_WildcardKey(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialWithGrant("*.box.example.com", "Cf-Access-Client-Id", "client-id-123", "cloudflare-access")
+
+	tests := []struct {
+		name      string
+		host      string
+		wantMatch bool
+	}{
+		{"single-label subdomain", "alpha.box.example.com", true},
+		{"subdomain with port", "alpha.box.example.com:443", true},
+		{"deep subdomain", "a.b.box.example.com", true},
+		{"apex does not match", "box.example.com", false},
+		{"unrelated host", "evil-box.example.com", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			creds := p.getCredentials(tt.host)
+			if tt.wantMatch {
+				if len(creds) != 1 {
+					t.Fatalf("getCredentials(%q) returned %d credentials, want 1", tt.host, len(creds))
+				}
+				if creds[0].Grant != "cloudflare-access" {
+					t.Errorf("grant = %q, want %q", creds[0].Grant, "cloudflare-access")
+				}
+			} else if len(creds) != 0 {
+				t.Errorf("getCredentials(%q) returned %d credentials, want 0", tt.host, len(creds))
+			}
+		})
+	}
+
+	t.Run("most specific wildcard wins when keys overlap", func(t *testing.T) {
+		p := NewProxy()
+		p.SetCredentialWithGrant("*.example.com", "Authorization", "Bearer broad-token", "broad-grant")
+		p.SetCredentialWithGrant("*.box.example.com", "Authorization", "Bearer narrow-token", "narrow-grant")
+		// Map iteration order is randomized per range statement, so a
+		// first-match implementation picks each key about half the time.
+		// Repeat the lookup so a non-deterministic pick cannot pass by luck.
+		for i := range 100 {
+			creds := p.getCredentials("alpha.box.example.com")
+			if len(creds) != 1 {
+				t.Fatalf("getCredentials returned %d credentials, want 1", len(creds))
+			}
+			if creds[0].Grant != "narrow-grant" {
+				t.Fatalf("iteration %d: grant = %q, want %q (most specific wildcard must win)", i, creds[0].Grant, "narrow-grant")
+			}
+		}
+	})
+
+	t.Run("exact key takes precedence", func(t *testing.T) {
+		p.SetCredentialWithGrant("exact.box.example.com", "Authorization", "Bearer exact-token", "exact-grant")
+		creds := p.getCredentials("exact.box.example.com")
+		if len(creds) != 1 {
+			t.Fatalf("getCredentials returned %d credentials, want 1", len(creds))
+		}
+		if creds[0].Grant != "exact-grant" {
+			t.Errorf("grant = %q, want %q (exact key must win over wildcard)", creds[0].Grant, "exact-grant")
+		}
+	})
+}
+
+// TestProxy_GetCredentialResolver_WildcardKey verifies that a credential
+// resolver registered under a wildcard host key matches real subdomains with
+// the same rules as static credentials: any-depth subdomains match, the apex
+// does not, and an exact key takes precedence over a wildcard key.
+func TestProxy_GetCredentialResolver_WildcardKey(t *testing.T) {
+	grantResolver := func(grant string) CredentialResolver {
+		return func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+			return []credentialHeader{{Name: "Authorization", Value: "Bearer " + grant, Grant: grant}}, nil
+		}
+	}
+	p := NewProxy()
+	p.SetCredentialResolver("*.box.example.com", grantResolver("wildcard-grant"))
+	p.SetCredentialResolver("exact.box.example.com", grantResolver("exact-grant"))
+
+	resolve := func(t *testing.T, host string) []credentialHeader {
+		t.Helper()
+		r := p.getCredentialResolver(host)
+		if r == nil {
+			return nil
+		}
+		req := httptest.NewRequest("GET", "https://"+host+"/", nil)
+		creds, err := r(context.Background(), req, req, host)
+		if err != nil {
+			t.Fatalf("resolver(%q): %v", host, err)
+		}
+		return creds
+	}
+
+	tests := []struct {
+		name      string
+		host      string
+		wantGrant string // "" means no resolver must match
+	}{
+		{"single-label subdomain", "alpha.box.example.com", "wildcard-grant"},
+		{"subdomain with port", "alpha.box.example.com:443", "wildcard-grant"},
+		{"deep subdomain", "a.b.box.example.com", "wildcard-grant"},
+		{"apex does not match", "box.example.com", ""},
+		{"unrelated host", "evil-box.example.com", ""},
+		{"exact key takes precedence", "exact.box.example.com", "exact-grant"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			creds := resolve(t, tt.host)
+			if tt.wantGrant == "" {
+				if creds != nil {
+					t.Fatalf("getCredentialResolver(%q) matched grant %q, want no match", tt.host, creds[0].Grant)
+				}
+				return
+			}
+			if len(creds) != 1 || creds[0].Grant != tt.wantGrant {
+				t.Fatalf("getCredentialResolver(%q) = %v, want grant %q", tt.host, creds, tt.wantGrant)
+			}
+		})
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_RunContextWildcardKey verifies that
+// wildcard credential host keys work in RunContextData mode (per-run
+// credentials), not just in the proxy-level credentials map.
+func TestProxy_GetCredentialsForRequest_RunContextWildcardKey(t *testing.T) {
+	p := NewProxy()
+	rc := &RunContextData{
+		Credentials: map[string][]credentialHeader{
+			"*.box.example.com": {{Name: "Cf-Access-Client-Id", Value: "client-id-123", Grant: "cloudflare-access"}},
+		},
+	}
+	req := httptest.NewRequest("GET", "https://alpha.box.example.com/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
+
+	creds, err := p.getCredentialsForRequest(req, req, "alpha.box.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "cloudflare-access" {
+		t.Fatalf("getCredentialsForRequest(alpha.box.example.com) = %v, want cloudflare-access credential", creds)
+	}
+
+	apexCreds, err := p.getCredentialsForRequest(req, req, "box.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest(apex): %v", err)
+	}
+	if len(apexCreds) != 0 {
+		t.Fatalf("getCredentialsForRequest(box.example.com) = %v, want none (apex excluded)", apexCreds)
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_ExactStaticBeatsWildcardResolver verifies
+// cross-map precedence: an exact-keyed static credential wins over a
+// wildcard-keyed resolver for the same host, while the resolver still serves
+// hosts with no exact static entry.
+func TestProxy_GetCredentialsForRequest_ExactStaticBeatsWildcardResolver(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
+	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "resolver-grant"}}, nil
+	})
+	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
+
+	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "static-grant" {
+		t.Fatalf("getCredentialsForRequest(api.example.com) grant = %v, want static-grant (exact static must beat wildcard resolver)", creds)
+	}
+
+	creds, err = p.getCredentialsForRequest(req, req, "other.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest(other): %v", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "resolver-grant" {
+		t.Fatalf("getCredentialsForRequest(other.example.com) grant = %v, want resolver-grant", creds)
+	}
+}
+
+// TestProxy_GetCredentials_MixedCaseHost verifies that a mixed-case request
+// host still resolves its exact-keyed credential in preference to a wildcard
+// key: exact matching must be as case-insensitive as wildcard matching, or
+// the documented exact-over-wildcard precedence inverts for such hosts.
+func TestProxy_GetCredentials_MixedCaseHost(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialWithGrant("special.box.example.com", "Authorization", "Bearer exact-token", "exact-grant")
+	p.SetCredentialWithGrant("*.box.example.com", "Authorization", "Bearer wild-token", "wild-grant")
+
+	creds := p.getCredentials("Special.box.example.com")
+	if len(creds) != 1 {
+		t.Fatalf("getCredentials returned %d credentials, want 1", len(creds))
+	}
+	if creds[0].Grant != "exact-grant" {
+		t.Fatalf("grant = %q, want %q (case-variant host must still hit the exact key)", creds[0].Grant, "exact-grant")
+	}
+}
+
+// TestProxy_GetCredentials_CaseVariantKeysDeterministic verifies that when
+// the same host is (unusually) registered under two different casings, a
+// third-casing request resolves to a deterministic winner — the
+// lexicographically smallest key — rather than whichever key Go's randomized
+// map iteration reaches first.
+func TestProxy_GetCredentials_CaseVariantKeysDeterministic(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialWithGrant("API.example.com", "Authorization", "Bearer upper-token", "upper-grant")
+	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer lower-token", "lower-grant")
+
+	// Map iteration order is randomized per range statement; repeat the
+	// lookup so a first-match implementation cannot pass by luck.
+	for i := range 100 {
+		creds := p.getCredentials("Api.example.com")
+		if len(creds) != 1 {
+			t.Fatalf("getCredentials returned %d credentials, want 1", len(creds))
+		}
+		if creds[0].Grant != "upper-grant" {
+			t.Fatalf("iteration %d: grant = %q, want %q (lexicographically smallest case-variant key must win)", i, creds[0].Grant, "upper-grant")
+		}
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_MoreSpecificWildcardStaticBeatsResolver
+// verifies cross-map wildcard specificity: when a static credential and a
+// resolver both match via wildcard keys, the more specific (longer) key wins
+// regardless of which map it lives in.
+func TestProxy_GetCredentialsForRequest_MoreSpecificWildcardStaticBeatsResolver(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialWithGrant("*.api.example.com", "Authorization", "Bearer static-token", "static-grant")
+	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "resolver-grant"}}, nil
+	})
+	req := httptest.NewRequest("GET", "https://svc.api.example.com/", nil)
+
+	creds, err := p.getCredentialsForRequest(req, req, "svc.api.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "static-grant" {
+		t.Fatalf("grant = %v, want static-grant (*.api.example.com static must beat *.example.com resolver)", creds)
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_EmptyExactEntryFallsThrough verifies
+// that a present-but-empty entry in an embedder-supplied RunContextData
+// credentials map does not shadow a populated bare-host entry — matching the
+// pre-refactor len>0 gating.
+func TestProxy_GetCredentialsForRequest_EmptyExactEntryFallsThrough(t *testing.T) {
+	p := NewProxy()
+	rc := &RunContextData{
+		Credentials: map[string][]credentialHeader{
+			"api.example.com:443": {},
+			"api.example.com":     {{Name: "Authorization", Value: "Bearer tok", Grant: "the-grant"}},
+		},
+	}
+	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
+
+	creds, err := p.getCredentialsForRequest(req, req, "api.example.com:443")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "the-grant" {
+		t.Fatalf("creds = %v, want the-grant credential (empty exact entry must not shadow bare-host entry)", creds)
+	}
+}
+
+// TestProxy_GetCredentials_WildcardKeyWithPort verifies that a wildcard key
+// carrying a port matches subdomains on exactly that port and nothing else.
+// The credential setters reject keys containing ":" (isValidHost), so such
+// keys arise via embedder-supplied RunContextData maps — the lookup is
+// exercised through that path.
+func TestProxy_GetCredentials_WildcardKeyWithPort(t *testing.T) {
+	p := NewProxy()
+	rc := &RunContextData{
+		Credentials: map[string][]credentialHeader{
+			"*.internal.example.com:8443": {{Name: "Authorization", Value: "Bearer tok", Grant: "port-grant"}},
+		},
+	}
+	lookup := func(t *testing.T, host string) []credentialHeader {
+		t.Helper()
+		req := httptest.NewRequest("GET", "https://"+host+"/", nil)
+		req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
+		creds, err := p.getCredentialsForRequest(req, req, host)
+		if err != nil {
+			t.Fatalf("getCredentialsForRequest(%q): %v", host, err)
+		}
+		return creds
+	}
+
+	if creds := lookup(t, "svc.internal.example.com:8443"); len(creds) != 1 || creds[0].Grant != "port-grant" {
+		t.Errorf("lookup(svc.internal.example.com:8443) = %v, want port-grant credential", creds)
+	}
+	if creds := lookup(t, "svc.internal.example.com:9999"); len(creds) != 0 {
+		t.Errorf("lookup(svc.internal.example.com:9999) = %v, want none (port must match)", creds)
+	}
+	if creds := lookup(t, "svc.internal.example.com"); len(creds) != 0 {
+		t.Errorf("lookup(svc.internal.example.com) = %v, want none (port must match)", creds)
+	}
+	if creds := lookup(t, "internal.example.com:8443"); len(creds) != 0 {
+		t.Errorf("lookup(internal.example.com:8443) = %v, want none (apex excluded)", creds)
+	}
+}
+
+// TestProxy_GetCredentials_CaseVariantWildcardKeysDeterministic verifies the
+// wildcard tier's tie-break: equal-length wildcard keys (only possible as
+// case-variants of each other) resolve to the lexicographically smallest key
+// rather than random map iteration order.
+func TestProxy_GetCredentials_CaseVariantWildcardKeysDeterministic(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialWithGrant("*.API.example.com", "Authorization", "Bearer upper", "upper-grant")
+	p.SetCredentialWithGrant("*.api.example.com", "Authorization", "Bearer lower", "lower-grant")
+
+	for i := range 100 {
+		creds := p.getCredentials("svc.api.example.com")
+		if len(creds) != 1 {
+			t.Fatalf("getCredentials returned %d credentials, want 1", len(creds))
+		}
+		if creds[0].Grant != "upper-grant" {
+			t.Fatalf("iteration %d: grant = %q, want %q (lexicographically smallest wildcard key must win)", i, creds[0].Grant, "upper-grant")
+		}
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_StaticReadAfterResolverMiss verifies
+// that when a resolver returns nil, the static-credential fallback reads the
+// map fresh rather than a snapshot taken before the resolver ran — a token
+// refresh landing during a slow resolver call must not be missed.
+func TestProxy_GetCredentialsForRequest_StaticReadAfterResolverMiss(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialResolver("api.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer refreshed", "refreshed-grant")
+		return nil, nil
+	})
+	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
+
+	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "refreshed-grant" {
+		t.Fatalf("creds = %v, want refreshed-grant (static fallback must read fresh after resolver miss)", creds)
+	}
+}
+
+// TestProxy_HostKeyedMaps_WildcardKey verifies that the companion host-keyed
+// maps — extra headers, remove-headers, token substitutions, and response
+// transformers — honor wildcard host keys the same way credentials do, in
+// both the proxy-level maps and RunContextData.
+func TestProxy_HostKeyedMaps_WildcardKey(t *testing.T) {
+	const host = "alpha.box.example.com"
+	noop := ResponseTransformer(func(req, resp any) (any, bool) { return resp, false })
+
+	p := NewProxy()
+	p.AddExtraHeader("*.box.example.com", "X-Api-Version", "2024-01-01")
+	p.RemoveRequestHeader("*.box.example.com", "X-Internal")
+	p.SetTokenSubstitution("*.box.example.com", "PLACEHOLDER", "real-token")
+	p.AddResponseTransformer("*.box.example.com", noop)
+
+	if got := p.getExtraHeaders(host); len(got) != 1 || got[0].Name != "X-Api-Version" {
+		t.Errorf("getExtraHeaders(%q) = %v, want X-Api-Version header", host, got)
+	}
+	if got := p.getRemoveHeaders(host); len(got) != 1 || got[0] != "X-Internal" {
+		t.Errorf("getRemoveHeaders(%q) = %v, want [X-Internal]", host, got)
+	}
+	if sub := p.getTokenSubstitution(host); sub == nil || sub.placeholder != "PLACEHOLDER" {
+		t.Errorf("getTokenSubstitution(%q) = %v, want PLACEHOLDER substitution", host, sub)
+	}
+	if got := p.getResponseTransformers(host); len(got) != 1 {
+		t.Errorf("getResponseTransformers(%q) returned %d transformers, want 1", host, len(got))
+	}
+
+	rc := &RunContextData{
+		ExtraHeaders:         map[string][]extraHeader{"*.box.example.com": {{Name: "X-Rc-Version", Value: "v1"}}},
+		RemoveHeaders:        map[string][]string{"*.box.example.com": {"X-Rc-Internal"}},
+		TokenSubstitutions:   map[string]*tokenSubstitution{"*.box.example.com": {placeholder: "RC-PLACEHOLDER", realToken: "rc-token"}},
+		ResponseTransformers: map[string][]ResponseTransformer{"*.box.example.com": {noop}},
+	}
+	req := httptest.NewRequest("GET", "https://"+host+"/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
+
+	if got := p.getExtraHeadersForRequest(req, host); len(got) != 1 || got[0].Name != "X-Rc-Version" {
+		t.Errorf("getExtraHeadersForRequest(%q) = %v, want X-Rc-Version header", host, got)
+	}
+	if got := p.getRemoveHeadersForRequest(req, host); len(got) != 1 || got[0] != "X-Rc-Internal" {
+		t.Errorf("getRemoveHeadersForRequest(%q) = %v, want [X-Rc-Internal]", host, got)
+	}
+	if sub := p.getTokenSubstitutionForRequest(req, host); sub == nil || sub.placeholder != "RC-PLACEHOLDER" {
+		t.Errorf("getTokenSubstitutionForRequest(%q) = %v, want RC-PLACEHOLDER substitution", host, sub)
+	}
+	if got := p.getResponseTransformersForRequest(req, host); len(got) != 1 {
+		t.Errorf("getResponseTransformersForRequest(%q) returned %d transformers, want 1", host, len(got))
+	}
+}
+
 // TestProxy_ExtraHeaders_MergesWithExisting verifies that extra headers are
 // merged with client-sent headers rather than replacing them.
 func TestProxy_ExtraHeaders_MergesWithExisting(t *testing.T) {
@@ -3809,5 +4205,318 @@ func TestNewTokenSubstitution(t *testing.T) {
 	sub := NewTokenSubstitution("placeholder", "real")
 	if sub == nil {
 		t.Fatal("NewTokenSubstitution returned nil")
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_OutrankedResolverStillSanitizes verifies
+// that a matched resolver always runs — even when a better-matched static
+// credential will win — because resolvers may mutate the request (e.g. strip
+// subject-identity headers) and skipping them would leak those headers
+// upstream alongside the static credential.
+func TestProxy_GetCredentialsForRequest_OutrankedResolverStillSanitizes(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
+	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		innerReq.Header.Del("X-Subject-Token")
+		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "resolver-grant"}}, nil
+	})
+	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
+	req.Header.Set("X-Subject-Token", "caller-identity")
+
+	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "static-grant" {
+		t.Fatalf("grant = %v, want static-grant (exact static must still win)", creds)
+	}
+	if got := req.Header.Get("X-Subject-Token"); got != "" {
+		t.Fatalf("X-Subject-Token = %q, want removed (outranked resolver must still run for its request-sanitizing side effects)", got)
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_OutrankedResolverErrorFallsThrough
+// verifies that an error from a resolver whose match is outranked by a
+// static credential does not fail the request — the static credential is
+// used, since the resolver's result was not going to be injected anyway.
+func TestProxy_GetCredentialsForRequest_OutrankedResolverErrorFallsThrough(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
+	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		return nil, errors.New("sts unavailable")
+	})
+	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
+
+	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v (outranked resolver error must not fail the request)", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "static-grant" {
+		t.Fatalf("grant = %v, want static-grant", creds)
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_CaseFoldPortBearingExactKey verifies
+// that the case-insensitive exact tier also folds port-bearing keys
+// (expressible in embedder-built RunContextData maps): a case-variant
+// host:port must hit its exact entry, not fall through to a wildcard.
+func TestProxy_GetCredentialsForRequest_CaseFoldPortBearingExactKey(t *testing.T) {
+	p := NewProxy()
+	rc := &RunContextData{
+		Credentials: map[string][]credentialHeader{
+			"internal.example.com:8443": {{Name: "Authorization", Value: "Bearer exact", Grant: "exact-grant"}},
+			"*.example.com:8443":        {{Name: "Authorization", Value: "Bearer wild", Grant: "wild-grant"}},
+		},
+	}
+	req := httptest.NewRequest("GET", "https://internal.example.com:8443/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
+
+	creds, err := p.getCredentialsForRequest(req, req, "Internal.example.com:8443")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "exact-grant" {
+		t.Fatalf("grant = %v, want exact-grant (case-variant host:port must hit its port-bearing exact key)", creds)
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_WildcardSpecificityIgnoresPort verifies
+// that wildcard specificity is ranked by the domain part of the key, not raw
+// byte length: a port suffix must not make a domain-broader key outrank a
+// domain-narrower one, while at equal domain specificity a port-pinned key
+// beats a port-less one.
+func TestProxy_GetCredentialsForRequest_WildcardSpecificityIgnoresPort(t *testing.T) {
+	p := NewProxy()
+	rc := &RunContextData{
+		Credentials: map[string][]credentialHeader{
+			"*.example.com:8443": {{Name: "Authorization", Value: "Bearer broad", Grant: "broad-grant"}},
+			"*.api.example.com":  {{Name: "Authorization", Value: "Bearer narrow", Grant: "narrow-grant"}},
+		},
+	}
+	req := httptest.NewRequest("GET", "https://svc.api.example.com:8443/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
+
+	creds, err := p.getCredentialsForRequest(req, req, "svc.api.example.com:8443")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "narrow-grant" {
+		t.Fatalf("grant = %v, want narrow-grant (domain specificity must outrank a port suffix)", creds)
+	}
+
+	rc2 := &RunContextData{
+		Credentials: map[string][]credentialHeader{
+			"*.api.example.com:8443": {{Name: "Authorization", Value: "Bearer pinned", Grant: "pinned-grant"}},
+			"*.api.example.com":      {{Name: "Authorization", Value: "Bearer plain", Grant: "plain-grant"}},
+		},
+	}
+	req2 := httptest.NewRequest("GET", "https://svc.api.example.com:8443/", nil)
+	req2 = req2.WithContext(context.WithValue(req2.Context(), runContextKey, rc2))
+
+	creds, err = p.getCredentialsForRequest(req2, req2, "svc.api.example.com:8443")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "pinned-grant" {
+		t.Fatalf("grant = %v, want pinned-grant (port-pinned key beats port-less at equal domain)", creds)
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_FoldTierPortPrecedence verifies that
+// the case-insensitive exact tier keeps the verbatim tiers' precedence: a
+// key fold-matching the full host:port beats a key fold-matching only the
+// bare host, so request-host casing cannot flip which credential is sent.
+func TestProxy_GetCredentialsForRequest_FoldTierPortPrecedence(t *testing.T) {
+	p := NewProxy()
+	rc := &RunContextData{
+		Credentials: map[string][]credentialHeader{
+			"API.example.com":      {{Name: "Authorization", Value: "Bearer portless", Grant: "portless-grant"}},
+			"API.example.com:8443": {{Name: "Authorization", Value: "Bearer pinned", Grant: "pinned-grant"}},
+		},
+	}
+	req := httptest.NewRequest("GET", "https://api.example.com:8443/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
+
+	// Repeat: a map-iteration-order-dependent pick must not pass by luck.
+	for i := range 100 {
+		creds, err := p.getCredentialsForRequest(req, req, "api.example.com:8443")
+		if err != nil {
+			t.Fatalf("getCredentialsForRequest: %v", err)
+		}
+		if len(creds) != 1 || creds[0].Grant != "pinned-grant" {
+			t.Fatalf("iteration %d: creds = %v, want pinned-grant (host:port fold match must beat bare fold match)", i, creds)
+		}
+	}
+}
+
+// TestProxy_HostKeyedMaps_EmptyEntryOptOut verifies presence-based exact
+// matching for the companion host-keyed maps: an embedder-supplied explicit
+// empty/nil entry for host:port opts that port out, suppressing both the
+// bare-host entry and any wildcard entry — the pre-wildcard behavior for
+// these maps, which embedders may rely on to keep secrets off specific
+// ports. (Credentials keep their historical len>0 gating instead; see
+// TestProxy_GetCredentialsForRequest_EmptyExactEntryFallsThrough.)
+func TestProxy_HostKeyedMaps_EmptyEntryOptOut(t *testing.T) {
+	const optedOut = "internal.example.com:8443"
+	p := NewProxy()
+	rc := &RunContextData{
+		ExtraHeaders: map[string][]extraHeader{
+			"internal.example.com": {{Name: "X-Secret", Value: "s3cret"}},
+			optedOut:               nil,
+		},
+		RemoveHeaders: map[string][]string{
+			"*.example.com": {"X-Strip"},
+			optedOut:        nil,
+		},
+		TokenSubstitutions: map[string]*tokenSubstitution{
+			"internal.example.com": {placeholder: "PLACEHOLDER", realToken: "real"},
+			optedOut:               nil,
+		},
+		ResponseTransformers: map[string][]ResponseTransformer{
+			"internal.example.com": {func(req, resp any) (any, bool) { return resp, false }},
+			optedOut:               nil,
+		},
+	}
+	req := httptest.NewRequest("GET", "https://"+optedOut+"/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
+
+	if got := p.getExtraHeadersForRequest(req, optedOut); len(got) != 0 {
+		t.Errorf("getExtraHeadersForRequest(%q) = %v, want none (explicit nil entry opts the port out)", optedOut, got)
+	}
+	if got := p.getRemoveHeadersForRequest(req, optedOut); len(got) != 0 {
+		t.Errorf("getRemoveHeadersForRequest(%q) = %v, want none (explicit nil entry opts the port out)", optedOut, got)
+	}
+	if sub := p.getTokenSubstitutionForRequest(req, optedOut); sub != nil {
+		t.Errorf("getTokenSubstitutionForRequest(%q) = %v, want nil (explicit nil entry opts the port out)", optedOut, sub)
+	}
+	if got := p.getResponseTransformersForRequest(req, optedOut); len(got) != 0 {
+		t.Errorf("getResponseTransformersForRequest(%q) returned %d transformers, want none (explicit nil entry opts the port out)", optedOut, len(got))
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_NilResolverOptOut verifies that an
+// explicitly-nil resolver entry disables resolution for that host — the
+// pre-wildcard behavior, where the nil exact entry was found and treated as
+// "no resolver" — instead of being skipped so a broader wildcard resolver
+// fires for a host the embedder deliberately opted out.
+func TestProxy_GetCredentialsForRequest_NilResolverOptOut(t *testing.T) {
+	p := NewProxy()
+	var invoked atomic.Bool
+	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		invoked.Store(true)
+		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "resolver-grant"}}, nil
+	})
+	p.SetCredentialResolver("api.example.com", nil)
+	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
+	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
+
+	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if invoked.Load() {
+		t.Fatal("wildcard resolver ran for a host whose resolver was explicitly set to nil (opt-out must block broader resolvers)")
+	}
+	if len(creds) != 1 || creds[0].Grant != "static-grant" {
+		t.Fatalf("creds = %v, want static-grant", creds)
+	}
+
+	// The wildcard resolver still serves hosts that were not opted out.
+	creds, err = p.getCredentialsForRequest(req, req, "other.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest(other): %v", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "resolver-grant" {
+		t.Fatalf("creds = %v, want resolver-grant", creds)
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_VerbatimStaticBeatsFoldResolver
+// verifies cross-map rank distinguishes verbatim from case-fold exact
+// matches: a static credential registered under the host's verbatim casing
+// beats a resolver whose key matches only by case folding — the same order
+// the tiers use inside a single map.
+func TestProxy_GetCredentialsForRequest_VerbatimStaticBeatsFoldResolver(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
+	p.SetCredentialResolver("API.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "resolver-grant"}}, nil
+	})
+	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
+
+	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "static-grant" {
+		t.Fatalf("creds = %v, want static-grant (verbatim static must beat fold-only resolver)", creds)
+	}
+}
+
+// TestProxy_HandleHTTP_PolicyCheckedBeforeResolvers verifies that plain-HTTP
+// requests to policy-denied hosts are rejected before credential resolution
+// runs: a wildcard-matched resolver must not perform external side effects
+// (e.g. token-exchange round trips) for hosts the client may not reach, and
+// the client must see the policy denial, not a resolver error.
+func TestProxy_HandleHTTP_PolicyCheckedBeforeResolvers(t *testing.T) {
+	p := NewProxy()
+	p.SetNetworkPolicy("strict", []string{"allowed.example.com"}, nil)
+	var invoked atomic.Bool
+	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		invoked.Store(true)
+		return nil, errors.New("sts unavailable")
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxyServer.URL))},
+	}
+
+	resp, err := client.Get("http://denied.example.com/")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Errorf("status = %d, want %d (policy denial, not a resolver error)", resp.StatusCode, http.StatusProxyAuthRequired)
+	}
+	if invoked.Load() {
+		t.Error("resolver ran for a policy-denied host (external side effects must not be reachable through denied hosts)")
+	}
+}
+
+// TestProxy_HandleHTTP_PortPinnedCredentialKey verifies the plain-HTTP path
+// passes the port-bearing request host to credential lookup, so a
+// port-pinned key (expressible in embedder-built maps) matches. The key is
+// written directly to the map: SetCredentialWithGrant rejects ':' in hosts.
+func TestProxy_HandleHTTP_PortPinnedCredentialKey(t *testing.T) {
+	var receivedAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	hostPort := mustParseURL(backend.URL).Host // "127.0.0.1:PORT"
+	p.mu.Lock()
+	p.credentials[hostPort] = []credentialHeader{{Name: "Authorization", Value: "Bearer port-pinned", Grant: "pinned-grant"}}
+	p.mu.Unlock()
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxyServer.URL))},
+	}
+
+	resp, err := client.Get(backend.URL + "/")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	if receivedAuth != "Bearer port-pinned" {
+		t.Errorf("Authorization = %q, want %q (port-pinned key must match on the plain-HTTP path)", receivedAuth, "Bearer port-pinned")
 	}
 }
