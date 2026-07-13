@@ -1067,8 +1067,18 @@ func lookupHostKeyed[V any](m map[string]V, host string) (V, hostMatch) {
 	var bestKey string
 	match := hostMatchNone
 	for key, v := range m {
+		// A case-insensitive exact match beats any wildcard match. When a
+		// host is (unusually) registered under several casings, the
+		// lexicographically smallest key wins so the pick does not depend
+		// on map iteration order.
 		if strings.EqualFold(key, bare) {
-			return v, hostMatchExact
+			if match != hostMatchExact || key < bestKey {
+				bestKey, best, match = key, v, hostMatchExact
+			}
+			continue
+		}
+		if match == hostMatchExact {
+			continue
 		}
 		if matchWildcardHostKey(key, bare) && len(key) > len(bestKey) {
 			bestKey, best, match = key, v, hostMatchWildcard

@@ -1384,6 +1384,29 @@ func TestProxy_GetCredentials_MixedCaseHost(t *testing.T) {
 	}
 }
 
+// TestProxy_GetCredentials_CaseVariantKeysDeterministic verifies that when
+// the same host is (unusually) registered under two different casings, a
+// third-casing request resolves to a deterministic winner — the
+// lexicographically smallest key — rather than whichever key Go's randomized
+// map iteration reaches first.
+func TestProxy_GetCredentials_CaseVariantKeysDeterministic(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialWithGrant("API.example.com", "Authorization", "Bearer upper-token", "upper-grant")
+	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer lower-token", "lower-grant")
+
+	// Map iteration order is randomized per range statement; repeat the
+	// lookup so a first-match implementation cannot pass by luck.
+	for i := range 100 {
+		creds := p.getCredentials("Api.example.com")
+		if len(creds) != 1 {
+			t.Fatalf("getCredentials returned %d credentials, want 1", len(creds))
+		}
+		if creds[0].Grant != "upper-grant" {
+			t.Fatalf("iteration %d: grant = %q, want %q (lexicographically smallest case-variant key must win)", i, creds[0].Grant, "upper-grant")
+		}
+	}
+}
+
 // TestProxy_HostKeyedMaps_WildcardKey verifies that the companion host-keyed
 // maps — extra headers, remove-headers, token substitutions, and response
 // transformers — honor wildcard host keys the same way credentials do, in
