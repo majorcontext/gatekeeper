@@ -4598,6 +4598,54 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+// TestProxy_HandleHTTP_PolicyAndLookupPortAgree verifies that the
+// credential lookup for handleHTTP sees the same port the network-policy
+// check evaluated. For an out-of-range URL port (e.g. ":99999"), the
+// policy check falls back to port 80 (documented behavior), so the
+// credential lookup must also resolve to ":80" — not the raw, unparseable
+// URL port — or the two layers disagree about which host:port the
+// request is really going to.
+func TestProxy_HandleHTTP_PolicyAndLookupPortAgree(t *testing.T) {
+	var mu sync.Mutex
+	var receivedAuth string
+	orig := httpTransport
+	defer func() { httpTransport = orig }()
+	httpTransport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		mu.Lock()
+		receivedAuth = req.Header.Get("Authorization")
+		mu.Unlock()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("ok")),
+			Request:    req,
+		}, nil
+	})
+
+	p := NewProxy()
+	p.mu.Lock()
+	p.credentials["internal.example.com:80"] = []credentialHeader{{Name: "Authorization", Value: "Bearer port80", Grant: "port80-grant"}}
+	p.mu.Unlock()
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxyServer.URL))},
+	}
+
+	resp, err := client.Get("http://internal.example.com:99999/")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if receivedAuth != "Bearer port80" {
+		t.Errorf("Authorization = %q, want %q (policy treats the unparseable port as 80, so credential lookup must agree)", receivedAuth, "Bearer port80")
+	}
+}
+
 // TestProxy_GetCredentialsForRequest_OutrankedResolverNotCalled verifies
 // that a resolver whose match is outranked by a static credential is not
 // invoked at all — its external call (e.g. an STS round trip) must not add

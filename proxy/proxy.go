@@ -2047,6 +2047,12 @@ func (p *Proxy) writeHostBlockedResponse(w http.ResponseWriter, host string, por
 // port-pinned host keys match however the target was spelled (e.g. a key
 // pinned to ":80" fires for "http://host/" as well as "http://host:80/").
 // JoinHostPort also re-brackets IPv6 literals correctly.
+//
+// handleHTTP does not use this helper for its lookup host: it has its own
+// int port derived for the network-policy check, and builds the lookup
+// host from that same int so the two can never diverge. This helper
+// remains the source of the lookup host for handleRelay, which has no
+// separate policy-port derivation to stay in sync with.
 func lookupHostForURL(u *url.URL) string {
 	port := u.Port()
 	if port == "" {
@@ -2083,8 +2089,13 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Host-keyed lookups get host:port — with the scheme-default port made
 	// explicit, so a key pinned to ":80" fires for "http://host/" too —
-	// while host stays bare for policy checks and logging.
-	lookupHost := lookupHostForURL(r.URL)
+	// while host stays bare for policy checks and logging. Built from the
+	// same int the network-policy check below uses (not lookupHostForURL's
+	// raw URL-port parse), so the two can never disagree about which port
+	// a request is really headed to — e.g. an out-of-range URL port like
+	// ":99999" falls back to 80 for policy, and the credential lookup must
+	// see :80 too.
+	lookupHost := net.JoinHostPort(host, strconv.Itoa(port))
 
 	// Check network policy
 	if !p.checkNetworkPolicyForRequest(r, host, port, r.Method, r.URL.Path) {
