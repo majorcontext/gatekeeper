@@ -1407,6 +1407,129 @@ func TestProxy_GetCredentials_CaseVariantKeysDeterministic(t *testing.T) {
 	}
 }
 
+// TestProxy_GetCredentialsForRequest_MoreSpecificWildcardStaticBeatsResolver
+// verifies cross-map wildcard specificity: when a static credential and a
+// resolver both match via wildcard keys, the more specific (longer) key wins
+// regardless of which map it lives in.
+func TestProxy_GetCredentialsForRequest_MoreSpecificWildcardStaticBeatsResolver(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialWithGrant("*.api.example.com", "Authorization", "Bearer static-token", "static-grant")
+	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "resolver-grant"}}, nil
+	})
+	req := httptest.NewRequest("GET", "https://svc.api.example.com/", nil)
+
+	creds, err := p.getCredentialsForRequest(req, req, "svc.api.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "static-grant" {
+		t.Fatalf("grant = %v, want static-grant (*.api.example.com static must beat *.example.com resolver)", creds)
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_EmptyExactEntryFallsThrough verifies
+// that a present-but-empty entry in an embedder-supplied RunContextData
+// credentials map does not shadow a populated bare-host entry — matching the
+// pre-refactor len>0 gating.
+func TestProxy_GetCredentialsForRequest_EmptyExactEntryFallsThrough(t *testing.T) {
+	p := NewProxy()
+	rc := &RunContextData{
+		Credentials: map[string][]credentialHeader{
+			"api.example.com:443": {},
+			"api.example.com":     {{Name: "Authorization", Value: "Bearer tok", Grant: "the-grant"}},
+		},
+	}
+	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
+
+	creds, err := p.getCredentialsForRequest(req, req, "api.example.com:443")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "the-grant" {
+		t.Fatalf("creds = %v, want the-grant credential (empty exact entry must not shadow bare-host entry)", creds)
+	}
+}
+
+// TestProxy_GetCredentials_WildcardKeyWithPort verifies that a wildcard key
+// carrying a port matches subdomains on exactly that port and nothing else.
+// The proxy's own setters reject keys containing ":" (isValidHost), so such
+// keys can only exist in embedder-supplied RunContextData maps — the lookup
+// is exercised through that path.
+func TestProxy_GetCredentials_WildcardKeyWithPort(t *testing.T) {
+	p := NewProxy()
+	rc := &RunContextData{
+		Credentials: map[string][]credentialHeader{
+			"*.internal.example.com:8443": {{Name: "Authorization", Value: "Bearer tok", Grant: "port-grant"}},
+		},
+	}
+	lookup := func(t *testing.T, host string) []credentialHeader {
+		t.Helper()
+		req := httptest.NewRequest("GET", "https://"+host+"/", nil)
+		req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
+		creds, err := p.getCredentialsForRequest(req, req, host)
+		if err != nil {
+			t.Fatalf("getCredentialsForRequest(%q): %v", host, err)
+		}
+		return creds
+	}
+
+	if creds := lookup(t, "svc.internal.example.com:8443"); len(creds) != 1 || creds[0].Grant != "port-grant" {
+		t.Errorf("lookup(svc.internal.example.com:8443) = %v, want port-grant credential", creds)
+	}
+	if creds := lookup(t, "svc.internal.example.com:9999"); len(creds) != 0 {
+		t.Errorf("lookup(svc.internal.example.com:9999) = %v, want none (port must match)", creds)
+	}
+	if creds := lookup(t, "svc.internal.example.com"); len(creds) != 0 {
+		t.Errorf("lookup(svc.internal.example.com) = %v, want none (port must match)", creds)
+	}
+	if creds := lookup(t, "internal.example.com:8443"); len(creds) != 0 {
+		t.Errorf("lookup(internal.example.com:8443) = %v, want none (apex excluded)", creds)
+	}
+}
+
+// TestProxy_GetCredentials_CaseVariantWildcardKeysDeterministic verifies the
+// wildcard tier's tie-break: equal-length wildcard keys (only possible as
+// case-variants of each other) resolve to the lexicographically smallest key
+// rather than random map iteration order.
+func TestProxy_GetCredentials_CaseVariantWildcardKeysDeterministic(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialWithGrant("*.API.example.com", "Authorization", "Bearer upper", "upper-grant")
+	p.SetCredentialWithGrant("*.api.example.com", "Authorization", "Bearer lower", "lower-grant")
+
+	for i := range 100 {
+		creds := p.getCredentials("svc.api.example.com")
+		if len(creds) != 1 {
+			t.Fatalf("getCredentials returned %d credentials, want 1", len(creds))
+		}
+		if creds[0].Grant != "upper-grant" {
+			t.Fatalf("iteration %d: grant = %q, want %q (lexicographically smallest wildcard key must win)", i, creds[0].Grant, "upper-grant")
+		}
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_StaticReadAfterResolverMiss verifies
+// that when a resolver returns nil, the static-credential fallback reads the
+// map fresh rather than a snapshot taken before the resolver ran — a token
+// refresh landing during a slow resolver call must not be missed.
+func TestProxy_GetCredentialsForRequest_StaticReadAfterResolverMiss(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialResolver("api.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer refreshed", "refreshed-grant")
+		return nil, nil
+	})
+	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
+
+	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "refreshed-grant" {
+		t.Fatalf("creds = %v, want refreshed-grant (static fallback must read fresh after resolver miss)", creds)
+	}
+}
+
 // TestProxy_HostKeyedMaps_WildcardKey verifies that the companion host-keyed
 // maps — extra headers, remove-headers, token substitutions, and response
 // transformers — honor wildcard host keys the same way credentials do, in

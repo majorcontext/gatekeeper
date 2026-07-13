@@ -89,8 +89,11 @@ func matchesPattern(pattern hostPattern, host string, port int) bool {
 // hostHasSuffixFold reports whether host ends with suffix, ignoring case.
 // This is the wildcard-suffix rule shared by network allow patterns
 // (matchesPattern) and host-keyed map lookups (matchWildcardHostKey).
+// Implemented via ToLower rather than byte-length slicing: characters whose
+// lowercase form has a different byte length (e.g. U+1E9E ẞ → U+00DF ß)
+// would make a fixed-length slice split mid-rune and wrongly reject.
 func hostHasSuffixFold(host, suffix string) bool {
-	return len(host) >= len(suffix) && strings.EqualFold(host[len(host)-len(suffix):], suffix)
+	return strings.HasSuffix(strings.ToLower(host), strings.ToLower(suffix))
 }
 
 // grantHosts maps grant names to their allowed host patterns.

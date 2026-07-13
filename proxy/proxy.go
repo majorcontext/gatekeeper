@@ -902,7 +902,7 @@ func (p *Proxy) SetTokenSubstitution(host, placeholder, realToken string) {
 func (p *Proxy) getTokenSubstitution(host string) *tokenSubstitution {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	sub, _ := lookupHostKeyed(p.tokenSubstitutions, host)
+	sub, _ := lookupHostKeyed(p.tokenSubstitutions, host, nonNilValue)
 	return sub
 }
 
@@ -910,7 +910,7 @@ func (p *Proxy) getTokenSubstitution(host string) *tokenSubstitution {
 func (p *Proxy) getRemoveHeaders(host string) []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	headers, _ := lookupHostKeyed(p.removeHeaders, host)
+	headers, _ := lookupHostKeyed(p.removeHeaders, host, nonEmptySlice)
 	return headers
 }
 
@@ -1029,63 +1029,98 @@ func bareHost(host string) string {
 }
 
 // matchWildcardHostKey reports whether a wildcard host map key like
-// "*.example.com" matches the bare (port-stripped) request host.
-// "*.example.com" matches "api.example.com" and "a.b.example.com", never
-// "example.com" itself; mirrors matchesPattern's wildcard branch.
-func matchWildcardHostKey(key, bare string) bool {
+// "*.example.com" matches the request host. "*.example.com" matches
+// "api.example.com" and "a.b.example.com", never "example.com" itself;
+// mirrors matchesPattern's wildcard branch. A port-less key matches the
+// port-stripped host (any port); a key carrying a port ("*.example.com:8443")
+// matches the full host:port, so the port must match exactly.
+func matchWildcardHostKey(key, host, bare string) bool {
 	if !strings.HasPrefix(key, "*.") {
 		return false
 	}
-	return hostHasSuffixFold(bare, key[1:]) // "*.example.com" -> ".example.com"
+	suffix := key[1:] // "*.example.com" -> ".example.com"
+	return hostHasSuffixFold(bare, suffix) || (host != bare && hostHasSuffixFold(host, suffix))
 }
 
-// hostMatch classifies how lookupHostKeyed matched a host against a map key.
-type hostMatch int
+// hostMatchTier classifies how lookupHostKeyed matched a host against a key.
+type hostMatchTier int
 
 const (
-	hostMatchNone hostMatch = iota
+	hostMatchNone hostMatchTier = iota
 	hostMatchWildcard
 	hostMatchExact
 )
 
+// hostMatch records how a lookup matched, for callers that rank matches
+// from different maps against each other (e.g. static credentials vs
+// credential resolvers).
+type hostMatch struct {
+	tier hostMatchTier
+	key  string
+}
+
+// outranks reports whether m is a strictly better match than other for the
+// same host: exact beats wildcard, and between wildcards the more specific
+// (longer) key wins.
+func (m hostMatch) outranks(other hostMatch) bool {
+	if m.tier != other.tier {
+		return m.tier > other.tier
+	}
+	return m.tier == hostMatchWildcard && len(m.key) > len(other.key)
+}
+
 // lookupHostKeyed resolves a host against a map keyed by exact hostnames or
-// "*." wildcard patterns. Exact keys win over wildcard keys: the host is
-// tried verbatim, then port-stripped, then case-insensitively; only when
-// every exact tier misses is the most specific (longest) matching wildcard
-// key used. Returns the zero value and hostMatchNone when nothing matches.
-func lookupHostKeyed[V any](m map[string]V, host string) (V, hostMatch) {
-	if v, ok := m[host]; ok {
-		return v, hostMatchExact
+// "*." wildcard patterns, skipping entries the usable predicate rejects
+// (embedder-supplied maps may hold empty slices or nil values, which must
+// not shadow a key from a later tier). Exact keys win over wildcard keys:
+// the host is tried verbatim, then port-stripped, then case-insensitively;
+// only when every exact tier misses is the most specific (longest) matching
+// wildcard key used. Ties (only possible between case-variant keys) go to
+// the lexicographically smallest key so the pick never depends on map
+// iteration order. The fallback scan is linear in the number of configured
+// host keys; it runs only when the verbatim and bare lookups miss, and the
+// maps are config-scale, not request-scale.
+func lookupHostKeyed[V any](m map[string]V, host string, usable func(V) bool) (V, hostMatch) {
+	if v, ok := m[host]; ok && usable(v) {
+		return v, hostMatch{hostMatchExact, host}
 	}
 	bare := bareHost(host)
 	if bare != host {
-		if v, ok := m[bare]; ok {
-			return v, hostMatchExact
+		if v, ok := m[bare]; ok && usable(v) {
+			return v, hostMatch{hostMatchExact, bare}
 		}
 	}
 	var best V
 	var bestKey string
-	match := hostMatchNone
+	tier := hostMatchNone
+	better := func(key string) bool {
+		return len(key) > len(bestKey) || (len(key) == len(bestKey) && key < bestKey)
+	}
 	for key, v := range m {
-		// A case-insensitive exact match beats any wildcard match. When a
-		// host is (unusually) registered under several casings, the
-		// lexicographically smallest key wins so the pick does not depend
-		// on map iteration order.
+		if !usable(v) {
+			continue
+		}
 		if strings.EqualFold(key, bare) {
-			if match != hostMatchExact || key < bestKey {
-				bestKey, best, match = key, v, hostMatchExact
+			if tier != hostMatchExact || key < bestKey {
+				bestKey, best, tier = key, v, hostMatchExact
 			}
 			continue
 		}
-		if match == hostMatchExact {
+		if tier == hostMatchExact {
 			continue
 		}
-		if matchWildcardHostKey(key, bare) && len(key) > len(bestKey) {
-			bestKey, best, match = key, v, hostMatchWildcard
+		if matchWildcardHostKey(key, host, bare) && better(key) {
+			bestKey, best, tier = key, v, hostMatchWildcard
 		}
 	}
-	return best, match
+	return best, hostMatch{tier, bestKey}
 }
+
+// nonEmptySlice and nonNilValue are the usable predicates for host-keyed
+// maps whose values are slices and single values respectively.
+func nonEmptySlice[T any](v []T) bool { return len(v) > 0 }
+
+func nonNilValue[T any](v *T) bool { return v != nil }
 
 // getCredentials returns all credential headers for a host; see
 // lookupHostKeyed for the matching rules.
@@ -1094,16 +1129,16 @@ func (p *Proxy) getCredentials(host string) []credentialHeader {
 	return creds
 }
 
-// getCredentialsMatch is getCredentials plus the match tier, for callers
+// getCredentialsMatch is getCredentials plus the match rank, for callers
 // that weigh exact static credentials against wildcard-keyed resolvers.
 // Returns a copy of the slice to avoid data races with concurrent
 // SetCredentialWithGrant calls (e.g., token refresh).
 func (p *Proxy) getCredentialsMatch(host string) ([]credentialHeader, hostMatch) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	creds, match := lookupHostKeyed(p.credentials, host)
+	creds, match := lookupHostKeyed(p.credentials, host, nonEmptySlice)
 	if len(creds) == 0 {
-		return nil, hostMatchNone
+		return nil, hostMatch{}
 	}
 	out := make([]credentialHeader, len(creds))
 	copy(out, creds)
@@ -1121,7 +1156,7 @@ func (p *Proxy) getCredentialResolver(host string) CredentialResolver {
 func (p *Proxy) getCredentialResolverMatch(host string) (CredentialResolver, hostMatch) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return lookupHostKeyed(p.credentialResolvers, host)
+	return lookupHostKeyed(p.credentialResolvers, host, func(r CredentialResolver) bool { return r != nil })
 }
 
 // credentialInjectionResult holds the outcome of credential injection.
@@ -1272,7 +1307,7 @@ func mergeExtraHeaders(req *http.Request, host string, headers []extraHeader) {
 func (p *Proxy) getExtraHeaders(host string) []extraHeader {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	headers, _ := lookupHostKeyed(p.extraHeaders, host)
+	headers, _ := lookupHostKeyed(p.extraHeaders, host, nonEmptySlice)
 	return headers
 }
 
@@ -1280,7 +1315,7 @@ func (p *Proxy) getExtraHeaders(host string) []extraHeader {
 func (p *Proxy) getResponseTransformers(host string) []ResponseTransformer {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	transformers, _ := lookupHostKeyed(p.responseTransformers, host)
+	transformers, _ := lookupHostKeyed(p.responseTransformers, host, nonEmptySlice)
 	return transformers
 }
 
@@ -1309,27 +1344,31 @@ func getRunContext(r *http.Request) *RunContextData {
 // request the resolver may inspect and modify (e.g., strip subject headers).
 func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
 	if rc := getRunContext(ctxReq); rc != nil {
-		creds, _ := lookupHostKeyed(rc.Credentials, host)
+		creds, _ := lookupHostKeyed(rc.Credentials, host, nonEmptySlice)
 		if len(creds) > 0 {
 			return creds, nil
 		}
 		return nil, nil
 	}
 	resolver, resolverMatch := p.getCredentialResolverMatch(host)
-	staticCreds, staticMatch := p.getCredentialsMatch(host)
-	// An exact-keyed static credential outranks a wildcard-keyed resolver:
-	// a resolver registered under "*.example.com" must not shadow a static
-	// credential configured for "api.example.com" specifically.
-	if resolver != nil && !(resolverMatch == hostMatchWildcard && staticMatch == hostMatchExact) {
-		creds, err := resolver(innerReq.Context(), ctxReq, innerReq, host)
-		if err != nil {
-			return nil, err
-		}
-		if len(creds) > 0 {
-			return creds, nil
+	// A better-matched static credential outranks the resolver: a resolver
+	// registered under "*.example.com" must shadow neither a static
+	// credential configured for "api.example.com" specifically nor one
+	// under the more specific "*.api.example.com".
+	if resolver != nil {
+		if _, staticMatch := p.getCredentialsMatch(host); !staticMatch.outranks(resolverMatch) {
+			creds, err := resolver(innerReq.Context(), ctxReq, innerReq, host)
+			if err != nil {
+				return nil, err
+			}
+			if len(creds) > 0 {
+				return creds, nil
+			}
 		}
 	}
-	return staticCreds, nil
+	// Read static credentials after the resolver has run, not before: a
+	// token refresh landing while a slow resolver was out must be seen.
+	return p.getCredentials(host), nil
 }
 
 // invalidateCredentialsOnAuthFailure drops the cached state behind each
@@ -1369,7 +1408,7 @@ func invalidateCredentialsOnAuthFailure(creds []credentialHeader, statusCode int
 // RunContextData first, then falling back to the proxy's own map.
 func (p *Proxy) getExtraHeadersForRequest(r *http.Request, host string) []extraHeader {
 	if rc := getRunContext(r); rc != nil {
-		headers, _ := lookupHostKeyed(rc.ExtraHeaders, host)
+		headers, _ := lookupHostKeyed(rc.ExtraHeaders, host, nonEmptySlice)
 		return headers
 	}
 	return p.getExtraHeaders(host)
@@ -1379,7 +1418,7 @@ func (p *Proxy) getExtraHeadersForRequest(r *http.Request, host string) []extraH
 // RunContextData first, then falling back to the proxy's own map.
 func (p *Proxy) getRemoveHeadersForRequest(r *http.Request, host string) []string {
 	if rc := getRunContext(r); rc != nil {
-		headers, _ := lookupHostKeyed(rc.RemoveHeaders, host)
+		headers, _ := lookupHostKeyed(rc.RemoveHeaders, host, nonEmptySlice)
 		return headers
 	}
 	return p.getRemoveHeaders(host)
@@ -1389,7 +1428,7 @@ func (p *Proxy) getRemoveHeadersForRequest(r *http.Request, host string) []strin
 // checking RunContextData first, then falling back to the proxy's own map.
 func (p *Proxy) getTokenSubstitutionForRequest(r *http.Request, host string) *tokenSubstitution {
 	if rc := getRunContext(r); rc != nil {
-		sub, _ := lookupHostKeyed(rc.TokenSubstitutions, host)
+		sub, _ := lookupHostKeyed(rc.TokenSubstitutions, host, nonNilValue)
 		return sub
 	}
 	return p.getTokenSubstitution(host)
@@ -1399,7 +1438,7 @@ func (p *Proxy) getTokenSubstitutionForRequest(r *http.Request, host string) *to
 // checking RunContextData first, then falling back to the proxy's own map.
 func (p *Proxy) getResponseTransformersForRequest(r *http.Request, host string) []ResponseTransformer {
 	if rc := getRunContext(r); rc != nil {
-		transformers, _ := lookupHostKeyed(rc.ResponseTransformers, host)
+		transformers, _ := lookupHostKeyed(rc.ResponseTransformers, host, nonEmptySlice)
 		return transformers
 	}
 	return p.getResponseTransformers(host)

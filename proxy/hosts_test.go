@@ -573,3 +573,26 @@ func TestRegisterGrantHosts(t *testing.T) {
 		t.Errorf("hosts[0] = %q, want coverage.example.com", hosts[0])
 	}
 }
+
+// TestHostHasSuffixFold_UnicodeCaseFold verifies the suffix match handles
+// characters whose lowercase form has a different byte length (e.g. U+1E9E
+// LATIN CAPITAL LETTER SHARP S, 3 bytes, lowercases to U+00DF, 2 bytes) —
+// fixed-length byte slicing would split mid-rune and wrongly reject.
+func TestHostHasSuffixFold_UnicodeCaseFold(t *testing.T) {
+	tests := []struct {
+		host   string
+		suffix string
+		want   bool
+	}{
+		{"FOO.STRAẞE.example.com", ".straße.example.com", true},
+		{"foo.straße.example.com", ".straße.example.com", true},
+		{"api.example.com", ".example.com", true},
+		{"API.EXAMPLE.COM", ".example.com", true},
+		{"example.com", ".example.com", false},
+	}
+	for _, tt := range tests {
+		if got := hostHasSuffixFold(tt.host, tt.suffix); got != tt.want {
+			t.Errorf("hostHasSuffixFold(%q, %q) = %v, want %v", tt.host, tt.suffix, got, tt.want)
+		}
+	}
+}
