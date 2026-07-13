@@ -1284,3 +1284,31 @@ func TestIntercept_SetTokenSubstitution(t *testing.T) {
 		t.Errorf("path = %q, placeholder should have been replaced", receivedPath)
 	}
 }
+
+// TestIntercept_PortPinnedCredentialKey verifies the CONNECT interception
+// path passes the port-bearing CONNECT target to credential lookup, so a
+// port-pinned key (expressible in embedder-built maps) matches. The key is
+// written directly to the map: SetCredentialWithGrant rejects ':' in hosts.
+func TestIntercept_PortPinnedCredentialKey(t *testing.T) {
+	var receivedAuth string
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.Write([]byte("ok"))
+	}))
+
+	hostPort := mustParseURL(setup.Backend.URL).Host // "127.0.0.1:PORT"
+	setup.Proxy.mu.Lock()
+	setup.Proxy.credentials[hostPort] = []credentialHeader{{Name: "Authorization", Value: "Bearer port-pinned", Grant: "pinned-grant"}}
+	setup.Proxy.mu.Unlock()
+
+	resp, err := setup.Client.Get(setup.Backend.URL + "/api/data")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body)
+
+	if receivedAuth != "Bearer port-pinned" {
+		t.Errorf("Authorization = %q, want %q (port-pinned key must match on the intercept path)", receivedAuth, "Bearer port-pinned")
+	}
+}

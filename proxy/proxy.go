@@ -567,6 +567,9 @@ func MatchesHostPattern(pattern HostPattern, host string, port int) bool {
 }
 
 // RunContextData holds per-run credential data resolved by ContextResolver.
+// The host-keyed maps are read without synchronization on every request —
+// including linear scans for wildcard and case-fold matching — so they must
+// not be mutated after the RunContextData is registered with the proxy.
 type RunContextData struct {
 	RunID                string
 	Credentials          map[string][]credentialHeader
@@ -834,7 +837,10 @@ func (p *Proxy) SetCredentialWithGrant(host, headerName, headerValue, grant stri
 // SetCredentialResolver registers a dynamic credential resolver for a host.
 // Unlike static credentials, resolvers are called per-request and may make
 // external calls (e.g., RFC 8693 token exchange). Only one resolver per host
-// is supported; calling again for the same host replaces the previous resolver.
+// is supported; calling again for the same host replaces the previous
+// resolver. Passing a nil resolver disables resolution for that host: the
+// nil entry matches and terminates the lookup, so a broader (bare-host or
+// wildcard) resolver does not apply.
 func (p *Proxy) SetCredentialResolver(host string, resolver CredentialResolver) {
 	if !isValidHost(host) {
 		slog.Debug("ignoring invalid host for credential resolver",
@@ -1081,11 +1087,14 @@ func moreSpecificWildcardKey(a, b string) bool {
 }
 
 // hostMatchTier classifies how lookupHostKeyed matched a host against a key.
+// Order matters: higher tiers outrank lower ones. A verbatim (case-exact)
+// key match outranks a case-fold match, which outranks a wildcard match.
 type hostMatchTier int
 
 const (
 	hostMatchNone hostMatchTier = iota
 	hostMatchWildcard
+	hostMatchExactFold
 	hostMatchExact
 )
 
@@ -1098,9 +1107,10 @@ type hostMatch struct {
 }
 
 // outranks reports whether m is a strictly better match than other for the
-// same host: exact beats wildcard, and between wildcards
-// compareWildcardKeySpecificity decides. Equal-rank matches do not outrank
-// each other (the caller's own preference order breaks that tie).
+// same host: verbatim exact beats case-fold exact beats wildcard, and
+// between wildcards compareWildcardKeySpecificity decides. Equal-rank
+// matches do not outrank each other (the caller's own preference order
+// breaks that tie).
 func (m hostMatch) outranks(other hostMatch) bool {
 	if m.tier != other.tier {
 		return m.tier > other.tier
@@ -1135,7 +1145,7 @@ func lookupHostKeyed[V any](m map[string]V, host string, usable func(V) bool) (V
 	var best V
 	var bestKey string
 	tier := hostMatchNone
-	bestFoldsHost := false // best exact key folds the full host:port, not just bare
+	bestFoldsHost := false // best fold key matches the full host:port, not just bare
 	for key, v := range m {
 		if !usable(v) {
 			continue
@@ -1143,16 +1153,19 @@ func lookupHostKeyed[V any](m map[string]V, host string, usable func(V) bool) (V
 		// The case-insensitive exact tier must fold both the bare host and
 		// the full host:port — port-bearing keys are expressible in
 		// embedder-built RunContextData maps. A host:port fold match beats
-		// a bare fold match, as in the verbatim tiers.
-		if foldsHost := host != bare && strings.EqualFold(key, host); foldsHost || strings.EqualFold(key, bare) {
-			if tier != hostMatchExact ||
+		// a bare fold match, as in the verbatim tiers. Folding is via
+		// ToLower so this tier agrees with the wildcard tier's semantics
+		// (EqualFold's simple folding differs for e.g. U+017F ſ).
+		lowerKey := strings.ToLower(key)
+		if foldsHost := host != bare && lowerKey == lowerHost; foldsHost || lowerKey == lowerBare {
+			if tier != hostMatchExactFold ||
 				(foldsHost && !bestFoldsHost) ||
 				(foldsHost == bestFoldsHost && key < bestKey) {
-				bestKey, best, tier, bestFoldsHost = key, v, hostMatchExact, foldsHost
+				bestKey, best, tier, bestFoldsHost = key, v, hostMatchExactFold, foldsHost
 			}
 			continue
 		}
-		if tier == hostMatchExact {
+		if tier == hostMatchExactFold {
 			continue
 		}
 		if matchWildcardHostKey(key, lowerHost, lowerBare) &&
@@ -1204,11 +1217,15 @@ func (p *Proxy) getCredentialResolver(host string) CredentialResolver {
 	return r
 }
 
-// getCredentialResolverMatch is getCredentialResolver plus the match tier.
+// getCredentialResolverMatch is getCredentialResolver plus the match rank.
+// The lookup is presence-based: SetCredentialResolver(host, nil) plants a
+// nil entry that matches and terminates the lookup, disabling resolution
+// for that host even when a broader (bare-host or wildcard) resolver exists
+// — the same opt-out semantics as the companion maps.
 func (p *Proxy) getCredentialResolverMatch(host string) (CredentialResolver, hostMatch) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return lookupHostKeyed(p.credentialResolvers, host, func(r CredentialResolver) bool { return r != nil })
+	return lookupHostKeyed(p.credentialResolvers, host, presenceUsable)
 }
 
 // credentialInjectionResult holds the outcome of credential injection.
@@ -1950,26 +1967,11 @@ func (p *Proxy) writeHostBlockedResponse(w http.ResponseWriter, host string, por
 func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
-	// Extract host and infer port from scheme
+	// Extract host and infer port from scheme. lookupHost keeps the port
+	// (when the URL carries one) so port-pinned host keys can match;
+	// host stays bare for policy checks and logging.
 	host := r.URL.Hostname()
-	creds, err := p.getCredentialsForRequest(r, r, host)
-	if err != nil {
-		http.Error(w, "credential resolution failed", http.StatusBadGateway)
-		p.logRequest(r, RequestLogData{
-			Method:         r.Method,
-			URL:            r.URL.String(),
-			Host:           host,
-			Path:           r.URL.Path,
-			RequestType:    "http",
-			StatusCode:     http.StatusBadGateway,
-			Duration:       time.Since(start),
-			RequestHeaders: r.Header.Clone(),
-			RequestSize:    r.ContentLength,
-			ResponseSize:   -1,
-			Err:            err,
-		})
-		return
-	}
+	lookupHost := r.URL.Host
 
 	// Capture request body and headers before forwarding
 	var reqBody []byte
@@ -2025,6 +2027,30 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve credentials only after the policy check: resolvers can have
+	// external side effects (e.g. token-exchange round trips), which a
+	// client must not be able to trigger through policy-denied hosts —
+	// and a denied client must see the policy denial, not a resolver
+	// error. Same order as the CONNECT interception path.
+	creds, err := p.getCredentialsForRequest(r, r, lookupHost)
+	if err != nil {
+		http.Error(w, "credential resolution failed", http.StatusBadGateway)
+		p.logRequest(r, RequestLogData{
+			Method:         r.Method,
+			URL:            r.URL.String(),
+			Host:           host,
+			Path:           r.URL.Path,
+			RequestType:    "http",
+			StatusCode:     http.StatusBadGateway,
+			Duration:       time.Since(start),
+			RequestHeaders: r.Header.Clone(),
+			RequestSize:    r.ContentLength,
+			ResponseSize:   -1,
+			Err:            err,
+		})
+		return
+	}
+
 	// Rewrite synthetic host-gateway hostname to actual IP for forwarding.
 	// The container uses a synthetic hostname (only in its /etc/hosts),
 	// but the proxy runs on the host where that name doesn't resolve.
@@ -2051,7 +2077,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Inject any additional headers configured for this host.
 	// Merges with existing values (comma-separated) to preserve client
 	// headers like anthropic-beta that support multiple flags.
-	mergeExtraHeaders(outReq, host, p.getExtraHeadersForRequest(r, host))
+	mergeExtraHeaders(outReq, host, p.getExtraHeadersForRequest(r, lookupHost))
 
 	outReq.Header.Del("Proxy-Connection")
 	outReq.Header.Del("Proxy-Authorization")
@@ -2061,7 +2087,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// when multiple grants target the same host — e.g., "claude" registers
 	// RemoveRequestHeader("x-api-key") for OAuth, but if "anthropic" also
 	// injected x-api-key, the injected header must survive.
-	for _, headerName := range p.getRemoveHeadersForRequest(r, host) {
+	for _, headerName := range p.getRemoveHeadersForRequest(r, lookupHost) {
 		if credResult.InjectedHeaders[strings.ToLower(headerName)] {
 			continue
 		}
@@ -2080,7 +2106,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Apply token substitution if configured.
 	// Substitution targets outReq (not r), so r.URL.String() used for logging
 	// below still contains the placeholder, not the real token.
-	if sub := p.getTokenSubstitutionForRequest(r, host); sub != nil {
+	if sub := p.getTokenSubstitutionForRequest(r, lookupHost); sub != nil {
 		p.applyTokenSubstitution(outReq, sub)
 	}
 
@@ -2531,7 +2557,9 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			pr.Out.Header.Del("Proxy-Authorization")
 
 			// Remove configured headers (but not injected credential headers).
-			for _, headerName := range p.getRemoveHeadersForRequest(r, host) {
+			// r.Host is the CONNECT target with its port, so port-pinned
+			// host keys can match; the lookup falls back to the bare host.
+			for _, headerName := range p.getRemoveHeadersForRequest(r, r.Host) {
 				if credResult.InjectedHeaders[strings.ToLower(headerName)] {
 					continue
 				}
@@ -2553,7 +2581,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			*pr.Out = *pr.Out.WithContext(ctx)
 
 			// Token substitution.
-			if sub := p.getTokenSubstitutionForRequest(r, host); sub != nil {
+			if sub := p.getTokenSubstitutionForRequest(r, r.Host); sub != nil {
 				p.applyTokenSubstitution(pr.Out, sub)
 			}
 
@@ -2588,7 +2616,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			}
 
 			// Response transformers.
-			if transformers := p.getResponseTransformersForRequest(r, host); len(transformers) > 0 {
+			if transformers := p.getResponseTransformersForRequest(r, r.Host); len(transformers) > 0 {
 				for _, transformer := range transformers {
 					if newRespInterface, transformed := transformer(req, resp); transformed {
 						if newResp, ok := newRespInterface.(*http.Response); ok {
@@ -2813,7 +2841,9 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		p.injectMCPCredentialsWithContext(r, req)
 
 		// Resolve credentials before forwarding so errors are caught early.
-		creds, credErr := p.getCredentialsForRequest(r, req, host)
+		// r.Host is the CONNECT target with its port, so port-pinned host
+		// keys can match; the lookup falls back to the bare host.
+		creds, credErr := p.getCredentialsForRequest(r, req, r.Host)
 		if credErr != nil {
 			w.Header().Set("Content-Type", "text/plain")
 			w.WriteHeader(http.StatusBadGateway)

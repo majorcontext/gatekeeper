@@ -1454,9 +1454,9 @@ func TestProxy_GetCredentialsForRequest_EmptyExactEntryFallsThrough(t *testing.T
 
 // TestProxy_GetCredentials_WildcardKeyWithPort verifies that a wildcard key
 // carrying a port matches subdomains on exactly that port and nothing else.
-// The proxy's own setters reject keys containing ":" (isValidHost), so such
-// keys can only exist in embedder-supplied RunContextData maps — the lookup
-// is exercised through that path.
+// The credential setters reject keys containing ":" (isValidHost), so such
+// keys arise via embedder-supplied RunContextData maps — the lookup is
+// exercised through that path.
 func TestProxy_GetCredentials_WildcardKeyWithPort(t *testing.T) {
 	p := NewProxy()
 	rc := &RunContextData{
@@ -4391,5 +4391,132 @@ func TestProxy_HostKeyedMaps_EmptyEntryOptOut(t *testing.T) {
 	}
 	if got := p.getResponseTransformersForRequest(req, optedOut); len(got) != 0 {
 		t.Errorf("getResponseTransformersForRequest(%q) returned %d transformers, want none (explicit nil entry opts the port out)", optedOut, len(got))
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_NilResolverOptOut verifies that an
+// explicitly-nil resolver entry disables resolution for that host — the
+// pre-wildcard behavior, where the nil exact entry was found and treated as
+// "no resolver" — instead of being skipped so a broader wildcard resolver
+// fires for a host the embedder deliberately opted out.
+func TestProxy_GetCredentialsForRequest_NilResolverOptOut(t *testing.T) {
+	p := NewProxy()
+	var invoked atomic.Bool
+	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		invoked.Store(true)
+		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "resolver-grant"}}, nil
+	})
+	p.SetCredentialResolver("api.example.com", nil)
+	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
+	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
+
+	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if invoked.Load() {
+		t.Fatal("wildcard resolver ran for a host whose resolver was explicitly set to nil (opt-out must block broader resolvers)")
+	}
+	if len(creds) != 1 || creds[0].Grant != "static-grant" {
+		t.Fatalf("creds = %v, want static-grant", creds)
+	}
+
+	// The wildcard resolver still serves hosts that were not opted out.
+	creds, err = p.getCredentialsForRequest(req, req, "other.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest(other): %v", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "resolver-grant" {
+		t.Fatalf("creds = %v, want resolver-grant", creds)
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_VerbatimStaticBeatsFoldResolver
+// verifies cross-map rank distinguishes verbatim from case-fold exact
+// matches: a static credential registered under the host's verbatim casing
+// beats a resolver whose key matches only by case folding — the same order
+// the tiers use inside a single map.
+func TestProxy_GetCredentialsForRequest_VerbatimStaticBeatsFoldResolver(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
+	p.SetCredentialResolver("API.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "resolver-grant"}}, nil
+	})
+	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
+
+	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if len(creds) != 1 || creds[0].Grant != "static-grant" {
+		t.Fatalf("creds = %v, want static-grant (verbatim static must beat fold-only resolver)", creds)
+	}
+}
+
+// TestProxy_HandleHTTP_PolicyCheckedBeforeResolvers verifies that plain-HTTP
+// requests to policy-denied hosts are rejected before credential resolution
+// runs: a wildcard-matched resolver must not perform external side effects
+// (e.g. token-exchange round trips) for hosts the client may not reach, and
+// the client must see the policy denial, not a resolver error.
+func TestProxy_HandleHTTP_PolicyCheckedBeforeResolvers(t *testing.T) {
+	p := NewProxy()
+	p.SetNetworkPolicy("strict", []string{"allowed.example.com"}, nil)
+	var invoked atomic.Bool
+	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		invoked.Store(true)
+		return nil, errors.New("sts unavailable")
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxyServer.URL))},
+	}
+
+	resp, err := client.Get("http://denied.example.com/")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Errorf("status = %d, want %d (policy denial, not a resolver error)", resp.StatusCode, http.StatusProxyAuthRequired)
+	}
+	if invoked.Load() {
+		t.Error("resolver ran for a policy-denied host (external side effects must not be reachable through denied hosts)")
+	}
+}
+
+// TestProxy_HandleHTTP_PortPinnedCredentialKey verifies the plain-HTTP path
+// passes the port-bearing request host to credential lookup, so a
+// port-pinned key (expressible in embedder-built maps) matches. The key is
+// written directly to the map: SetCredentialWithGrant rejects ':' in hosts.
+func TestProxy_HandleHTTP_PortPinnedCredentialKey(t *testing.T) {
+	var receivedAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	hostPort := mustParseURL(backend.URL).Host // "127.0.0.1:PORT"
+	p.mu.Lock()
+	p.credentials[hostPort] = []credentialHeader{{Name: "Authorization", Value: "Bearer port-pinned", Grant: "pinned-grant"}}
+	p.mu.Unlock()
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxyServer.URL))},
+	}
+
+	resp, err := client.Get(backend.URL + "/")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	if receivedAuth != "Bearer port-pinned" {
+		t.Errorf("Authorization = %q, want %q (port-pinned key must match on the plain-HTTP path)", receivedAuth, "Bearer port-pinned")
 	}
 }
