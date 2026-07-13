@@ -1029,17 +1029,37 @@ func bareHost(host string) string {
 }
 
 // matchWildcardHostKey reports whether a wildcard host map key like
-// "*.example.com" matches the request host. "*.example.com" matches
-// "api.example.com" and "a.b.example.com", never "example.com" itself;
-// mirrors matchesPattern's wildcard branch. A port-less key matches the
+// "*.example.com" matches the request host, given the pre-lowercased host
+// and bare (port-stripped) host. "*.example.com" matches "api.example.com"
+// and "a.b.example.com", never "example.com" itself; mirrors
+// matchesPattern's wildcard branch. A port-less key matches the
 // port-stripped host (any port); a key carrying a port ("*.example.com:8443")
 // matches the full host:port, so the port must match exactly.
-func matchWildcardHostKey(key, host, bare string) bool {
+func matchWildcardHostKey(key, lowerHost, lowerBare string) bool {
 	if !strings.HasPrefix(key, "*.") {
 		return false
 	}
-	suffix := key[1:] // "*.example.com" -> ".example.com"
-	return hostHasSuffixFold(bare, suffix) || (host != bare && hostHasSuffixFold(host, suffix))
+	suffix := strings.ToLower(key[1:]) // "*.example.com" -> ".example.com"
+	return strings.HasSuffix(lowerBare, suffix) ||
+		(lowerHost != lowerBare && strings.HasSuffix(lowerHost, suffix))
+}
+
+// moreSpecificWildcardKey reports whether wildcard key a should be preferred
+// over b when both match the same host. Specificity is ranked by the domain
+// part of the key — a port suffix must not make a domain-broader key outrank
+// a domain-narrower one — then a port-pinned key beats a port-less one, then
+// the lexicographically smallest key wins so the pick never depends on map
+// iteration order.
+func moreSpecificWildcardKey(a, b string) bool {
+	da, db := bareHost(a), bareHost(b)
+	if len(da) != len(db) {
+		return len(da) > len(db)
+	}
+	aPinned, bPinned := len(a) > len(da), len(b) > len(db)
+	if aPinned != bPinned {
+		return aPinned
+	}
+	return a < b
 }
 
 // hostMatchTier classifies how lookupHostKeyed matched a host against a key.
@@ -1060,13 +1080,22 @@ type hostMatch struct {
 }
 
 // outranks reports whether m is a strictly better match than other for the
-// same host: exact beats wildcard, and between wildcards the more specific
-// (longer) key wins.
+// same host: exact beats wildcard, and between wildcards a longer domain
+// part wins, then a port-pinned key beats a port-less one. Equal-rank
+// matches do not outrank each other (the caller's own preference order
+// breaks that tie).
 func (m hostMatch) outranks(other hostMatch) bool {
 	if m.tier != other.tier {
 		return m.tier > other.tier
 	}
-	return m.tier == hostMatchWildcard && len(m.key) > len(other.key)
+	if m.tier != hostMatchWildcard {
+		return false
+	}
+	da, db := bareHost(m.key), bareHost(other.key)
+	if len(da) != len(db) {
+		return len(da) > len(db)
+	}
+	return len(m.key) > len(da) && len(other.key) == len(db)
 }
 
 // lookupHostKeyed resolves a host against a map keyed by exact hostnames or
@@ -1075,11 +1104,11 @@ func (m hostMatch) outranks(other hostMatch) bool {
 // not shadow a key from a later tier). Exact keys win over wildcard keys:
 // the host is tried verbatim, then port-stripped, then case-insensitively;
 // only when every exact tier misses is the most specific (longest) matching
-// wildcard key used. Ties (only possible between case-variant keys) go to
-// the lexicographically smallest key so the pick never depends on map
-// iteration order. The fallback scan is linear in the number of configured
-// host keys; it runs only when the verbatim and bare lookups miss, and the
-// maps are config-scale, not request-scale.
+// wildcard key used, ranked by moreSpecificWildcardKey. Ties (only possible
+// between case-variant keys) go to the lexicographically smallest key so the
+// pick never depends on map iteration order. The fallback scan is linear in
+// the number of configured host keys; it runs only when the verbatim and
+// bare lookups miss, and the maps are config-scale, not request-scale.
 func lookupHostKeyed[V any](m map[string]V, host string, usable func(V) bool) (V, hostMatch) {
 	if v, ok := m[host]; ok && usable(v) {
 		return v, hostMatch{hostMatchExact, host}
@@ -1090,17 +1119,18 @@ func lookupHostKeyed[V any](m map[string]V, host string, usable func(V) bool) (V
 			return v, hostMatch{hostMatchExact, bare}
 		}
 	}
+	lowerHost, lowerBare := strings.ToLower(host), strings.ToLower(bare)
 	var best V
 	var bestKey string
 	tier := hostMatchNone
-	better := func(key string) bool {
-		return len(key) > len(bestKey) || (len(key) == len(bestKey) && key < bestKey)
-	}
 	for key, v := range m {
 		if !usable(v) {
 			continue
 		}
-		if strings.EqualFold(key, bare) {
+		// The case-insensitive exact tier must fold both the bare host and
+		// the full host:port — port-bearing keys are expressible in
+		// embedder-built RunContextData maps.
+		if strings.EqualFold(key, bare) || (host != bare && strings.EqualFold(key, host)) {
 			if tier != hostMatchExact || key < bestKey {
 				bestKey, best, tier = key, v, hostMatchExact
 			}
@@ -1109,7 +1139,8 @@ func lookupHostKeyed[V any](m map[string]V, host string, usable func(V) bool) (V
 		if tier == hostMatchExact {
 			continue
 		}
-		if matchWildcardHostKey(key, host, bare) && better(key) {
+		if matchWildcardHostKey(key, lowerHost, lowerBare) &&
+			(tier == hostMatchNone || moreSpecificWildcardKey(key, bestKey)) {
 			bestKey, best, tier = key, v, hostMatchWildcard
 		}
 	}
@@ -1330,18 +1361,22 @@ func getRunContext(r *http.Request) *RunContextData {
 
 // getCredentialsForRequest returns all credentials for a host. When
 // RunContextData is present, only its credentials are used (the caller
-// owns the full credential set for that run). Otherwise, dynamic
-// credential resolvers are tried first — if a resolver returns
-// credentials, those are used. If the resolver returns nil (e.g., no
-// subject identity found), the proxy falls through to static credentials
-// for the same host. This enables patterns like "per-user OAuth via
-// token-exchange, with a bot identity fallback." One exception: a
-// resolver that matched only via a wildcard key defers to a static
-// credential whose key matched the host exactly.
+// owns the full credential set for that run). Otherwise a matching dynamic
+// resolver always runs — resolvers may inspect and mutate the request
+// (e.g., strip subject-identity headers), and those side effects must
+// happen regardless of which credential wins. Which credentials are then
+// injected is decided by match rank: a static credential whose key match
+// outranks the resolver's (an exact key over a wildcard, or a more specific
+// wildcard over a broader one) wins, and an outranked resolver's error is
+// not fatal. At equal or lower static rank the resolver's credentials win
+// when it returns any; if it returns nil (e.g., no subject identity found),
+// the proxy falls through to static credentials for the same host. This
+// enables patterns like "per-user OAuth via token-exchange, with a bot
+// identity fallback."
 //
 // ctxReq carries the RunContextData (the CONNECT request for intercepted
 // connections, or the same request for plain HTTP). innerReq is the actual
-// request the resolver may inspect and modify (e.g., strip subject headers).
+// request the resolver may inspect and modify.
 func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
 	if rc := getRunContext(ctxReq); rc != nil {
 		creds, _ := lookupHostKeyed(rc.Credentials, host, nonEmptySlice)
@@ -1351,24 +1386,29 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 		return nil, nil
 	}
 	resolver, resolverMatch := p.getCredentialResolverMatch(host)
-	// A better-matched static credential outranks the resolver: a resolver
-	// registered under "*.example.com" must shadow neither a static
-	// credential configured for "api.example.com" specifically nor one
-	// under the more specific "*.api.example.com".
-	if resolver != nil {
-		if _, staticMatch := p.getCredentialsMatch(host); !staticMatch.outranks(resolverMatch) {
-			creds, err := resolver(innerReq.Context(), ctxReq, innerReq, host)
-			if err != nil {
-				return nil, err
-			}
-			if len(creds) > 0 {
-				return creds, nil
-			}
-		}
+	if resolver == nil {
+		return p.getCredentials(host), nil
 	}
+	resolved, resolveErr := resolver(innerReq.Context(), ctxReq, innerReq, host)
 	// Read static credentials after the resolver has run, not before: a
 	// token refresh landing while a slow resolver was out must be seen.
-	return p.getCredentials(host), nil
+	staticCreds, staticMatch := p.getCredentialsMatch(host)
+	if staticMatch.outranks(resolverMatch) {
+		if resolveErr != nil {
+			slog.Debug("ignoring error from outranked credential resolver",
+				"subsystem", "proxy",
+				"host", host,
+				"error", resolveErr)
+		}
+		return staticCreds, nil
+	}
+	if resolveErr != nil {
+		return nil, resolveErr
+	}
+	if len(resolved) > 0 {
+		return resolved, nil
+	}
+	return staticCreds, nil
 }
 
 // invalidateCredentialsOnAuthFailure drops the cached state behind each
