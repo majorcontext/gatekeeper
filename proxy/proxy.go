@@ -1509,7 +1509,11 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 				"host", host,
 				"error", err)
 		}
-		return staticCreds, nil
+		// Read static credentials after the resolver has run, not before: a
+		// token refresh landing while the resolver was out (e.g. a
+		// refreshing source rotating the static token mid-call) must be
+		// seen, or the request injects a credential that's already stale.
+		return p.getCredentials(host), nil
 	}
 	resolved, resolveErr := entry.resolve(innerReq.Context(), ctxReq, innerReq, host)
 	if resolveErr != nil {
@@ -2038,6 +2042,22 @@ func (p *Proxy) writeHostBlockedResponse(w http.ResponseWriter, host string, por
 		"  network:\n    host:\n      - %d\n", host, port, port, port)
 }
 
+// lookupHostForURL returns the URL's host with a port always present — the
+// URL's own port when it has one, otherwise the scheme default — so
+// port-pinned host keys match however the target was spelled (e.g. a key
+// pinned to ":80" fires for "http://host/" as well as "http://host:80/").
+// JoinHostPort also re-brackets IPv6 literals correctly.
+func lookupHostForURL(u *url.URL) string {
+	port := u.Port()
+	if port == "" {
+		port = "443"
+		if u.Scheme == "http" {
+			port = "80"
+		}
+	}
+	return net.JoinHostPort(u.Hostname(), port)
+}
+
 func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
@@ -2063,9 +2083,8 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Host-keyed lookups get host:port — with the scheme-default port made
 	// explicit, so a key pinned to ":80" fires for "http://host/" too —
-	// while host stays bare for policy checks and logging. JoinHostPort
-	// also re-brackets IPv6 literals correctly.
-	lookupHost := net.JoinHostPort(host, strconv.Itoa(port))
+	// while host stays bare for policy checks and logging.
+	lookupHost := lookupHostForURL(r.URL)
 
 	// Check network policy
 	if !p.checkNetworkPolicyForRequest(r, host, port, r.Method, r.URL.Path) {

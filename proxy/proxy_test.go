@@ -4723,6 +4723,33 @@ func TestProxy_GetCredentialsForRequest_LegacyOutrankedResolverStillRuns(t *test
 	})
 }
 
+// TestProxy_GetCredentialsForRequest_LegacyOutrankedStaticReadFresh verifies
+// that when a legacy (undeclared) resolver is outranked and run for its side
+// effects, the static credential returned reflects any refresh that landed
+// while the resolver was out — not the value read before the resolver ran.
+// A refreshing credential source can rotate the static token (via
+// SetCredentialWithGrant) during the resolver's external call; injecting the
+// pre-rotation value would send a token the upstream has already revoked.
+func TestProxy_GetCredentialsForRequest_LegacyOutrankedStaticReadFresh(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer v1", "static-grant")
+	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		// Simulate a refresh landing while the resolver is out: it rotates
+		// the static credential in place (same grant + header upserts).
+		p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer v2", "static-grant")
+		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver", Grant: "resolver-grant"}}, nil
+	})
+	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
+
+	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if len(creds) != 1 || creds[0].Value != "Bearer v2" {
+		t.Fatalf("creds = %v, want single credential with value %q (fresh post-refresh read), not stale v1 or the resolver's own credential", creds, "Bearer v2")
+	}
+}
+
 // TestProxy_HandleHTTP_DenialLogRedactsDeclaredHeaders verifies that
 // policy-denial request logs redact the headers a matching resolver declared
 // at registration: the denial happens before the resolver runs (by design),

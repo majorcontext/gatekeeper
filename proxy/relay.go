@@ -95,14 +95,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// The lookup host carries a port — with the scheme default made
 	// explicit when the target URL omits it — so port-pinned host keys
 	// match on the relay path like they do on CONNECT and plain HTTP.
-	host := targetURL.Host
-	if targetURL.Port() == "" {
-		defaultPort := "443"
-		if targetURL.Scheme == "http" {
-			defaultPort = "80"
-		}
-		host = net.JoinHostPort(targetURL.Hostname(), defaultPort)
-	}
+	host := lookupHostForURL(targetURL)
 	creds, err := p.getCredentialsForRequest(r, r, host)
 	if err != nil {
 		slog.Warn("dynamic credential resolution failed",
