@@ -1031,10 +1031,13 @@ func bareHost(host string) string {
 // matchWildcardHostKey reports whether a wildcard host map key like
 // "*.example.com" matches the request host, given the pre-lowercased host
 // and bare (port-stripped) host. "*.example.com" matches "api.example.com"
-// and "a.b.example.com", never "example.com" itself; mirrors
-// matchesPattern's wildcard branch. A port-less key matches the
-// port-stripped host (any port); a key carrying a port ("*.example.com:8443")
-// matches the full host:port, so the port must match exactly.
+// and "a.b.example.com", never "example.com" itself. This applies the same
+// suffix rule as hostHasSuffixFold (matchesPattern's wildcard branch),
+// inlined against the pre-lowered inputs so the per-key scan does not
+// re-lower the host — a semantic change to one must be mirrored in the
+// other. A port-less key matches the port-stripped host (any port); a key
+// carrying a port ("*.example.com:8443") matches the full host:port, so the
+// port must match exactly.
 func matchWildcardHostKey(key, lowerHost, lowerBare string) bool {
 	if !strings.HasPrefix(key, "*.") {
 		return false

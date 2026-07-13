@@ -87,11 +87,13 @@ func matchesPattern(pattern hostPattern, host string, port int) bool {
 }
 
 // hostHasSuffixFold reports whether host ends with suffix, ignoring case.
-// This is the wildcard-suffix rule shared by network allow patterns
-// (matchesPattern) and host-keyed map lookups (matchWildcardHostKey).
-// Implemented via ToLower rather than byte-length slicing: characters whose
-// lowercase form has a different byte length (e.g. U+1E9E ẞ → U+00DF ß)
-// would make a fixed-length slice split mid-rune and wrongly reject.
+// This is the wildcard-suffix rule for network allow patterns
+// (matchesPattern); matchWildcardHostKey in proxy.go applies the same rule
+// against pre-lowered inputs for its per-key scan — a semantic change to
+// one must be mirrored in the other. Implemented via ToLower rather than
+// byte-length slicing: characters whose lowercase form has a different byte
+// length (e.g. U+1E9E ẞ → U+00DF ß) would make a fixed-length slice split
+// mid-rune and wrongly reject.
 func hostHasSuffixFold(host, suffix string) bool {
 	return strings.HasSuffix(strings.ToLower(host), strings.ToLower(suffix))
 }
