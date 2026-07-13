@@ -1054,7 +1054,8 @@ func matchWildcardCredentialKey(key, bare string) bool {
 
 // getCredentials returns all credential headers for a host.
 // Exact keys are checked first (with a host:port fallback), then wildcard
-// keys like "*.example.com" against the port-stripped host.
+// keys like "*.example.com" against the port-stripped host; when several
+// wildcard keys match, the most specific (longest) one wins.
 // Returns a copy of the slice to avoid data races with concurrent
 // SetCredentialWithGrant calls (e.g., token refresh).
 func (p *Proxy) getCredentials(host string) []credentialHeader {
@@ -1069,10 +1070,10 @@ func (p *Proxy) getCredentials(host string) []credentialHeader {
 	}
 	if len(creds) == 0 {
 		bare := bareHost(host)
+		var bestKey string
 		for key, keyCreds := range p.credentials {
-			if matchWildcardCredentialKey(key, bare) {
-				creds = keyCreds
-				break
+			if matchWildcardCredentialKey(key, bare) && len(key) > len(bestKey) {
+				bestKey, creds = key, keyCreds
 			}
 		}
 	}
@@ -1100,12 +1101,14 @@ func (p *Proxy) getCredentialResolver(host string) CredentialResolver {
 		}
 	}
 	bare := bareHost(host)
+	var bestKey string
+	var best CredentialResolver
 	for key, r := range p.credentialResolvers {
-		if matchWildcardCredentialKey(key, bare) {
-			return r
+		if matchWildcardCredentialKey(key, bare) && len(key) > len(bestKey) {
+			bestKey, best = key, r
 		}
 	}
-	return nil
+	return best
 }
 
 // credentialInjectionResult holds the outcome of credential injection.

@@ -1221,6 +1221,24 @@ func TestProxy_GetCredentials_WildcardKey(t *testing.T) {
 		})
 	}
 
+	t.Run("most specific wildcard wins when keys overlap", func(t *testing.T) {
+		p := NewProxy()
+		p.SetCredentialWithGrant("*.example.com", "Authorization", "Bearer broad-token", "broad-grant")
+		p.SetCredentialWithGrant("*.box.example.com", "Authorization", "Bearer narrow-token", "narrow-grant")
+		// Map iteration order is randomized per range statement, so a
+		// first-match implementation picks each key about half the time.
+		// Repeat the lookup so a non-deterministic pick cannot pass by luck.
+		for i := range 100 {
+			creds := p.getCredentials("alpha.box.example.com")
+			if len(creds) != 1 {
+				t.Fatalf("getCredentials returned %d credentials, want 1", len(creds))
+			}
+			if creds[0].Grant != "narrow-grant" {
+				t.Fatalf("iteration %d: grant = %q, want %q (most specific wildcard must win)", i, creds[0].Grant, "narrow-grant")
+			}
+		}
+	})
+
 	t.Run("exact key takes precedence", func(t *testing.T) {
 		p.SetCredentialWithGrant("exact.box.example.com", "Authorization", "Bearer exact-token", "exact-grant")
 		creds := p.getCredentials("exact.box.example.com")
