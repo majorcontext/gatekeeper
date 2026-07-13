@@ -4208,28 +4208,6 @@ func TestNewTokenSubstitution(t *testing.T) {
 	}
 }
 
-// TestProxy_GetCredentialsForRequest_OutrankedResolverErrorFallsThrough
-// verifies that a failing resolver cannot break requests whose credential a
-// better-matched static entry already decides: the outranked resolver is
-// skipped (see OutrankedResolverNotCalled), so its error never surfaces and
-// the static credential is used.
-func TestProxy_GetCredentialsForRequest_OutrankedResolverErrorFallsThrough(t *testing.T) {
-	p := NewProxy()
-	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
-	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-		return nil, errors.New("sts unavailable")
-	})
-	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
-
-	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest: %v (outranked resolver error must not fail the request)", err)
-	}
-	if len(creds) != 1 || creds[0].Grant != "static-grant" {
-		t.Fatalf("grant = %v, want static-grant", creds)
-	}
-}
-
 // TestProxy_GetCredentialsForRequest_CaseFoldPortBearingExactKey verifies
 // that the case-insensitive exact tier also folds port-bearing keys
 // (expressible in embedder-built RunContextData maps): a case-variant
@@ -4686,5 +4664,110 @@ func TestProxy_GetCredentialsForRequest_PortPinnedExactBeatsBareResolver(t *test
 	}
 	if len(creds) != 1 || creds[0].Grant != "pinned-grant" {
 		t.Fatalf("creds = %v, want pinned-grant (port-pinned exact static must outrank bare-host resolver)", creds)
+	}
+}
+
+// TestProxy_GetCredentialsForRequest_LegacyOutrankedResolverStillRuns
+// verifies backward compatibility for resolvers registered through the
+// original SetCredentialResolver API (no declared strip headers): when
+// outranked by a static credential, such a resolver still runs — it may
+// sanitize the request in ways the proxy cannot know about — its
+// credentials are discarded in favor of the static ones, and its error is
+// not fatal. Only resolvers registered via
+// SetCredentialResolverWithStripHeaders opt into being skipped.
+func TestProxy_GetCredentialsForRequest_LegacyOutrankedResolverStillRuns(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
+	var invoked atomic.Bool
+	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		invoked.Store(true)
+		innerReq.Header.Del("X-Subject-Token")
+		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "resolver-grant"}}, nil
+	})
+	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
+	req.Header.Set("X-Subject-Token", "caller-identity")
+
+	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
+	if err != nil {
+		t.Fatalf("getCredentialsForRequest: %v", err)
+	}
+	if !invoked.Load() {
+		t.Fatal("legacy-registered resolver was skipped when outranked; without declared strip headers its sanitizing side effects would be lost")
+	}
+	if got := req.Header.Get("X-Subject-Token"); got != "" {
+		t.Fatalf("X-Subject-Token = %q, want removed by the resolver", got)
+	}
+	if len(creds) != 1 || creds[0].Grant != "static-grant" {
+		t.Fatalf("creds = %v, want static-grant (static still wins the credential)", creds)
+	}
+
+	t.Run("error is not fatal when outranked", func(t *testing.T) {
+		p := NewProxy()
+		p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
+		var errInvoked atomic.Bool
+		p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+			errInvoked.Store(true)
+			return nil, errors.New("sts unavailable")
+		})
+		req := httptest.NewRequest("GET", "https://api.example.com/", nil)
+		creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
+		if err != nil {
+			t.Fatalf("getCredentialsForRequest: %v (outranked legacy resolver error must not fail the request)", err)
+		}
+		if !errInvoked.Load() {
+			t.Fatal("legacy resolver was not invoked")
+		}
+		if len(creds) != 1 || creds[0].Grant != "static-grant" {
+			t.Fatalf("creds = %v, want static-grant", creds)
+		}
+	})
+}
+
+// TestProxy_HandleHTTP_DenialLogRedactsDeclaredHeaders verifies that
+// policy-denial request logs redact the headers a matching resolver declared
+// at registration: the denial happens before the resolver runs (by design),
+// so the proxy must remove the declared subject-identity headers from the
+// logged snapshot itself.
+func TestProxy_HandleHTTP_DenialLogRedactsDeclaredHeaders(t *testing.T) {
+	p := NewProxy()
+	p.SetNetworkPolicy("strict", []string{"allowed.example.com"}, nil)
+	p.SetCredentialResolverWithStripHeaders("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		return nil, nil
+	}, "X-Gatekeeper-Subject")
+
+	var mu sync.Mutex
+	var logged []RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, data)
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxyServer.URL))},
+	}
+
+	req, _ := http.NewRequest("GET", "http://denied.example.com/", nil)
+	req.Header.Set("X-Gatekeeper-Subject", "subject-jwt")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Fatalf("status = %d, want 407", resp.StatusCode)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logged) == 0 {
+		t.Fatal("no denial was logged")
+	}
+	for _, data := range logged {
+		if got := data.RequestHeaders.Get("X-Gatekeeper-Subject"); got != "" {
+			t.Fatalf("denial log contains X-Gatekeeper-Subject = %q; declared subject headers must be redacted from logs", got)
+		}
 	}
 }

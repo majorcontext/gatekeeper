@@ -848,7 +848,7 @@ func (p *Proxy) SetCredentialWithGrant(host, headerName, headerValue, grant stri
 // instead, so the removal still happens when the proxy skips the resolver
 // because a better-matched static credential exists.
 func (p *Proxy) SetCredentialResolver(host string, resolver CredentialResolver) {
-	p.SetCredentialResolverWithStripHeaders(host, resolver)
+	p.setCredentialResolver(host, credentialResolverEntry{resolve: resolver})
 }
 
 // SetCredentialResolverWithStripHeaders registers a dynamic credential
@@ -858,6 +858,10 @@ func (p *Proxy) SetCredentialResolver(host string, resolver CredentialResolver) 
 // credential is already decided — and the proxy removes the declared headers
 // itself so they never leak upstream.
 func (p *Proxy) SetCredentialResolverWithStripHeaders(host string, resolver CredentialResolver, stripHeaders ...string) {
+	p.setCredentialResolver(host, credentialResolverEntry{resolve: resolver, stripHeaders: stripHeaders, declared: true})
+}
+
+func (p *Proxy) setCredentialResolver(host string, entry credentialResolverEntry) {
 	if !isValidHost(host) {
 		slog.Debug("ignoring invalid host for credential resolver",
 			"subsystem", "proxy",
@@ -871,7 +875,7 @@ func (p *Proxy) SetCredentialResolverWithStripHeaders(host string, resolver Cred
 			"subsystem", "proxy",
 			"host", host)
 	}
-	p.credentialResolvers[host] = credentialResolverEntry{resolve: resolver, stripHeaders: stripHeaders}
+	p.credentialResolvers[host] = entry
 }
 
 // AddExtraHeader adds an additional header to inject for a host.
@@ -1239,6 +1243,14 @@ func (p *Proxy) getCredentialsMatch(host string) ([]credentialHeader, hostMatch)
 type credentialResolverEntry struct {
 	resolve      CredentialResolver
 	stripHeaders []string
+	// declared is true for resolvers registered via
+	// SetCredentialResolverWithStripHeaders: the caller has stated the full
+	// set of request headers the resolver removes, so the proxy may skip
+	// the resolver when it is outranked and strip those headers itself.
+	// Legacy registrations (SetCredentialResolver) may have arbitrary
+	// request-mutating side effects the proxy cannot reproduce, so they
+	// always run.
+	declared bool
 }
 
 // getCredentialResolver returns the dynamic resolver for a host; see
@@ -1428,20 +1440,37 @@ func getRunContext(r *http.Request) *RunContextData {
 	return nil
 }
 
+// logHeadersRedacted clones h for logging with the subject-identity
+// headers declared by the host's matching resolver removed. Policy-denial
+// logs snapshot headers before any resolver has run (denied requests must
+// not trigger resolver side effects), so the proxy redacts the declared
+// headers itself — credential values must never be logged. Headers a
+// legacy (undeclared) resolver would strip cannot be known here; those
+// registrations should migrate to SetCredentialResolverWithStripHeaders.
+func (p *Proxy) logHeadersRedacted(h http.Header, host string) http.Header {
+	out := h.Clone()
+	entry, _ := p.getCredentialResolverMatch(host)
+	for _, name := range entry.stripHeaders {
+		out.Del(name)
+	}
+	return out
+}
+
 // getCredentialsForRequest returns all credentials for a host. When
 // RunContextData is present, only its credentials are used (the caller
-// owns the full credential set for that run). Otherwise a matching dynamic
-// resolver always runs — resolvers may inspect and mutate the request
-// (e.g., strip subject-identity headers), and those side effects must
-// happen regardless of which credential wins. Which credentials are then
-// injected is decided by match rank: a static credential whose key match
-// outranks the resolver's (an exact key over a wildcard, or a more specific
-// wildcard over a broader one) wins, and an outranked resolver's error is
-// not fatal. At equal or lower static rank the resolver's credentials win
-// when it returns any; if it returns nil (e.g., no subject identity found),
-// the proxy falls through to static credentials for the same host. This
-// enables patterns like "per-user OAuth via token-exchange, with a bot
-// identity fallback."
+// owns the full credential set for that run). Otherwise, which credentials
+// are injected is decided by match rank: a static credential whose key
+// match outranks the resolver's (an exact key over a wildcard, or a more
+// specific wildcard over a broader one) wins. An outranked resolver
+// registered with declared strip headers is skipped — its external round
+// trip must not stall a request whose credential is already decided — and
+// the proxy removes the declared headers itself; an outranked legacy
+// registration (no declaration) still runs for its side effects, with its
+// credentials discarded and its error non-fatal. At equal or lower static
+// rank the resolver's credentials win when it returns any; if it returns
+// nil (e.g., no subject identity found), the proxy falls through to static
+// credentials for the same host. This enables patterns like "per-user
+// OAuth via token-exchange, with a bot identity fallback."
 //
 // ctxReq carries the RunContextData (the CONNECT request for intercepted
 // connections, or the same request for plain HTTP). innerReq is the actual
@@ -1459,12 +1488,26 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 		return p.getCredentials(host), nil
 	}
 	if staticCreds, staticMatch := p.getCredentialsMatch(host); staticMatch.outranks(resolverMatch) {
-		// A better-matched static credential decides this request, so the
-		// resolver's external round trip must not stall it. The resolver is
-		// skipped entirely; the request headers it declared at registration
-		// are removed here so they never leak upstream.
-		for _, h := range entry.stripHeaders {
-			innerReq.Header.Del(h)
+		if entry.declared {
+			// A better-matched static credential decides this request, so
+			// the resolver's external round trip must not stall it. The
+			// resolver is skipped; the request headers it declared at
+			// registration are removed here so they never leak upstream.
+			for _, h := range entry.stripHeaders {
+				innerReq.Header.Del(h)
+			}
+			return staticCreds, nil
+		}
+		// A legacy registration made no declaration, so the resolver may
+		// have request-mutating side effects only it can perform (e.g.
+		// stripping a subject header). Run it, discard its credentials,
+		// and treat its error as non-fatal — the static credential was
+		// going to be injected either way.
+		if _, err := entry.resolve(innerReq.Context(), ctxReq, innerReq, host); err != nil {
+			slog.Debug("ignoring error from outranked credential resolver",
+				"subsystem", "proxy",
+				"host", host,
+				"error", err)
 		}
 		return staticCreds, nil
 	}
@@ -2043,7 +2086,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			RequestType:    "http",
 			StatusCode:     http.StatusProxyAuthRequired,
 			Duration:       duration,
-			RequestHeaders: r.Header.Clone(),
+			RequestHeaders: p.logHeadersRedacted(r.Header, lookupHost),
 			RequestBody:    reqBody,
 			RequestSize:    r.ContentLength,
 			ResponseSize:   -1,
@@ -2076,7 +2119,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			RequestType:    "http",
 			StatusCode:     http.StatusBadGateway,
 			Duration:       time.Since(start),
-			RequestHeaders: r.Header.Clone(),
+			RequestHeaders: p.logHeadersRedacted(r.Header, lookupHost),
 			RequestSize:    r.ContentLength,
 			ResponseSize:   -1,
 			Err:            err,
@@ -2776,7 +2819,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				RequestType:    "connect",
 				StatusCode:     http.StatusProxyAuthRequired,
 				Duration:       time.Since(reqStart),
-				RequestHeaders: req.Header.Clone(),
+				RequestHeaders: p.logHeadersRedacted(req.Header, r.Host),
 				RequestSize:    req.ContentLength,
 				ResponseSize:   -1,
 				Denied:         true,
@@ -2816,7 +2859,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 						RequestType:    "connect",
 						StatusCode:     http.StatusForbidden,
 						Duration:       time.Since(reqStart),
-						RequestHeaders: req.Header.Clone(),
+						RequestHeaders: p.logHeadersRedacted(req.Header, r.Host),
 						RequestSize:    req.ContentLength,
 						ResponseSize:   -1,
 						Denied:         true,
@@ -2895,7 +2938,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				RequestType:    "connect",
 				StatusCode:     http.StatusBadGateway,
 				Duration:       time.Since(reqStart),
-				RequestHeaders: req.Header.Clone(),
+				RequestHeaders: p.logHeadersRedacted(req.Header, r.Host),
 				RequestSize:    req.ContentLength,
 				ResponseSize:   -1,
 				Err:            credErr,
