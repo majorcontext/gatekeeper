@@ -1031,7 +1031,30 @@ func (p *Proxy) SetNetworkPolicyWithRules(policy string, allows []string, grants
 	}
 }
 
+// bareHost strips the port from a host:port string, returning the host
+// unchanged when it has no port.
+func bareHost(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil && h != "" {
+		return h
+	}
+	return host
+}
+
+// matchWildcardCredentialKey reports whether a wildcard credential map key
+// like "*.example.com" matches the bare (port-stripped) request host.
+// "*.example.com" matches "api.example.com" and "a.b.example.com", never
+// "example.com" itself; mirrors matchesPattern's wildcard branch.
+func matchWildcardCredentialKey(key, bare string) bool {
+	if !strings.HasPrefix(key, "*.") {
+		return false
+	}
+	suffix := key[1:] // "*.example.com" -> ".example.com"
+	return strings.HasSuffix(strings.ToLower(bare), strings.ToLower(suffix))
+}
+
 // getCredentials returns all credential headers for a host.
+// Exact keys are checked first (with a host:port fallback), then wildcard
+// keys like "*.example.com" against the port-stripped host.
 // Returns a copy of the slice to avoid data races with concurrent
 // SetCredentialWithGrant calls (e.g., token refresh).
 func (p *Proxy) getCredentials(host string) []credentialHeader {
@@ -1045,6 +1068,15 @@ func (p *Proxy) getCredentials(host string) []credentialHeader {
 		}
 	}
 	if len(creds) == 0 {
+		bare := bareHost(host)
+		for key, keyCreds := range p.credentials {
+			if matchWildcardCredentialKey(key, bare) {
+				creds = keyCreds
+				break
+			}
+		}
+	}
+	if len(creds) == 0 {
 		return nil
 	}
 	out := make([]credentialHeader, len(creds))
@@ -1053,7 +1085,8 @@ func (p *Proxy) getCredentials(host string) []credentialHeader {
 }
 
 // getCredentialResolver returns the dynamic resolver for a host, with
-// host:port fallback matching the same logic as getCredentials.
+// host:port and wildcard-key fallbacks matching the same logic as
+// getCredentials.
 func (p *Proxy) getCredentialResolver(host string) CredentialResolver {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -1062,7 +1095,15 @@ func (p *Proxy) getCredentialResolver(host string) CredentialResolver {
 	}
 	h, _, _ := net.SplitHostPort(host)
 	if h != "" {
-		return p.credentialResolvers[h]
+		if r, ok := p.credentialResolvers[h]; ok {
+			return r
+		}
+	}
+	bare := bareHost(host)
+	for key, r := range p.credentialResolvers {
+		if matchWildcardCredentialKey(key, bare) {
+			return r
+		}
 	}
 	return nil
 }

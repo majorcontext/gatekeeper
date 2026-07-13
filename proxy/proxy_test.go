@@ -1184,6 +1184,55 @@ func TestProxy_SetCredential_UsesAuthorizationHeader(t *testing.T) {
 	}
 }
 
+// TestProxy_GetCredentials_WildcardKey verifies that a credential registered
+// under a wildcard host key like "*.box.example.com" matches real subdomains
+// using the same suffix rule as network allow patterns: any subdomain at any
+// depth matches, but the apex domain does not. Exact keys take precedence
+// over wildcard keys.
+func TestProxy_GetCredentials_WildcardKey(t *testing.T) {
+	p := NewProxy()
+	p.SetCredentialWithGrant("*.box.example.com", "Cf-Access-Client-Id", "client-id-123", "cloudflare-access")
+
+	tests := []struct {
+		name      string
+		host      string
+		wantMatch bool
+	}{
+		{"single-label subdomain", "alpha.box.example.com", true},
+		{"subdomain with port", "alpha.box.example.com:443", true},
+		{"deep subdomain", "a.b.box.example.com", true},
+		{"apex does not match", "box.example.com", false},
+		{"unrelated host", "evil-box.example.com", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			creds := p.getCredentials(tt.host)
+			if tt.wantMatch {
+				if len(creds) != 1 {
+					t.Fatalf("getCredentials(%q) returned %d credentials, want 1", tt.host, len(creds))
+				}
+				if creds[0].Grant != "cloudflare-access" {
+					t.Errorf("grant = %q, want %q", creds[0].Grant, "cloudflare-access")
+				}
+			} else if len(creds) != 0 {
+				t.Errorf("getCredentials(%q) returned %d credentials, want 0", tt.host, len(creds))
+			}
+		})
+	}
+
+	t.Run("exact key takes precedence", func(t *testing.T) {
+		p.SetCredentialWithGrant("exact.box.example.com", "Authorization", "Bearer exact-token", "exact-grant")
+		creds := p.getCredentials("exact.box.example.com")
+		if len(creds) != 1 {
+			t.Fatalf("getCredentials returned %d credentials, want 1", len(creds))
+		}
+		if creds[0].Grant != "exact-grant" {
+			t.Errorf("grant = %q, want %q (exact key must win over wildcard)", creds[0].Grant, "exact-grant")
+		}
+	})
+}
+
 // TestProxy_ExtraHeaders_MergesWithExisting verifies that extra headers are
 // merged with client-sent headers rather than replacing them.
 func TestProxy_ExtraHeaders_MergesWithExisting(t *testing.T) {

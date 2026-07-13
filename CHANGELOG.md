@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.15.2 — 2026-07-13
+
+### Fixed
+
+- **Wildcard credential hosts now actually match subdomains** — `getCredentials` and `getCredentialResolver` looked up the request host in the credentials map by exact string key (with only a host:port-stripping fallback), so a `credentials` entry whose `host` was a wildcard like `*.box.example.com` only ever matched a request whose host was the literal string `*.box.example.com` — it never fired for a real subdomain such as `alpha.box.example.com`. The failure was silent: registration succeeded, wildcard semantics are documented for network allow patterns (which use a separate matcher), and an operator configuring a wildcard credential host simply got no injection and no error. Both getters now fall back — after the exact-key and host:port lookups miss — to matching wildcard credential keys against the port-stripped request host using the same suffix rule as allow patterns: `*.example.com` matches any subdomain at any depth (`api.example.com`, `a.b.example.com`) but never the apex `example.com` itself. Exact keys still take precedence over wildcard keys. Motivating case: injecting a Cloudflare Access service token across dynamically-created per-host subdomains under a `*.box.<domain>` wildcard
+
 ## v0.15.1 — 2026-07-09
 
 ### Fixed
