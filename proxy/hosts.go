@@ -79,12 +79,18 @@ func matchesPattern(pattern hostPattern, host string, port int) bool {
 	if pattern.isWildcard {
 		// Wildcard matching: *.example.com matches api.example.com, foo.bar.example.com
 		// The host must end with .{pattern.host}
-		suffix := "." + pattern.host // already lowercase from parsing
-		return strings.HasSuffix(strings.ToLower(host), suffix)
+		return hostHasSuffixFold(host, "."+pattern.host)
 	}
 
 	// Exact host match
 	return strings.EqualFold(pattern.host, host)
+}
+
+// hostHasSuffixFold reports whether host ends with suffix, ignoring case.
+// This is the wildcard-suffix rule shared by network allow patterns
+// (matchesPattern) and host-keyed map lookups (matchWildcardHostKey).
+func hostHasSuffixFold(host, suffix string) bool {
+	return len(host) >= len(suffix) && strings.EqualFold(host[len(host)-len(suffix):], suffix)
 }
 
 // grantHosts maps grant names to their allowed host patterns.
