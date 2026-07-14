@@ -419,6 +419,9 @@ func TestMCPRelay_LogsAllExitPaths(t *testing.T) {
 		if data.Denied {
 			t.Error("Denied should be false — this is a client/config error, not a policy decision")
 		}
+		if data.Err == nil {
+			t.Error("Err should be set to the credential-load error, naming the server and grant")
+		}
 	})
 
 	t.Run("request construction failure (500)", func(t *testing.T) {

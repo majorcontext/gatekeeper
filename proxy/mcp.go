@@ -428,7 +428,9 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if credValue == "" {
-			p.logExit(r, logBase, start, http.StatusInternalServerError, nil)
+			p.logExit(r, logBase, start, http.StatusInternalServerError, func(d *RequestLogData) {
+				d.Err = fmt.Errorf("loading credential for MCP server %q (grant %q) returned empty", serverName, mcpServer.Auth.Grant)
+			})
 			http.Error(w, fmt.Sprintf("MOAT: Failed to load credential for '%s'. Grant: %s. Run: moat grant %s",
 				serverName, mcpServer.Auth.Grant, grantToCommand(mcpServer.Auth.Grant)),
 				http.StatusInternalServerError)
