@@ -89,10 +89,13 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	p.mu.RUnlock()
 
 	if !ok {
+		// No Err: a typo'd relay name is a client/config mistake, not a
+		// proxy-side failure — the 404 status and request URL already
+		// identify it. Mirrors the parallel unknown-MCP-server 404 in
+		// mcp.go, which also carries no Err.
 		logData := logBase
 		logData.StatusCode = http.StatusNotFound
 		logData.Duration = time.Since(start)
-		logData.Err = errors.New("unknown relay endpoint: " + name)
 		p.logRequest(r, logData)
 		http.Error(w, "MOAT: Unknown relay endpoint '"+name+"'", http.StatusNotFound)
 		return
@@ -210,38 +213,54 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	if canFlush {
 		flusher.Flush()
 	}
-	// streamErr records an abnormal end of the stream: the upstream status
-	// was already sent, so the client sees a truncated body rather than an
-	// error status, and the canonical log line is the only place the
-	// failure can surface. An upstream read error is the one that matters;
-	// a client write error is recorded only when the upstream side was
-	// still healthy.
-	var streamErr error
+	// readErr and writeErr are tracked separately so that, when a single
+	// Read call returns both n>0 bytes and a non-EOF error and the client
+	// Write of those bytes also fails, the upstream readErr — the
+	// actionable failure — is captured rather than being masked by the
+	// concurrent writeErr.
+	//
+	// streamErr (below) records an abnormal end of the stream: the upstream
+	// status was already sent, so the client sees a truncated body rather
+	// than an error status, and the canonical log line is the only place
+	// the failure can surface. Only a non-EOF upstream read error sets it,
+	// and only when the client was still there to receive it
+	// (r.Context().Err() == nil) — a canceled client context and a
+	// client-side write failure are both routine disconnects, not
+	// proxy-side failures, and must not escalate the canonical log line to
+	// ERROR severity.
+	var readErr, writeErr error
+	var written int64
 	buf := make([]byte, 4096)
 	for {
-		n, readErr := resp.Body.Read(buf)
+		n, rErr := resp.Body.Read(buf)
 		if n > 0 {
-			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
-				streamErr = fmt.Errorf("writing response to client: %w", writeErr)
-				break
-			}
-			if canFlush {
+			wn, wErr := w.Write(buf[:n])
+			written += int64(wn)
+			if wErr != nil {
+				writeErr = wErr
+			} else if canFlush {
 				flusher.Flush()
 			}
 		}
-		if readErr != nil {
-			if !errors.Is(readErr, io.EOF) {
-				streamErr = fmt.Errorf("reading upstream response body: %w", readErr)
-			}
+		if rErr != nil {
+			readErr = rErr
 			break
 		}
+		if writeErr != nil {
+			break
+		}
+	}
+
+	var streamErr error
+	if readErr != nil && !errors.Is(readErr, io.EOF) && r.Context().Err() == nil {
+		streamErr = fmt.Errorf("reading upstream response body: %w", readErr)
 	}
 
 	logData := logBase
 	logData.StatusCode = resp.StatusCode
 	logData.Duration = time.Since(start)
 	logData.Err = streamErr
-	logData.ResponseSize = resp.ContentLength
+	logData.ResponseSize = written
 	logData.InjectedHeaders = credResult.InjectedHeaders
 	logData.Grants = credResult.Grants
 	p.logRequest(r, logData)

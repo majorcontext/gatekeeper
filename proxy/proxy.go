@@ -176,7 +176,7 @@ type RequestLogData struct {
 	RequestBody      []byte
 	ResponseBody     []byte
 	RequestSize      int64           // Content-Length of the request body, -1 if unknown. Always -1 for postgres connections (see RequestMessages).
-	ResponseSize     int64           // Content-Length of the response body, -1 if unknown. Always -1 for postgres connections (see ResponseMessages).
+	ResponseSize     int64           // For the streaming relay/MCP paths, the actual bytes delivered to the client; for other paths, the response Content-Length (-1 if unknown). Always -1 for postgres connections (see ResponseMessages).
 	RequestMessages  int64           // Postgres protocol messages relayed client→upstream; 0 for non-postgres connections.
 	ResponseMessages int64           // Postgres protocol messages relayed upstream→client; 0 for non-postgres connections.
 	AuthInjected     bool            // True if any credential header was injected for this host

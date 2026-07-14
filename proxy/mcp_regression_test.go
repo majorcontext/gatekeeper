@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestMCPRelay_NilCredentialStore tests that handleMCPRelay fails gracefully
@@ -950,5 +951,66 @@ func TestMCPRelay_CopyErrorLogsErr(t *testing.T) {
 	}
 	if data.Err == nil {
 		t.Error("Err is nil, want the mid-stream copy error to be recorded")
+	}
+}
+
+// TestMCPRelay_ClientCancelDoesNotSetErr verifies that when the client
+// cancels the request context mid-stream, the resulting upstream read
+// failure is NOT recorded as Err — a client hanging up is a routine
+// disconnect, not a proxy-side failure, and must not escalate the canonical
+// log line to ERROR severity. Mirrors TestRelay_ClientCancelDoesNotSetErr
+// for the MCP relay path.
+func TestMCPRelay_ClientCancelDoesNotSetErr(t *testing.T) {
+	firstByteSent := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial-data"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		close(firstByteSent)
+		// httptest.Server.Close (deferred below) waits for this handler to
+		// return, so keep the sleep short to keep the test fast.
+		time.Sleep(300 * time.Millisecond)
+	}))
+	defer backend.Close()
+
+	p := &Proxy{
+		credStore:  &mockCredentialStore{tokens: map[string]string{}},
+		mcpServers: []MCPServerConfig{{Name: "test", URL: backend.URL, Auth: nil}},
+	}
+
+	var mu sync.Mutex
+	var logged []RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, data)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest("POST", "/mcp/test", strings.NewReader("{}")).WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	go func() {
+		<-firstByteSent
+		// Give mcpRelayClient.Do time to return with the response headers
+		// already read, so the cancellation lands in the streaming copy
+		// loop below rather than racing the initial round trip itself.
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	p.handleMCPRelay(rec, req)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logged) != 1 {
+		t.Fatalf("logged %d entries, want exactly 1: %+v", len(logged), logged)
+	}
+	data := logged[0]
+	if data.Err != nil {
+		t.Errorf("Err = %v, want nil — the client canceled the request, this is a routine disconnect", data.Err)
 	}
 }

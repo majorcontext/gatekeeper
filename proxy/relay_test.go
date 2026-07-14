@@ -1,12 +1,14 @@
 package proxy
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestRelay_ForwardsToTarget(t *testing.T) {
@@ -129,12 +131,13 @@ func TestRelay_UnknownName404(t *testing.T) {
 	}
 }
 
-// TestRelay_UnknownEndpointLogsErrNotDenied verifies that a request to an
-// unregistered relay name is logged with Err set and Denied left false.
-// A typo'd relay name is a client/config error, not a network/keep policy
-// decision, so RequestLogData.Denied (which the field doc reserves for
-// policy denials) must not be set for it.
-func TestRelay_UnknownEndpointLogsErrNotDenied(t *testing.T) {
+// TestRelay_UnknownEndpointLogsClientError verifies that a request to an
+// unregistered relay name is logged as a plain client/config error: no Err
+// (the 404 status and request URL already identify a typo'd relay name —
+// this mirrors the parallel unknown-MCP-server 404, which also carries no
+// Err), and Denied/DenyReason left unset since this isn't a network/keep
+// policy decision.
+func TestRelay_UnknownEndpointLogsClientError(t *testing.T) {
 	p := NewProxy()
 	if err := p.AddRelay("anthropic", "http://localhost:9999"); err != nil {
 		t.Fatalf("AddRelay: %v", err)
@@ -171,8 +174,8 @@ func TestRelay_UnknownEndpointLogsErrNotDenied(t *testing.T) {
 	if data.DenyReason != "" {
 		t.Errorf("DenyReason = %q, want empty", data.DenyReason)
 	}
-	if data.Err == nil {
-		t.Error("Err should be set to the unknown-relay-endpoint error")
+	if data.Err != nil {
+		t.Errorf("Err = %v, want nil — a wrong relay name is a client mistake, not a proxy failure; the 404 and URL already identify it", data.Err)
 	}
 	if data.ClientAddr == "" {
 		t.Error("ClientAddr should not be empty")
@@ -402,6 +405,56 @@ func TestRelay_LogsClientAddr(t *testing.T) {
 	}
 }
 
+// TestRelay_ResponseSizeIsActualBytesDelivered verifies that the canonical
+// log line's ResponseSize reflects the bytes actually streamed to the
+// client, not resp.ContentLength (which is -1 for a streamed/chunked
+// response — the backend below flushes mid-body so no Content-Length is
+// known in advance).
+func TestRelay_ResponseSizeIsActualBytesDelivered(t *testing.T) {
+	const chunk1 = "partial-data-"
+	const chunk2 = "more-data"
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(chunk1))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte(chunk2))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	if err := p.AddRelay("anthropic", backend.URL); err != nil {
+		t.Fatalf("AddRelay: %v", err)
+	}
+
+	var mu sync.Mutex
+	var logged []RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, data)
+	})
+
+	req := httptest.NewRequest("GET", "/relay/anthropic/v1/messages", nil)
+	rec := httptest.NewRecorder()
+	p.handleRelay(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logged) != 1 {
+		t.Fatalf("logged %d entries, want exactly 1: %+v", len(logged), logged)
+	}
+	want := int64(len(chunk1) + len(chunk2))
+	if got := logged[0].ResponseSize; got != want {
+		t.Errorf("ResponseSize = %d, want %d (actual bytes delivered to the client)", got, want)
+	}
+}
+
 // TestRelay_StreamingErrorLogsErr verifies that when the upstream connection
 // is aborted mid-body (after headers and some bytes are already on the
 // wire), the canonical log line for the relay records the error instead of
@@ -446,6 +499,69 @@ func TestRelay_StreamingErrorLogsErr(t *testing.T) {
 	}
 	if data.Err == nil {
 		t.Error("Err is nil, want the mid-stream read error to be recorded")
+	}
+}
+
+// TestRelay_ClientCancelDoesNotSetErr verifies that when the client cancels
+// the request context mid-stream (e.g. it disconnected or gave up waiting),
+// the resulting upstream read failure is NOT recorded as Err. A client
+// hanging up is a routine disconnect, not a proxy-side failure, and must not
+// escalate the canonical log line to ERROR severity.
+func TestRelay_ClientCancelDoesNotSetErr(t *testing.T) {
+	firstByteSent := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial-data"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		close(firstByteSent)
+		// Block well past when the test cancels the client's request
+		// context, so the proxy's upstream read is interrupted by the
+		// cancellation rather than by a natural end of the response.
+		// httptest.Server.Close (deferred below) waits for this handler
+		// to return, so keep the sleep short to keep the test fast.
+		time.Sleep(300 * time.Millisecond)
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	if err := p.AddRelay("anthropic", backend.URL); err != nil {
+		t.Fatalf("AddRelay: %v", err)
+	}
+
+	var mu sync.Mutex
+	var logged []RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, data)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest("POST", "/relay/anthropic/v1/messages", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	go func() {
+		<-firstByteSent
+		// Give relayClient.Do time to return with the response headers
+		// already read, so the cancellation lands in the streaming read
+		// loop below rather than racing the initial round trip itself.
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	p.handleRelay(rec, req)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logged) != 1 {
+		t.Fatalf("logged %d entries, want exactly 1: %+v", len(logged), logged)
+	}
+	data := logged[0]
+	if data.Err != nil {
+		t.Errorf("Err = %v, want nil — the client canceled the request, this is a routine disconnect", data.Err)
 	}
 }
 
