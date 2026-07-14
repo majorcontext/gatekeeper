@@ -187,6 +187,13 @@ type RequestLogData struct {
 	RunID            string          // Run ID from per-run context (daemon mode)
 	UserID           string          // User ID from proxy auth username. For postgres connections this carries the Postgres role, not the proxy auth user.
 	Ctx              context.Context // Request context (for OTel span extraction, may be nil)
+
+	// ClientAddr is the client's network address ("ip:port") as seen by the
+	// listener. For intercepted CONNECT traffic it is the address of the
+	// client that opened the tunnel, not the address of the (hijacked,
+	// TLS-terminated) connection carrying the individual inner requests. For
+	// postgres connections it is the TCP peer of the data-plane listener.
+	ClientAddr string
 }
 
 // RequestLogger is called for each proxied request.
@@ -2122,6 +2129,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			ResponseSize:   -1,
 			Denied:         true,
 			DenyReason:     denyReason,
+			ClientAddr:     r.RemoteAddr,
 		})
 		if rc != nil && isHostGateway(rc, host) {
 			p.logPolicy(r, "network", "http.request", "", "Host service blocked: "+host+":"+strconv.Itoa(port))
@@ -2153,6 +2161,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			RequestSize:    r.ContentLength,
 			ResponseSize:   -1,
 			Err:            err,
+			ClientAddr:     r.RemoteAddr,
 		})
 		return
 	}
@@ -2239,6 +2248,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		RequestBody:     reqBody,
 		RequestSize:     r.ContentLength,
 		ResponseSize:    -1,
+		ClientAddr:      r.RemoteAddr,
 		InjectedHeaders: credResult.InjectedHeaders,
 		Grants:          credResult.Grants,
 	}
@@ -2316,6 +2326,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 			Duration:     time.Since(start),
 			RequestSize:  -1,
 			ResponseSize: -1,
+			ClientAddr:   r.RemoteAddr,
 			Denied:       true,
 			DenyReason:   denyReason,
 		})
@@ -2770,6 +2781,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				Grants:          credResult.Grants,
 				Denied:          llmDenied,
 				DenyReason:      llmDenyReason,
+				ClientAddr:      r.RemoteAddr,
 			}
 			reqStart := reqStartFromContext(req.Context())
 
@@ -2822,6 +2834,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				RequestSize:     req.ContentLength,
 				ResponseSize:    -1,
 				Err:             err,
+				ClientAddr:      r.RemoteAddr,
 				AuthInjected:    len(credResult.InjectedHeaders) > 0,
 				InjectedHeaders: credResult.InjectedHeaders,
 				Grants:          credResult.Grants,
@@ -2852,6 +2865,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				RequestHeaders: p.logHeadersRedacted(req.Header, r.Host),
 				RequestSize:    req.ContentLength,
 				ResponseSize:   -1,
+				ClientAddr:     r.RemoteAddr,
 				Denied:         true,
 				DenyReason:     "Request blocked by network policy: " + req.Method + " " + host + req.URL.Path,
 			})
@@ -2892,6 +2906,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 						RequestHeaders: p.logHeadersRedacted(req.Header, r.Host),
 						RequestSize:    req.ContentLength,
 						ResponseSize:   -1,
+						ClientAddr:     r.RemoteAddr,
 						Denied:         true,
 						DenyReason:     d.denyReason,
 						Err:            d.err,
@@ -2971,6 +2986,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				RequestHeaders: p.logHeadersRedacted(req.Header, r.Host),
 				RequestSize:    req.ContentLength,
 				ResponseSize:   -1,
+				ClientAddr:     r.RemoteAddr,
 				Err:            credErr,
 			})
 			return

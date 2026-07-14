@@ -695,6 +695,7 @@ func (s *PostgresServer) serveAuthenticated(ctx context.Context, clientConn net.
 		UserID:       user,
 		RequestSize:  -1,
 		ResponseSize: -1,
+		ClientAddr:   clientConn.RemoteAddr().String(),
 	}
 	if rc != nil {
 		logEntry.RunID = rc.RunID

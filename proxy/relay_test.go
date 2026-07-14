@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -304,6 +305,50 @@ func TestAddRelay_Validation(t *testing.T) {
 				t.Errorf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+// TestRelay_LogsClientAddr verifies the canonical log line for a relay
+// request carries the client's network address as seen by the listener.
+// httptest.NewRequest sets RemoteAddr to a fixed synthetic value, so the
+// logged ClientAddr must match it exactly.
+func TestRelay_LogsClientAddr(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("relay response"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	if err := p.AddRelay("anthropic", backend.URL); err != nil {
+		t.Fatalf("AddRelay: %v", err)
+	}
+
+	var mu sync.Mutex
+	var logged []RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, data)
+	})
+
+	req := httptest.NewRequest("POST", "/relay/anthropic/v1/messages", nil)
+	rec := httptest.NewRecorder()
+	p.handleRelay(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logged) == 0 {
+		t.Fatal("no request was logged")
+	}
+	for _, data := range logged {
+		if data.ClientAddr != "192.0.2.1:1234" {
+			t.Errorf("ClientAddr = %q, want %q", data.ClientAddr, "192.0.2.1:1234")
+		}
 	}
 }
 

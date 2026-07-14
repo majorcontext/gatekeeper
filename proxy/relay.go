@@ -57,6 +57,8 @@ func (p *Proxy) AddRelay(name, targetURL string) error {
 // The /relay/{name} prefix is stripped, and the remaining path is appended
 // to the configured target URL.
 func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
 	// Extract relay name from path: /relay/anthropic/v1/messages -> anthropic
 	relPath := strings.TrimPrefix(r.URL.Path, "/relay/")
 	name, rest, _ := strings.Cut(relPath, "/")
@@ -70,6 +72,20 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	p.mu.RUnlock()
 
 	if !ok {
+		p.logRequest(r, RequestLogData{
+			Method:       r.Method,
+			URL:          r.URL.String(),
+			Host:         name,
+			Path:         rest,
+			RequestType:  "relay",
+			StatusCode:   http.StatusNotFound,
+			Duration:     time.Since(start),
+			RequestSize:  r.ContentLength,
+			ResponseSize: -1,
+			ClientAddr:   r.RemoteAddr,
+			Denied:       true,
+			DenyReason:   "unknown relay endpoint: " + name,
+		})
 		http.Error(w, "MOAT: Unknown relay endpoint '"+name+"'", http.StatusNotFound)
 		return
 	}
@@ -77,29 +93,71 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// Build target URL
 	targetURL, err := url.Parse(target)
 	if err != nil {
+		p.logRequest(r, RequestLogData{
+			Method:       r.Method,
+			URL:          r.URL.String(),
+			Host:         name,
+			Path:         rest,
+			RequestType:  "relay",
+			StatusCode:   http.StatusInternalServerError,
+			Duration:     time.Since(start),
+			RequestSize:  r.ContentLength,
+			ResponseSize: -1,
+			ClientAddr:   r.RemoteAddr,
+			Err:          err,
+		})
 		http.Error(w, "MOAT: Invalid relay target URL", http.StatusInternalServerError)
 		return
 	}
 	targetURL.Path = strings.TrimSuffix(targetURL.Path, "/") + rest
 	targetURL.RawQuery = r.URL.RawQuery
 
+	// The lookup host carries a port — with the scheme default made
+	// explicit when the target URL omits it — so port-pinned host keys
+	// match on the relay path like they do on CONNECT and plain HTTP.
+	// Computed before the request is built so logging on every exit path
+	// below (including request-construction failure) can carry it.
+	host := lookupHostForURL(targetURL)
+
 	// Create forwarded request
 	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), r.Body)
 	if err != nil {
+		p.logRequest(r, RequestLogData{
+			Method:       r.Method,
+			URL:          targetURL.String(),
+			Host:         host,
+			Path:         rest,
+			RequestType:  "relay",
+			StatusCode:   http.StatusInternalServerError,
+			Duration:     time.Since(start),
+			RequestSize:  r.ContentLength,
+			ResponseSize: -1,
+			ClientAddr:   r.RemoteAddr,
+			Err:          err,
+		})
 		http.Error(w, "MOAT: Failed to create relay request", http.StatusInternalServerError)
 		return
 	}
 
 	// Resolve credentials before copying headers so resolver side effects
 	// (e.g., subject header stripping) are reflected in proxyReq.
-	// The lookup host carries a port — with the scheme default made
-	// explicit when the target URL omits it — so port-pinned host keys
-	// match on the relay path like they do on CONNECT and plain HTTP.
-	host := lookupHostForURL(targetURL)
 	creds, err := p.getCredentialsForRequest(r, r, host)
 	if err != nil {
 		slog.Warn("dynamic credential resolution failed",
 			"subsystem", "proxy", "host", host, "error", err)
+		p.logRequest(r, RequestLogData{
+			Method:       r.Method,
+			URL:          targetURL.String(),
+			Host:         host,
+			Path:         rest,
+			RequestType:  "relay",
+			StatusCode:   http.StatusBadGateway,
+			Duration:     time.Since(start),
+			RequestSize:  r.ContentLength,
+			ResponseSize: -1,
+			ClientAddr:   r.RemoteAddr,
+			Err:          err,
+		})
 		http.Error(w, "credential resolution failed", http.StatusBadGateway)
 		return
 	}
@@ -136,6 +194,21 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 			"relay", name,
 			"target", targetURL.String(),
 			"error", err)
+		p.logRequest(r, RequestLogData{
+			Method:          r.Method,
+			URL:             targetURL.String(),
+			Host:            host,
+			Path:            rest,
+			RequestType:     "relay",
+			StatusCode:      http.StatusBadGateway,
+			Duration:        time.Since(start),
+			RequestSize:     r.ContentLength,
+			ResponseSize:    -1,
+			ClientAddr:      r.RemoteAddr,
+			Err:             err,
+			InjectedHeaders: credResult.InjectedHeaders,
+			Grants:          credResult.Grants,
+		})
 		http.Error(w, "MOAT: Relay '"+name+"' connection failed", http.StatusBadGateway)
 		return
 	}
@@ -172,4 +245,19 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+
+	p.logRequest(r, RequestLogData{
+		Method:          r.Method,
+		URL:             targetURL.String(),
+		Host:            host,
+		Path:            rest,
+		RequestType:     "relay",
+		StatusCode:      resp.StatusCode,
+		Duration:        time.Since(start),
+		RequestSize:     r.ContentLength,
+		ResponseSize:    resp.ContentLength,
+		ClientAddr:      r.RemoteAddr,
+		InjectedHeaders: credResult.InjectedHeaders,
+		Grants:          credResult.Grants,
+	})
 }

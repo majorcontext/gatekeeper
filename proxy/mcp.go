@@ -189,6 +189,8 @@ func (p *Proxy) injectMCPCredentialsWithContext(ctxReq, targetReq *http.Request)
 // Path format: /mcp/{server-name}
 // This allows MCP clients that don't respect HTTP_PROXY to connect directly to the proxy.
 func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
 	// Extract server name from path: /mcp/context7 -> context7
 	serverName := strings.TrimPrefix(r.URL.Path, "/mcp/")
 	if idx := strings.IndexByte(serverName, '/'); idx >= 0 {
@@ -373,6 +375,19 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	// Send request to actual MCP server using the reused client
 	resp, err := mcpRelayClient.Do(proxyReq)
 	if err != nil {
+		p.logRequest(r, RequestLogData{
+			Method:       r.Method,
+			URL:          targetURL.String(),
+			Host:         targetURL.Host,
+			Path:         targetURL.Path,
+			RequestType:  "mcp",
+			StatusCode:   http.StatusBadGateway,
+			Duration:     time.Since(start),
+			RequestSize:  r.ContentLength,
+			ResponseSize: -1,
+			ClientAddr:   r.RemoteAddr,
+			Err:          err,
+		})
 		http.Error(w, fmt.Sprintf("MOAT: Failed to connect to MCP server '%s' at %s: %v",
 			serverName, targetURL.String(), err), http.StatusBadGateway)
 		return
@@ -398,4 +413,17 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 
 	// Copy response body with streaming support
 	_, _ = io.Copy(w, resp.Body)
+
+	p.logRequest(r, RequestLogData{
+		Method:       r.Method,
+		URL:          targetURL.String(),
+		Host:         targetURL.Host,
+		Path:         targetURL.Path,
+		RequestType:  "mcp",
+		StatusCode:   resp.StatusCode,
+		Duration:     time.Since(start),
+		RequestSize:  r.ContentLength,
+		ResponseSize: resp.ContentLength,
+		ClientAddr:   r.RemoteAddr,
+	})
 }

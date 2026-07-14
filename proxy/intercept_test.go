@@ -502,6 +502,40 @@ func TestIntercept_CanonicalLogFields(t *testing.T) {
 	}
 }
 
+// TestIntercept_LogsClientAddr verifies the canonical log line for an
+// intercepted CONNECT tunnel carries the address of the client that opened
+// the tunnel, not the (hijacked, TLS-terminated) inner connection's address.
+func TestIntercept_LogsClientAddr(t *testing.T) {
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte("hello"))
+	}))
+
+	waitLog := captureLog(t, setup.Proxy)
+
+	resp, err := setup.Client.Get(setup.Backend.URL + "/some/path")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	logged := waitLog()
+	if logged.RequestType != "connect" {
+		t.Fatalf("RequestType = %q, want connect", logged.RequestType)
+	}
+	if logged.ClientAddr == "" {
+		t.Fatal("ClientAddr is empty, want the tunnel-opening client's address")
+	}
+	host, _, err := net.SplitHostPort(logged.ClientAddr)
+	if err != nil {
+		t.Fatalf("ClientAddr = %q: SplitHostPort: %v", logged.ClientAddr, err)
+	}
+	if host != "127.0.0.1" {
+		t.Errorf("ClientAddr host = %q, want 127.0.0.1", host)
+	}
+}
+
 func TestIntercept_ExtraHeaders(t *testing.T) {
 	var receivedHeaders http.Header
 	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

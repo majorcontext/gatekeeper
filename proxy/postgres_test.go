@@ -625,6 +625,14 @@ func TestPostgresEndToEnd(t *testing.T) {
 	if !e.AuthInjected {
 		t.Errorf("AuthInjected = false, want true")
 	}
+	if e.ClientAddr == "" {
+		t.Fatal("ClientAddr is empty, want the client's TCP peer address")
+	}
+	if host, _, err := net.SplitHostPort(e.ClientAddr); err != nil {
+		t.Errorf("ClientAddr = %q: SplitHostPort: %v", e.ClientAddr, err)
+	} else if host != "127.0.0.1" {
+		t.Errorf("ClientAddr host = %q, want 127.0.0.1", host)
+	}
 }
 
 // flakyResolver returns the next password in a sequence on each
