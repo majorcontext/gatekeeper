@@ -276,6 +276,51 @@ func TestRequestType(t *testing.T) {
 	}
 }
 
+// countingFlushRecorder wraps httptest.ResponseRecorder to count Flush
+// calls, so a test can assert that a Flush on the OTelHandler's
+// ResponseWriter actually reaches the underlying writer.
+type countingFlushRecorder struct {
+	*httptest.ResponseRecorder
+	flushes int
+}
+
+func (r *countingFlushRecorder) Flush() {
+	r.flushes++
+	r.ResponseRecorder.Flush()
+}
+
+// TestOTelHandler_PropagatesFlush verifies that the ResponseWriter passed to
+// the wrapped handler implements http.Flusher and that calling Flush on it
+// reaches the underlying ResponseWriter. The relay and MCP relay streaming
+// loops type-assert w.(http.Flusher) after every chunk to force partial
+// responses (SSE, ndjson) onto the wire immediately; when the OTel wrapper
+// (statusRecorder) doesn't implement http.Flusher, that assertion silently
+// fails in production and per-chunk flushing never happens, even though the
+// code looks correct and passes tests that bypass OTelHandler entirely.
+func TestOTelHandler_PropagatesFlush(t *testing.T) {
+	rec := &countingFlushRecorder{ResponseRecorder: httptest.NewRecorder()}
+
+	var gotFlusher bool
+	handler := OTelHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f, ok := w.(http.Flusher)
+		gotFlusher = ok
+		w.Write([]byte("chunk"))
+		if ok {
+			f.Flush()
+		}
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	handler.ServeHTTP(rec, req)
+
+	if !gotFlusher {
+		t.Fatal("statusRecorder does not implement http.Flusher")
+	}
+	if rec.flushes == 0 {
+		t.Error("Flush was not propagated to the underlying ResponseWriter")
+	}
+}
+
 // spanNames returns the names of all spans for diagnostic output.
 func spanNames(spans tracetest.SpanStubs) []string {
 	names := make([]string, len(spans))

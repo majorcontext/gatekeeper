@@ -57,11 +57,28 @@ func (p *Proxy) AddRelay(name, targetURL string) error {
 // The /relay/{name} prefix is stripped, and the remaining path is appended
 // to the configured target URL.
 func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
 	// Extract relay name from path: /relay/anthropic/v1/messages -> anthropic
 	relPath := strings.TrimPrefix(r.URL.Path, "/relay/")
 	name, rest, _ := strings.Cut(relPath, "/")
 	if rest != "" {
 		rest = "/" + rest
+	}
+
+	// Base canonical log entry shared by every exit path below. Each path
+	// copies it and sets only its own StatusCode/Duration/Err/credential
+	// fields. URL and Host are refreshed once the target URL and lookup
+	// host are known.
+	logBase := RequestLogData{
+		Method:       r.Method,
+		URL:          r.URL.String(),
+		Host:         name,
+		Path:         rest,
+		RequestType:  "relay",
+		RequestSize:  r.ContentLength,
+		ResponseSize: -1,
+		ClientAddr:   r.RemoteAddr,
 	}
 
 	// Look up relay target
@@ -70,6 +87,11 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	p.mu.RUnlock()
 
 	if !ok {
+		// No Err: a typo'd relay name is a client/config mistake, not a
+		// proxy-side failure — the 404 status and request URL already
+		// identify it. Mirrors the parallel unknown-MCP-server 404 in
+		// mcp.go, which also carries no Err.
+		p.logExit(r, logBase, start, http.StatusNotFound, nil)
 		http.Error(w, "MOAT: Unknown relay endpoint '"+name+"'", http.StatusNotFound)
 		return
 	}
@@ -77,29 +99,37 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// Build target URL
 	targetURL, err := url.Parse(target)
 	if err != nil {
+		p.logExit(r, logBase, start, http.StatusInternalServerError, func(d *RequestLogData) { d.Err = err })
 		http.Error(w, "MOAT: Invalid relay target URL", http.StatusInternalServerError)
 		return
 	}
 	targetURL.Path = strings.TrimSuffix(targetURL.Path, "/") + rest
 	targetURL.RawQuery = r.URL.RawQuery
 
+	// The lookup host carries a port — with the scheme default made
+	// explicit when the target URL omits it — so port-pinned host keys
+	// match on the relay path like they do on CONNECT and plain HTTP.
+	// Computed before the request is built so logging on every exit path
+	// below (including request-construction failure) can carry it.
+	host := lookupHostForURL(targetURL)
+	logBase.URL = targetURL.String()
+	logBase.Host = host
+
 	// Create forwarded request
 	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), r.Body)
 	if err != nil {
+		p.logExit(r, logBase, start, http.StatusInternalServerError, func(d *RequestLogData) { d.Err = err })
 		http.Error(w, "MOAT: Failed to create relay request", http.StatusInternalServerError)
 		return
 	}
 
 	// Resolve credentials before copying headers so resolver side effects
 	// (e.g., subject header stripping) are reflected in proxyReq.
-	// The lookup host carries a port — with the scheme default made
-	// explicit when the target URL omits it — so port-pinned host keys
-	// match on the relay path like they do on CONNECT and plain HTTP.
-	host := lookupHostForURL(targetURL)
 	creds, err := p.getCredentialsForRequest(r, r, host)
 	if err != nil {
 		slog.Warn("dynamic credential resolution failed",
 			"subsystem", "proxy", "host", host, "error", err)
+		p.logExit(r, logBase, start, http.StatusBadGateway, func(d *RequestLogData) { d.Err = err })
 		http.Error(w, "credential resolution failed", http.StatusBadGateway)
 		return
 	}
@@ -136,6 +166,11 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 			"relay", name,
 			"target", targetURL.String(),
 			"error", err)
+		p.logExit(r, logBase, start, http.StatusBadGateway, func(d *RequestLogData) {
+			d.Err = err
+			d.InjectedHeaders = credResult.InjectedHeaders
+			d.Grants = credResult.Grants
+		})
 		http.Error(w, "MOAT: Relay '"+name+"' connection failed", http.StatusBadGateway)
 		return
 	}
@@ -155,21 +190,15 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// (e.g., Claude Code's /v1/messages with stream:true) are flushed
 	// incrementally rather than buffered in io.Copy's 32KB buffer.
 	w.WriteHeader(resp.StatusCode)
-	flusher, canFlush := w.(http.Flusher)
-	if canFlush {
+	if flusher, canFlush := w.(http.Flusher); canFlush {
 		flusher.Flush()
 	}
-	buf := make([]byte, 4096)
-	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			_, _ = w.Write(buf[:n])
-			if canFlush {
-				flusher.Flush()
-			}
-		}
-		if err != nil {
-			break
-		}
-	}
+	written, streamErr := streamResponseBody(w, resp.Body, r.Context())
+
+	p.logExit(r, logBase, start, resp.StatusCode, func(d *RequestLogData) {
+		d.Err = streamErr
+		d.ResponseSize = written
+		d.InjectedHeaders = credResult.InjectedHeaders
+		d.Grants = credResult.Grants
+	})
 }

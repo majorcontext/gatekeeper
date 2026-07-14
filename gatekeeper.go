@@ -250,6 +250,13 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 		if data.UserID != "" {
 			attrs = append(attrs, slog.String("user_id", data.UserID))
 		}
+		if data.ClientAddr != "" {
+			clientIP := data.ClientAddr
+			if host, _, err := net.SplitHostPort(clientIP); err == nil {
+				clientIP = host
+			}
+			attrs = append(attrs, slog.String("client_ip", clientIP))
+		}
 		if data.AuthInjected {
 			attrs = append(attrs, slog.Bool("credential_injected", true))
 			var headerNames []string

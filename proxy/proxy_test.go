@@ -4525,6 +4525,61 @@ func TestProxy_HandleHTTP_LogsExcludeResolverStrippedHeaders(t *testing.T) {
 	}
 }
 
+// TestProxy_HandleHTTP_LogsClientAddr verifies that every canonical log line
+// produced by the plain-HTTP path carries the client's network address as
+// seen by the listener, so operators can tell which peer sent a request
+// without relying on token identity alone.
+func TestProxy_HandleHTTP_LogsClientAddr(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+
+	var mu sync.Mutex
+	var logged []RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, data)
+	})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxyServer.URL))},
+	}
+
+	req, _ := http.NewRequest("GET", backend.URL+"/", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logged) == 0 {
+		t.Fatal("no request was logged")
+	}
+	for _, data := range logged {
+		if data.ClientAddr == "" {
+			t.Fatalf("ClientAddr is empty, want the client's listener-observed address")
+		}
+		host, _, err := net.SplitHostPort(data.ClientAddr)
+		if err != nil {
+			t.Fatalf("ClientAddr = %q: SplitHostPort: %v", data.ClientAddr, err)
+		}
+		if net.ParseIP(host) == nil {
+			t.Fatalf("ClientAddr host = %q, want a valid IP", host)
+		}
+		if host != "127.0.0.1" {
+			t.Errorf("ClientAddr host = %q, want 127.0.0.1", host)
+		}
+	}
+}
+
 // TestProxy_GetCredentialsForRequest_BracketedIPv6Host verifies that a
 // bracketed, portless IPv6 lookup host like "[::1]" matches an
 // embedder-supplied key stored in canonical unbracketed form ("::1").

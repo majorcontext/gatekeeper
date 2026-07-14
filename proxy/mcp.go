@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -189,6 +190,8 @@ func (p *Proxy) injectMCPCredentialsWithContext(ctxReq, targetReq *http.Request)
 // Path format: /mcp/{server-name}
 // This allows MCP clients that don't respect HTTP_PROXY to connect directly to the proxy.
 func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
 	// Extract server name from path: /mcp/context7 -> context7
 	serverName := strings.TrimPrefix(r.URL.Path, "/mcp/")
 	if idx := strings.IndexByte(serverName, '/'); idx >= 0 {
@@ -197,6 +200,21 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 
 	mcpServers := p.getMCPServersForRequest(r)
 	credStore := p.getCredStoreForRequest(r)
+
+	// Base canonical log entry shared by every exit path below. Each path
+	// copies it and sets only its own StatusCode/Duration/Err/InjectedHeaders/
+	// Grants fields. URL/Host/Path are refreshed once the target URL is known,
+	// mirroring the logBase pattern in handleRelay.
+	logBase := RequestLogData{
+		Method:       r.Method,
+		URL:          r.URL.String(),
+		Host:         serverName,
+		Path:         r.URL.Path,
+		RequestType:  "mcp",
+		RequestSize:  r.ContentLength,
+		ResponseSize: -1,
+		ClientAddr:   r.RemoteAddr,
+	}
 
 	// Find the MCP server config
 	var mcpServer *MCPServerConfig
@@ -208,7 +226,12 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if mcpServer == nil {
-		// Include diagnostic info in error that will show up in Claude Code
+		// Include diagnostic info in error that will show up in Claude Code.
+		// No Err: an unconfigured server name is a client/config mistake,
+		// not a proxy-side failure — the 404 status and request URL already
+		// identify it. Mirrors the parallel unknown-relay-endpoint 404 in
+		// relay.go, which also carries no Err.
+		p.logExit(r, logBase, start, http.StatusNotFound, nil)
 		http.Error(w, fmt.Sprintf("MOAT: MCP server '%s' not configured. Available servers: %d. Check moat.yaml.",
 			serverName, len(mcpServers)), http.StatusNotFound)
 		return
@@ -217,6 +240,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	// Build target URL by replacing /mcp/{server-name} with the actual MCP server URL
 	targetURL, err := url.Parse(mcpServer.URL)
 	if err != nil {
+		p.logExit(r, logBase, start, http.StatusInternalServerError, func(d *RequestLogData) { d.Err = err })
 		http.Error(w, fmt.Sprintf("MOAT: Invalid MCP server URL for '%s': %s", serverName, mcpServer.URL),
 			http.StatusInternalServerError)
 		return
@@ -232,12 +256,25 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	// Preserve query string
 	targetURL.RawQuery = r.URL.RawQuery
 
+	// Refresh the base log entry now that the target URL is known, so every
+	// remaining exit path logs the resolved upstream host/path/URL.
+	logBase.URL = targetURL.String()
+	logBase.Host = targetURL.Host
+	logBase.Path = targetURL.Path
+
 	// Evaluate Keep policy for MCP tool calls before consuming the body.
 	// Engine key uses "mcp-" prefix to avoid collisions with "http" and "llm-gateway" keys.
+	//
+	// Every exit below calls both p.logPolicy (the policy-decision log) and
+	// p.logRequest (the canonical per-request log), mirroring the http-scope
+	// Keep denial handling in proxy.go's denyHTTP closure: the two logs serve
+	// different audiences (policy audit trail vs. request-level
+	// observability) and neither substitutes for the other.
 	if rc := getRunContext(r); rc != nil && rc.KeepEngines != nil {
 		if eng, ok := rc.KeepEngines["mcp-"+serverName]; ok {
 			bodyBytes, readErr := io.ReadAll(r.Body)
 			if readErr != nil {
+				p.logExit(r, logBase, start, http.StatusInternalServerError, func(d *RequestLogData) { d.Err = readErr })
 				http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 				return
 			}
@@ -254,6 +291,10 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 				// Fail-closed: deny non-JSON requests when a policy is configured.
 				slog.Warn("MCP request body is not valid JSON, denying (fail-closed)",
 					"server", serverName, "error", unmarshalErr)
+				p.logExit(r, logBase, start, http.StatusForbidden, func(d *RequestLogData) {
+					d.Denied = true
+					d.DenyReason = "Keep policy fail-closed: MCP request body is not valid JSON"
+				})
 				http.Error(w, "Moat: MCP request blocked — invalid JSON body.", http.StatusForbidden)
 				return
 			}
@@ -268,12 +309,21 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 						"tool", mcpReq.Params.Name,
 						"error", evalErr)
 					p.logPolicy(r, scope, "mcp.tool_call", "evaluation-error", "Policy evaluation failed")
+					p.logExit(r, logBase, start, http.StatusForbidden, func(d *RequestLogData) {
+						d.Denied = true
+						d.DenyReason = "Keep policy evaluation error"
+						d.Err = evalErr
+					})
 					http.Error(w, "Moat: MCP tool call blocked — policy evaluation error.", http.StatusForbidden)
 					return
 				}
 				switch result.Decision {
 				case keeplib.Deny:
 					p.logPolicy(r, scope, "mcp.tool_call", result.Rule, result.Message)
+					p.logExit(r, logBase, start, http.StatusForbidden, func(d *RequestLogData) {
+						d.Denied = true
+						d.DenyReason = "Keep policy denied: " + result.Rule + " " + result.Message
+					})
 					msg := "Moat: MCP tool call blocked by policy."
 					if result.Message != "" {
 						msg += " " + result.Message
@@ -288,6 +338,11 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 						slog.Warn("failed to unmarshal MCP body for redaction, denying (fail-closed)",
 							"server", serverName, "error", unmarshalErr)
 						p.logPolicy(r, scope, "mcp.tool_call", "redaction-error", "Failed to redact request")
+						p.logExit(r, logBase, start, http.StatusForbidden, func(d *RequestLogData) {
+							d.Denied = true
+							d.DenyReason = "Keep policy redaction failed: could not unmarshal body"
+							d.Err = unmarshalErr
+						})
 						http.Error(w, "Moat: MCP tool call blocked — redaction failed.", http.StatusForbidden)
 						return
 					}
@@ -296,6 +351,11 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 						slog.Warn("MCP body missing params map for redaction, denying (fail-closed)",
 							"server", serverName)
 						p.logPolicy(r, scope, "mcp.tool_call", "redaction-error", "Failed to redact request")
+						p.logExit(r, logBase, start, http.StatusForbidden, func(d *RequestLogData) {
+							d.Denied = true
+							d.DenyReason = "Keep policy redaction failed: body missing params map"
+							d.Err = errors.New("mutated MCP request lacked a params map")
+						})
 						http.Error(w, "Moat: MCP tool call blocked — redaction failed.", http.StatusForbidden)
 						return
 					}
@@ -305,6 +365,11 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 						slog.Warn("failed to marshal redacted MCP body, denying (fail-closed)",
 							"server", serverName, "error", marshalErr)
 						p.logPolicy(r, scope, "mcp.tool_call", "redaction-error", "Failed to redact request")
+						p.logExit(r, logBase, start, http.StatusForbidden, func(d *RequestLogData) {
+							d.Denied = true
+							d.DenyReason = "Keep policy redaction failed: could not marshal mutated body"
+							d.Err = marshalErr
+						})
 						http.Error(w, "Moat: MCP tool call blocked — redaction failed.", http.StatusForbidden)
 						return
 					}
@@ -319,6 +384,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	// Create new request to target with context
 	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), r.Body)
 	if err != nil {
+		p.logExit(r, logBase, start, http.StatusInternalServerError, func(d *RequestLogData) { d.Err = err })
 		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
 		return
 	}
@@ -341,6 +407,10 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	// Inject credentials.
 	// In daemon mode, credentials are pre-resolved in RunContextData.Credentials
 	// (keyed by host, with Grant field). Try that first, then fall back to credStore.
+	// injectedHeaders and grants record the injection for the canonical log
+	// lines below, mirroring injectCredentials' credentialInjectionResult.
+	var injectedHeaders map[string]bool
+	var grants []string
 	if mcpServer.Auth != nil {
 		var credValue string
 
@@ -358,6 +428,9 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if credValue == "" {
+			p.logExit(r, logBase, start, http.StatusInternalServerError, func(d *RequestLogData) {
+				d.Err = fmt.Errorf("loading credential for MCP server %q (grant %q) returned empty", serverName, mcpServer.Auth.Grant)
+			})
 			http.Error(w, fmt.Sprintf("MOAT: Failed to load credential for '%s'. Grant: %s. Run: moat grant %s",
 				serverName, mcpServer.Auth.Grant, grantToCommand(mcpServer.Auth.Grant)),
 				http.StatusInternalServerError)
@@ -366,6 +439,10 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 
 		// Inject the real credential
 		proxyReq.Header.Set(mcpServer.Auth.Header, formatCredValue(mcpServer.Auth.Grant, credValue))
+		injectedHeaders = map[string]bool{strings.ToLower(mcpServer.Auth.Header): true}
+		if mcpServer.Auth.Grant != "" {
+			grants = []string{mcpServer.Auth.Grant}
+		}
 	}
 
 	slog.Debug("MCP relay forwarding", "server", serverName, "method", proxyReq.Method, "url", targetURL.String())
@@ -373,6 +450,11 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	// Send request to actual MCP server using the reused client
 	resp, err := mcpRelayClient.Do(proxyReq)
 	if err != nil {
+		p.logExit(r, logBase, start, http.StatusBadGateway, func(d *RequestLogData) {
+			d.Err = err
+			d.InjectedHeaders = injectedHeaders
+			d.Grants = grants
+		})
 		http.Error(w, fmt.Sprintf("MOAT: Failed to connect to MCP server '%s' at %s: %v",
 			serverName, targetURL.String(), err), http.StatusBadGateway)
 		return
@@ -392,10 +474,19 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 
 	// For SSE streaming, flush after headers
-	if flusher, ok := w.(http.Flusher); ok {
+	if flusher, canFlush := w.(http.Flusher); canFlush {
 		flusher.Flush()
 	}
 
-	// Copy response body with streaming support
-	_, _ = io.Copy(w, resp.Body)
+	// Copy response body with streaming support, mirroring handleRelay's
+	// stream loop. The byte count is the real response size — ContentLength
+	// is -1 for streams.
+	written, copyErr := streamResponseBody(w, resp.Body, r.Context())
+
+	p.logExit(r, logBase, start, resp.StatusCode, func(d *RequestLogData) {
+		d.Err = copyErr
+		d.ResponseSize = written
+		d.InjectedHeaders = injectedHeaders
+		d.Grants = grants
+	})
 }

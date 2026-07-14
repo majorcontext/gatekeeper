@@ -116,6 +116,28 @@ func (sr *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
 }
 
+// Flush implements http.Flusher by delegating to the underlying
+// ResponseWriter when it implements http.Flusher, and is a no-op otherwise.
+// The relay and MCP relay streaming loops (proxy/relay.go, proxy/mcp.go)
+// type-assert w.(http.Flusher) after every chunk to push partial responses
+// (SSE, ndjson) onto the wire immediately instead of waiting in net/http's
+// internal buffer. Without this method the assertion always failed once the
+// standalone server wrapped the proxy in OTelHandler, silently disabling
+// per-chunk flushing in production — invisible in tests that exercise
+// streaming directly against httptest.ResponseRecorder, which implements
+// Flush itself.
+//
+// No response path needs flushing suppressed here: the only other special
+// case this wrapper handles is Hijack (CONNECT), which hands the raw
+// connection to the caller and is never followed by further Write/Flush
+// calls through this ResponseWriter, so there is no risk of a stray Flush
+// after hijack.
+func (sr *statusRecorder) Flush() {
+	if f, ok := sr.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // requestType returns a classification string for the request.
 func requestType(r *http.Request) string {
 	if r.Method == http.MethodConnect {
