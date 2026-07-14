@@ -56,6 +56,8 @@ func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialR
 				actorToken = password
 			}
 		default:
+			// This deletion is declared to the proxy by
+			// credentialResolverStripHeaders — keep the two in sync.
 			subject = innerReq.Header.Get(cfg.SubjectHeader)
 			if subject != "" {
 				innerReq.Header.Del(cfg.SubjectHeader)
@@ -105,6 +107,21 @@ func extractProxyAuthCredentials(r *http.Request) (username, password string) {
 		return "", ""
 	}
 	return u, p
+}
+
+// credentialResolverStripHeaders returns the request headers a dynamic
+// credential's resolver consumes and removes, for declaration at
+// registration time. For token-exchange sources this is the configured
+// subject header (empty when the subject comes from proxy auth). This list
+// must name exactly the headers newTokenExchangeResolver's resolver deletes
+// from innerReq — if a future resolver-backed source type removes request
+// headers, it must be added here too, or the proxy will skip its
+// sanitization when the resolver is outranked by a static credential.
+func credentialResolverStripHeaders(cred CredentialConfig) []string {
+	if cred.Source.Type == "token-exchange" && cred.Source.SubjectHeader != "" {
+		return []string{cred.Source.SubjectHeader}
+	}
+	return nil
 }
 
 func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, error) {

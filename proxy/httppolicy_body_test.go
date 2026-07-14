@@ -269,8 +269,8 @@ func TestBuildHTTPCall_DuplicateKeysDenied(t *testing.T) {
 	defer eng.Close()
 
 	for _, body := range []string{
-		`{"model":"gpt-4","model":"safe"}`,         // top-level duplicate
-		`{"outer":{"x":1,"x":2}}`,                  // nested object duplicate
+		`{"model":"gpt-4","model":"safe"}`,          // top-level duplicate
+		`{"outer":{"x":1,"x":2}}`,                   // nested object duplicate
 		`{"messages":[{"role":"user","role":"x"}]}`, // duplicate inside array element
 	} {
 		req := newJSONRequest(t, "POST", body)

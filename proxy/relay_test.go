@@ -306,3 +306,42 @@ func TestAddRelay_Validation(t *testing.T) {
 		})
 	}
 }
+
+// TestRelay_DefaultPortPinnedCredentialKey verifies the relay path presents
+// a port-bearing lookup host even when the relay target URL omits the
+// scheme-default port, so a key pinned to ":443" fires for a target like
+// "https://api.example.com". Port-pinned keys are expressible only in
+// embedder-built maps, so the key is written directly.
+func TestRelay_DefaultPortPinnedCredentialKey(t *testing.T) {
+	var receivedAuth string
+	origTransport := relayClient.Transport
+	defer func() { relayClient.Transport = origTransport }()
+	relayClient.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		receivedAuth = req.Header.Get("Authorization")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("ok")),
+			Request:    req,
+		}, nil
+	})
+
+	p := NewProxy()
+	if err := p.AddRelay("api", "https://api.example.com"); err != nil {
+		t.Fatalf("AddRelay: %v", err)
+	}
+	p.mu.Lock()
+	p.credentials["api.example.com:443"] = []credentialHeader{{Name: "Authorization", Value: "Bearer pinned", Grant: "pinned-grant"}}
+	p.mu.Unlock()
+
+	req := httptest.NewRequest("POST", "/relay/api/v1/messages", nil)
+	rec := httptest.NewRecorder()
+	p.handleRelay(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if receivedAuth != "Bearer pinned" {
+		t.Errorf("Authorization = %q, want %q (:443-pinned key must fire for a port-less relay target)", receivedAuth, "Bearer pinned")
+	}
+}

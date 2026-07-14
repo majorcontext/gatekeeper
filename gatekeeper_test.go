@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2523,5 +2524,126 @@ func TestMultiHandler_WithGroup(t *testing.T) {
 	}
 	if !derived.Enabled(context.Background(), slog.LevelInfo) {
 		t.Error("derived handler Enabled(Info) = false, want true")
+	}
+}
+
+func TestHTTPSTokenExchangeOutrankedByStatic(t *testing.T) {
+	// End-to-end wiring check for outranked resolvers: a token-exchange
+	// credential under a wildcard host is outranked by a static credential
+	// for the exact host. The resolver must not run (no STS round trip),
+	// the static credential must be injected, and the subject header must
+	// still be stripped before the request leaves the proxy — the wiring
+	// declares it via SetCredentialResolverWithStripHeaders.
+
+	caDir := t.TempDir()
+	ca, err := proxy.NewCA(caDir)
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+
+	var stsCalls atomic.Int32
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stsCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":      "exchanged-token",
+			"issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+			"token_type":        "Bearer",
+			"expires_in":        3600,
+		})
+	}))
+	defer sts.Close()
+
+	var (
+		backendAuth          string
+		backendSubjectHeader string
+		backendMu            sync.Mutex
+	)
+	_, backendPort, caCertPool := startTLSBackend(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendMu.Lock()
+		backendAuth = r.Header.Get("Authorization")
+		backendSubjectHeader = r.Header.Get("X-Gatekeeper-Subject")
+		backendMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	t.Setenv("TEST_TE_CLIENT_SECRET", "gk-secret")
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		TLS: TLSConfig{
+			CACert: filepath.Join(caDir, "ca.crt"),
+			CAKey:  filepath.Join(caDir, "ca.key"),
+		},
+		Credentials: []CredentialConfig{
+			{
+				// Wildcard suffix that matches 127.0.0.1.
+				Host:   "*.0.0.1",
+				Grant:  "github",
+				Prefix: "Bearer",
+				Source: SourceConfig{
+					Type:            "token-exchange",
+					Endpoint:        sts.URL,
+					ClientID:        "gk-client",
+					ClientSecretEnv: "TEST_TE_CLIENT_SECRET",
+					SubjectHeader:   "X-Gatekeeper-Subject",
+				},
+			},
+			{
+				Host:  "127.0.0.1",
+				Grant: "static-grant",
+				Source: SourceConfig{
+					Type:  "static",
+					Value: "Bearer static-token",
+				},
+			},
+		},
+		Network: NetworkConfig{Policy: "permissive"},
+	}
+
+	srv, err := New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.proxy.SetUpstreamCAs(caCertPool)
+
+	ctx := t.Context()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	proxyURL, _ := url.Parse("http://" + srv.ProxyAddr())
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: caCertPool, MinVersion: tls.VersionTLS12},
+		},
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "https://127.0.0.1:"+backendPort+"/user", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Gatekeeper-Subject", "usr_alice")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	if n := stsCalls.Load(); n != 0 {
+		t.Errorf("STS was called %d times, want 0 (outranked resolver must not run)", n)
+	}
+
+	backendMu.Lock()
+	defer backendMu.Unlock()
+	if backendAuth != "Bearer static-token" {
+		t.Errorf("backend Authorization = %q, want %q (exact static must win)", backendAuth, "Bearer static-token")
+	}
+	if backendSubjectHeader != "" {
+		t.Errorf("backend received X-Gatekeeper-Subject = %q, want stripped (declared strip headers must apply when the resolver is skipped)", backendSubjectHeader)
 	}
 }
