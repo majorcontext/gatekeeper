@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	keeplib "github.com/majorcontext/keep"
 )
 
 // TestMCPRelay_NilCredentialStore tests that handleMCPRelay fails gracefully
@@ -1013,4 +1016,210 @@ func TestMCPRelay_ClientCancelDoesNotSetErr(t *testing.T) {
 	if data.Err != nil {
 		t.Errorf("Err = %v, want nil — the client canceled the request, this is a routine disconnect", data.Err)
 	}
+}
+
+// mcpDenyAllRules is a Keep rule file loaded under the "mcp-keep-test" scope
+// (matching the "mcp-" + serverName key handleMCPRelay looks up) that denies
+// every tool call unconditionally.
+const mcpDenyAllRules = `
+scope: mcp-keep-test
+mode: enforce
+rules:
+  - name: deny-all-tools
+    match:
+      operation: "*"
+    action: deny
+    message: "no tools allowed by policy"
+`
+
+// errReader is an io.Reader that always fails, used to force the
+// io.ReadAll(r.Body) failure path in handleMCPRelay's Keep-policy block.
+type errReader struct{}
+
+func (errReader) Read(p []byte) (int, error) {
+	return 0, errors.New("simulated body read failure")
+}
+
+// TestMCPRelay_KeepPolicyLogsCanonicalLine verifies that every exit in
+// handleMCPRelay's Keep-policy block (read-body failure, fail-closed invalid
+// JSON, and policy-deny) emits a canonical log line via p.logRequest, not
+// just the logPolicy-only treatment it had before. This is the Keep-block
+// counterpart to TestMCPRelay_LogsAllExitPaths, which covers the plain
+// (non-policy) exit paths.
+func TestMCPRelay_KeepPolicyLogsCanonicalLine(t *testing.T) {
+	newEngine := func(t *testing.T) *keeplib.Engine {
+		t.Helper()
+		eng, err := keeplib.LoadFromBytes([]byte(mcpDenyAllRules))
+		if err != nil {
+			t.Fatalf("LoadFromBytes: %v", err)
+		}
+		t.Cleanup(func() { eng.Close() })
+		return eng
+	}
+
+	t.Run("read-body failure (500)", func(t *testing.T) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer backend.Close()
+
+		eng := newEngine(t)
+		p := &Proxy{
+			credStore: &mockCredentialStore{tokens: map[string]string{}},
+			mcpServers: []MCPServerConfig{
+				{Name: "keep-test", URL: backend.URL, Auth: nil},
+			},
+		}
+
+		var mu sync.Mutex
+		var logged []RequestLogData
+		p.SetLogger(func(data RequestLogData) {
+			mu.Lock()
+			defer mu.Unlock()
+			logged = append(logged, data)
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/mcp/keep-test", errReader{})
+		rc := &RunContextData{
+			KeepEngines: map[string]*keeplib.Engine{"mcp-keep-test": eng},
+			MCPServers:  p.mcpServers,
+		}
+		req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
+
+		rec := httptest.NewRecorder()
+		p.handleMCPRelay(rec, req)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(logged) != 1 {
+			t.Fatalf("logged %d entries, want exactly 1: %+v", len(logged), logged)
+		}
+		data := logged[0]
+		if data.StatusCode != http.StatusInternalServerError {
+			t.Errorf("StatusCode = %d, want %d", data.StatusCode, http.StatusInternalServerError)
+		}
+		if data.ClientAddr == "" {
+			t.Error("ClientAddr should not be empty")
+		}
+		if data.Err == nil {
+			t.Error("Err should be set to the body-read error")
+		}
+	})
+
+	t.Run("invalid JSON fail-closed (403)", func(t *testing.T) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer backend.Close()
+
+		eng := newEngine(t)
+		p := &Proxy{
+			credStore: &mockCredentialStore{tokens: map[string]string{}},
+			mcpServers: []MCPServerConfig{
+				{Name: "keep-test", URL: backend.URL, Auth: nil},
+			},
+		}
+
+		var mu sync.Mutex
+		var logged []RequestLogData
+		p.SetLogger(func(data RequestLogData) {
+			mu.Lock()
+			defer mu.Unlock()
+			logged = append(logged, data)
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/mcp/keep-test", strings.NewReader("not json"))
+		rc := &RunContextData{
+			KeepEngines: map[string]*keeplib.Engine{"mcp-keep-test": eng},
+			MCPServers:  p.mcpServers,
+		}
+		req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
+
+		rec := httptest.NewRecorder()
+		p.handleMCPRelay(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusForbidden, rec.Body.String())
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(logged) != 1 {
+			t.Fatalf("logged %d entries, want exactly 1: %+v", len(logged), logged)
+		}
+		data := logged[0]
+		if data.StatusCode != http.StatusForbidden {
+			t.Errorf("StatusCode = %d, want %d", data.StatusCode, http.StatusForbidden)
+		}
+		if !data.Denied {
+			t.Error("Denied should be true — invalid JSON under an active Keep policy is a fail-closed denial")
+		}
+		if data.DenyReason == "" {
+			t.Error("DenyReason should not be empty")
+		}
+		if data.ClientAddr == "" {
+			t.Error("ClientAddr should not be empty")
+		}
+	})
+
+	t.Run("policy deny (403)", func(t *testing.T) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer backend.Close()
+
+		eng := newEngine(t)
+		p := &Proxy{
+			credStore: &mockCredentialStore{tokens: map[string]string{}},
+			mcpServers: []MCPServerConfig{
+				{Name: "keep-test", URL: backend.URL, Auth: nil},
+			},
+		}
+
+		var mu sync.Mutex
+		var logged []RequestLogData
+		p.SetLogger(func(data RequestLogData) {
+			mu.Lock()
+			defer mu.Unlock()
+			logged = append(logged, data)
+		})
+
+		body := `{"method":"tools/call","params":{"name":"dangerous-tool","arguments":{}}}`
+		req := httptest.NewRequest(http.MethodPost, "/mcp/keep-test", strings.NewReader(body))
+		rc := &RunContextData{
+			KeepEngines: map[string]*keeplib.Engine{"mcp-keep-test": eng},
+			MCPServers:  p.mcpServers,
+		}
+		req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
+
+		rec := httptest.NewRecorder()
+		p.handleMCPRelay(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusForbidden, rec.Body.String())
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(logged) != 1 {
+			t.Fatalf("logged %d entries, want exactly 1: %+v", len(logged), logged)
+		}
+		data := logged[0]
+		if data.StatusCode != http.StatusForbidden {
+			t.Errorf("StatusCode = %d, want %d", data.StatusCode, http.StatusForbidden)
+		}
+		if !data.Denied {
+			t.Error("Denied should be true — the Keep policy denied this tool call")
+		}
+		if data.DenyReason == "" {
+			t.Error("DenyReason should not be empty")
+		}
+		if data.ClientAddr == "" {
+			t.Error("ClientAddr should not be empty")
+		}
+	})
 }

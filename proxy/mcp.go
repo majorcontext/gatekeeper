@@ -3,7 +3,6 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -271,10 +270,21 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 
 	// Evaluate Keep policy for MCP tool calls before consuming the body.
 	// Engine key uses "mcp-" prefix to avoid collisions with "http" and "llm-gateway" keys.
+	//
+	// Every exit below calls both p.logPolicy (the policy-decision log) and
+	// p.logRequest (the canonical per-request log), mirroring the http-scope
+	// Keep denial handling in proxy.go's denyHTTP closure: the two logs serve
+	// different audiences (policy audit trail vs. request-level
+	// observability) and neither substitutes for the other.
 	if rc := getRunContext(r); rc != nil && rc.KeepEngines != nil {
 		if eng, ok := rc.KeepEngines["mcp-"+serverName]; ok {
 			bodyBytes, readErr := io.ReadAll(r.Body)
 			if readErr != nil {
+				logData := logBase
+				logData.StatusCode = http.StatusInternalServerError
+				logData.Duration = time.Since(start)
+				logData.Err = readErr
+				p.logRequest(r, logData)
 				http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 				return
 			}
@@ -291,6 +301,12 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 				// Fail-closed: deny non-JSON requests when a policy is configured.
 				slog.Warn("MCP request body is not valid JSON, denying (fail-closed)",
 					"server", serverName, "error", unmarshalErr)
+				logData := logBase
+				logData.StatusCode = http.StatusForbidden
+				logData.Duration = time.Since(start)
+				logData.Denied = true
+				logData.DenyReason = "Keep policy fail-closed: MCP request body is not valid JSON"
+				p.logRequest(r, logData)
 				http.Error(w, "Moat: MCP request blocked — invalid JSON body.", http.StatusForbidden)
 				return
 			}
@@ -305,12 +321,25 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 						"tool", mcpReq.Params.Name,
 						"error", evalErr)
 					p.logPolicy(r, scope, "mcp.tool_call", "evaluation-error", "Policy evaluation failed")
+					logData := logBase
+					logData.StatusCode = http.StatusForbidden
+					logData.Duration = time.Since(start)
+					logData.Denied = true
+					logData.DenyReason = "Keep policy evaluation error"
+					logData.Err = evalErr
+					p.logRequest(r, logData)
 					http.Error(w, "Moat: MCP tool call blocked — policy evaluation error.", http.StatusForbidden)
 					return
 				}
 				switch result.Decision {
 				case keeplib.Deny:
 					p.logPolicy(r, scope, "mcp.tool_call", result.Rule, result.Message)
+					logData := logBase
+					logData.StatusCode = http.StatusForbidden
+					logData.Duration = time.Since(start)
+					logData.Denied = true
+					logData.DenyReason = "Keep policy denied: " + result.Rule + " " + result.Message
+					p.logRequest(r, logData)
 					msg := "Moat: MCP tool call blocked by policy."
 					if result.Message != "" {
 						msg += " " + result.Message
@@ -325,6 +354,12 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 						slog.Warn("failed to unmarshal MCP body for redaction, denying (fail-closed)",
 							"server", serverName, "error", unmarshalErr)
 						p.logPolicy(r, scope, "mcp.tool_call", "redaction-error", "Failed to redact request")
+						logData := logBase
+						logData.StatusCode = http.StatusForbidden
+						logData.Duration = time.Since(start)
+						logData.Denied = true
+						logData.DenyReason = "Keep policy redaction failed: could not unmarshal body"
+						p.logRequest(r, logData)
 						http.Error(w, "Moat: MCP tool call blocked — redaction failed.", http.StatusForbidden)
 						return
 					}
@@ -333,6 +368,12 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 						slog.Warn("MCP body missing params map for redaction, denying (fail-closed)",
 							"server", serverName)
 						p.logPolicy(r, scope, "mcp.tool_call", "redaction-error", "Failed to redact request")
+						logData := logBase
+						logData.StatusCode = http.StatusForbidden
+						logData.Duration = time.Since(start)
+						logData.Denied = true
+						logData.DenyReason = "Keep policy redaction failed: body missing params map"
+						p.logRequest(r, logData)
 						http.Error(w, "Moat: MCP tool call blocked — redaction failed.", http.StatusForbidden)
 						return
 					}
@@ -342,6 +383,13 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 						slog.Warn("failed to marshal redacted MCP body, denying (fail-closed)",
 							"server", serverName, "error", marshalErr)
 						p.logPolicy(r, scope, "mcp.tool_call", "redaction-error", "Failed to redact request")
+						logData := logBase
+						logData.StatusCode = http.StatusForbidden
+						logData.Duration = time.Since(start)
+						logData.Denied = true
+						logData.DenyReason = "Keep policy redaction failed: could not marshal mutated body"
+						logData.Err = marshalErr
+						p.logRequest(r, logData)
 						http.Error(w, "Moat: MCP tool call blocked — redaction failed.", http.StatusForbidden)
 						return
 					}
@@ -453,47 +501,14 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 
 	// For SSE streaming, flush after headers
-	flusher, canFlush := w.(http.Flusher)
-	if canFlush {
+	if flusher, canFlush := w.(http.Flusher); canFlush {
 		flusher.Flush()
 	}
 
-	// Copy response body with streaming support. readErr and writeErr are
-	// tracked separately, mirroring handleRelay's stream loop, so a read
-	// error from the upstream isn't masked by a concurrent client write
-	// failure. Only a non-EOF upstream read error surfaces as Err, and only
-	// when the client was still there to receive it (r.Context().Err() ==
-	// nil) — a canceled client context or a client-side write failure are
-	// both routine disconnects, not proxy-side failures, and must not
-	// escalate the canonical log line to ERROR severity. The byte count is
-	// the real response size — ContentLength is -1 for streams.
-	var readErr, writeErr error
-	var written int64
-	buf := make([]byte, 4096)
-	for {
-		n, rErr := resp.Body.Read(buf)
-		if n > 0 {
-			wn, wErr := w.Write(buf[:n])
-			written += int64(wn)
-			if wErr != nil {
-				writeErr = wErr
-			} else if canFlush {
-				flusher.Flush()
-			}
-		}
-		if rErr != nil {
-			readErr = rErr
-			break
-		}
-		if writeErr != nil {
-			break
-		}
-	}
-
-	var copyErr error
-	if readErr != nil && !errors.Is(readErr, io.EOF) && r.Context().Err() == nil {
-		copyErr = fmt.Errorf("reading upstream response body: %w", readErr)
-	}
+	// Copy response body with streaming support, mirroring handleRelay's
+	// stream loop. The byte count is the real response size — ContentLength
+	// is -1 for streams.
+	written, copyErr := streamResponseBody(w, resp.Body, r.Context())
 
 	logData := logBase
 	logData.StatusCode = resp.StatusCode
