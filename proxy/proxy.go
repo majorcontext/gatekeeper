@@ -519,6 +519,21 @@ func (p *Proxy) logRequest(ctxReq *http.Request, data RequestLogData) {
 	p.logger(data)
 }
 
+// logExit emits the canonical log line for a handler exit path. It copies
+// base, stamps StatusCode and Duration (measured from start), applies mutate
+// to let the caller set exit-specific fields (Err, Denied, DenyReason,
+// InjectedHeaders, Grants, ResponseSize, ...), then forwards to logRequest.
+// mutate may be nil when no extra fields apply.
+func (p *Proxy) logExit(r *http.Request, base RequestLogData, start time.Time, status int, mutate func(*RequestLogData)) {
+	data := base
+	data.StatusCode = status
+	data.Duration = time.Since(start)
+	if mutate != nil {
+		mutate(&data)
+	}
+	p.logRequest(r, data)
+}
+
 // credentialHeader holds a header name and value for credential injection.
 type credentialHeader struct {
 	Name  string // Header name (e.g., "Authorization", "x-api-key")

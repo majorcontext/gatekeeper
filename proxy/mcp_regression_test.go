@@ -1032,6 +1032,25 @@ rules:
     message: "no tools allowed by policy"
 `
 
+// mcpRedactSecretRules is a Keep rule file loaded under the "mcp-keep-test"
+// scope that redacts an AWS-key-shaped secret from any tool call's
+// arguments, forcing a Redact decision (rather than Deny) in
+// handleMCPRelay's Keep-policy block.
+const mcpRedactSecretRules = `
+scope: mcp-keep-test
+mode: enforce
+rules:
+  - name: redact-secret
+    match:
+      operation: "*"
+    action: redact
+    redact:
+      target: "params.secret"
+      patterns:
+        - match: "AKIA[0-9A-Z]{16}"
+          replace: "[REDACTED:AWS_KEY]"
+`
+
 // errReader is an io.Reader that always fails, used to force the
 // io.ReadAll(r.Body) failure path in handleMCPRelay's Keep-policy block.
 type errReader struct{}
@@ -1220,6 +1239,78 @@ func TestMCPRelay_KeepPolicyLogsCanonicalLine(t *testing.T) {
 		}
 		if data.ClientAddr == "" {
 			t.Error("ClientAddr should not be empty")
+		}
+	})
+
+	// This subtest exercises the "missing params map" fail-closed branch of
+	// the Redact case: encoding/json matches struct fields case-insensitively
+	// when decoding into mcpReq, so a body whose top-level key is "PARAMS"
+	// (rather than "params") still decodes into mcpReq.Params. But the
+	// second decode — into a plain map[string]any — preserves the JSON key
+	// exactly as written, so raw["params"] (lowercase) is absent even though
+	// the policy layer above it already saw a populated Params.Name and
+	// evaluated the call. This deterministically reaches the "missing
+	// params map" branch without any fakes.
+	t.Run("redaction fail-closed: missing params map (403)", func(t *testing.T) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer backend.Close()
+
+		eng, err := keeplib.LoadFromBytes([]byte(mcpRedactSecretRules))
+		if err != nil {
+			t.Fatalf("LoadFromBytes: %v", err)
+		}
+		defer eng.Close()
+
+		p := &Proxy{
+			credStore: &mockCredentialStore{tokens: map[string]string{}},
+			mcpServers: []MCPServerConfig{
+				{Name: "keep-test", URL: backend.URL, Auth: nil},
+			},
+		}
+
+		var mu sync.Mutex
+		var logged []RequestLogData
+		p.SetLogger(func(data RequestLogData) {
+			mu.Lock()
+			defer mu.Unlock()
+			logged = append(logged, data)
+		})
+
+		body := `{"method":"tools/call","PARAMS":{"name":"dangerous-tool","arguments":{"secret":"key is AKIAIOSFODNN7EXAMPLE"}}}`
+		req := httptest.NewRequest(http.MethodPost, "/mcp/keep-test", strings.NewReader(body))
+		rc := &RunContextData{
+			KeepEngines: map[string]*keeplib.Engine{"mcp-keep-test": eng},
+			MCPServers:  p.mcpServers,
+		}
+		req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
+
+		rec := httptest.NewRecorder()
+		p.handleMCPRelay(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusForbidden, rec.Body.String())
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(logged) != 1 {
+			t.Fatalf("logged %d entries, want exactly 1: %+v", len(logged), logged)
+		}
+		data := logged[0]
+		if data.StatusCode != http.StatusForbidden {
+			t.Errorf("StatusCode = %d, want %d", data.StatusCode, http.StatusForbidden)
+		}
+		if !data.Denied {
+			t.Error("Denied should be true — the mutated MCP request lacked a params map, so it fails closed")
+		}
+		wantReason := "Keep policy redaction failed: body missing params map"
+		if data.DenyReason != wantReason {
+			t.Errorf("DenyReason = %q, want %q", data.DenyReason, wantReason)
+		}
+		if data.Err == nil {
+			t.Error("Err should be set so this internal should-never-happen failure logs at ERROR, not WARN")
 		}
 	})
 }

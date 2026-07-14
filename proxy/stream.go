@@ -8,6 +8,16 @@ import (
 	"net/http"
 )
 
+// drainLimit bounds how much of the remaining upstream body streamResponseBody
+// will read (and discard) to salvage the connection after a client write
+// failure. A short remainder is worth reading to completion so the caller's
+// deferred resp.Body.Close returns the underlying connection to the
+// keep-alive pool instead of tearing it down, forcing a fresh TLS handshake
+// on the next request. Anything longer — or an infinite stream, like SSE —
+// is not worth the wait, so the connection is torn down instead, which is
+// the safe default.
+const drainLimit = 64 << 10
+
 // streamResponseBody copies body to w with per-chunk flushing, returning
 // bytes written and the error to attribute (nil for EOF, client
 // cancellation, or client-side write failure; the upstream read error when
@@ -50,6 +60,17 @@ func streamResponseBody(w http.ResponseWriter, body io.Reader, ctx context.Conte
 		if writeErr != nil {
 			break
 		}
+	}
+
+	// The loop above broke specifically because the client write failed
+	// (readErr is nil, so the upstream body isn't already exhausted or
+	// broken) — read a bounded amount more so the connection can be reused.
+	// Skip the drain if the context is already canceled: the client is gone
+	// and the handler should return promptly; net/http closes the body for
+	// us. Do not drain on an upstream read error — that connection is
+	// already broken, so there's nothing worth salvaging.
+	if readErr == nil && writeErr != nil && ctx.Err() == nil {
+		_, _ = io.CopyN(io.Discard, body, drainLimit)
 	}
 
 	if readErr != nil && !errors.Is(readErr, io.EOF) && ctx.Err() == nil {

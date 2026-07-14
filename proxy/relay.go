@@ -91,10 +91,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 		// proxy-side failure — the 404 status and request URL already
 		// identify it. Mirrors the parallel unknown-MCP-server 404 in
 		// mcp.go, which also carries no Err.
-		logData := logBase
-		logData.StatusCode = http.StatusNotFound
-		logData.Duration = time.Since(start)
-		p.logRequest(r, logData)
+		p.logExit(r, logBase, start, http.StatusNotFound, nil)
 		http.Error(w, "MOAT: Unknown relay endpoint '"+name+"'", http.StatusNotFound)
 		return
 	}
@@ -102,11 +99,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// Build target URL
 	targetURL, err := url.Parse(target)
 	if err != nil {
-		logData := logBase
-		logData.StatusCode = http.StatusInternalServerError
-		logData.Duration = time.Since(start)
-		logData.Err = err
-		p.logRequest(r, logData)
+		p.logExit(r, logBase, start, http.StatusInternalServerError, func(d *RequestLogData) { d.Err = err })
 		http.Error(w, "MOAT: Invalid relay target URL", http.StatusInternalServerError)
 		return
 	}
@@ -125,11 +118,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// Create forwarded request
 	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), r.Body)
 	if err != nil {
-		logData := logBase
-		logData.StatusCode = http.StatusInternalServerError
-		logData.Duration = time.Since(start)
-		logData.Err = err
-		p.logRequest(r, logData)
+		p.logExit(r, logBase, start, http.StatusInternalServerError, func(d *RequestLogData) { d.Err = err })
 		http.Error(w, "MOAT: Failed to create relay request", http.StatusInternalServerError)
 		return
 	}
@@ -140,11 +129,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Warn("dynamic credential resolution failed",
 			"subsystem", "proxy", "host", host, "error", err)
-		logData := logBase
-		logData.StatusCode = http.StatusBadGateway
-		logData.Duration = time.Since(start)
-		logData.Err = err
-		p.logRequest(r, logData)
+		p.logExit(r, logBase, start, http.StatusBadGateway, func(d *RequestLogData) { d.Err = err })
 		http.Error(w, "credential resolution failed", http.StatusBadGateway)
 		return
 	}
@@ -181,13 +166,11 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 			"relay", name,
 			"target", targetURL.String(),
 			"error", err)
-		logData := logBase
-		logData.StatusCode = http.StatusBadGateway
-		logData.Duration = time.Since(start)
-		logData.Err = err
-		logData.InjectedHeaders = credResult.InjectedHeaders
-		logData.Grants = credResult.Grants
-		p.logRequest(r, logData)
+		p.logExit(r, logBase, start, http.StatusBadGateway, func(d *RequestLogData) {
+			d.Err = err
+			d.InjectedHeaders = credResult.InjectedHeaders
+			d.Grants = credResult.Grants
+		})
 		http.Error(w, "MOAT: Relay '"+name+"' connection failed", http.StatusBadGateway)
 		return
 	}
@@ -212,12 +195,10 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	}
 	written, streamErr := streamResponseBody(w, resp.Body, r.Context())
 
-	logData := logBase
-	logData.StatusCode = resp.StatusCode
-	logData.Duration = time.Since(start)
-	logData.Err = streamErr
-	logData.ResponseSize = written
-	logData.InjectedHeaders = credResult.InjectedHeaders
-	logData.Grants = credResult.Grants
-	p.logRequest(r, logData)
+	p.logExit(r, logBase, start, resp.StatusCode, func(d *RequestLogData) {
+		d.Err = streamErr
+		d.ResponseSize = written
+		d.InjectedHeaders = credResult.InjectedHeaders
+		d.Grants = credResult.Grants
+	})
 }
