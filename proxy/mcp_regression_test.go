@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -272,6 +273,204 @@ func TestMCPRelay_ServerNotFound(t *testing.T) {
 	if !strings.Contains(body, "nonexistent") {
 		t.Errorf("error should include server name, got: %s", body)
 	}
+}
+
+// TestMCPRelay_LogsAllExitPaths verifies that handleMCPRelay emits a canonical
+// log line (via p.logRequest, RequestType "mcp") on every client/config-error
+// exit path, not just on upstream-connect-failure and success. These are not
+// policy decisions, so Denied must stay false.
+func TestMCPRelay_LogsAllExitPaths(t *testing.T) {
+	t.Run("unconfigured server (404)", func(t *testing.T) {
+		p := &Proxy{
+			credStore:  &mockCredentialStore{tokens: map[string]string{}},
+			mcpServers: []MCPServerConfig{},
+		}
+
+		var mu sync.Mutex
+		var logged []RequestLogData
+		p.SetLogger(func(data RequestLogData) {
+			mu.Lock()
+			defer mu.Unlock()
+			logged = append(logged, data)
+		})
+
+		req := httptest.NewRequest("POST", "/mcp/nonexistent", strings.NewReader("{}"))
+		rec := httptest.NewRecorder()
+		p.handleMCPRelay(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(logged) != 1 {
+			t.Fatalf("logged %d entries, want exactly 1: %+v", len(logged), logged)
+		}
+		data := logged[0]
+		if data.RequestType != "mcp" {
+			t.Errorf("RequestType = %q, want %q", data.RequestType, "mcp")
+		}
+		if data.StatusCode != http.StatusNotFound {
+			t.Errorf("StatusCode = %d, want %d", data.StatusCode, http.StatusNotFound)
+		}
+		if data.ClientAddr == "" {
+			t.Error("ClientAddr should not be empty")
+		}
+		if data.Denied {
+			t.Error("Denied should be false — this is a client/config error, not a policy decision")
+		}
+	})
+
+	t.Run("invalid server URL (500)", func(t *testing.T) {
+		p := &Proxy{
+			credStore: &mockCredentialStore{tokens: map[string]string{}},
+			mcpServers: []MCPServerConfig{
+				{Name: "bad", URL: "://invalid-url", Auth: nil},
+			},
+		}
+
+		var mu sync.Mutex
+		var logged []RequestLogData
+		p.SetLogger(func(data RequestLogData) {
+			mu.Lock()
+			defer mu.Unlock()
+			logged = append(logged, data)
+		})
+
+		req := httptest.NewRequest("POST", "/mcp/bad", strings.NewReader("{}"))
+		rec := httptest.NewRecorder()
+		p.handleMCPRelay(rec, req)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(logged) != 1 {
+			t.Fatalf("logged %d entries, want exactly 1: %+v", len(logged), logged)
+		}
+		data := logged[0]
+		if data.RequestType != "mcp" {
+			t.Errorf("RequestType = %q, want %q", data.RequestType, "mcp")
+		}
+		if data.StatusCode != http.StatusInternalServerError {
+			t.Errorf("StatusCode = %d, want %d", data.StatusCode, http.StatusInternalServerError)
+		}
+		if data.ClientAddr == "" {
+			t.Error("ClientAddr should not be empty")
+		}
+		if data.Denied {
+			t.Error("Denied should be false — this is a client/config error, not a policy decision")
+		}
+		if data.Err == nil {
+			t.Error("Err should be set to the URL parse error")
+		}
+	})
+
+	t.Run("missing credential (500)", func(t *testing.T) {
+		p := &Proxy{
+			credStore: &mockCredentialStore{tokens: map[string]string{}},
+			mcpServers: []MCPServerConfig{
+				{
+					Name: "context7",
+					URL:  "https://mcp.context7.com/mcp",
+					Auth: &MCPAuthConfig{Grant: "mcp-context7", Header: "API_KEY"},
+				},
+			},
+		}
+
+		var mu sync.Mutex
+		var logged []RequestLogData
+		p.SetLogger(func(data RequestLogData) {
+			mu.Lock()
+			defer mu.Unlock()
+			logged = append(logged, data)
+		})
+
+		req := httptest.NewRequest("POST", "/mcp/context7", strings.NewReader("{}"))
+		rec := httptest.NewRecorder()
+		p.handleMCPRelay(rec, req)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(logged) != 1 {
+			t.Fatalf("logged %d entries, want exactly 1: %+v", len(logged), logged)
+		}
+		data := logged[0]
+		if data.RequestType != "mcp" {
+			t.Errorf("RequestType = %q, want %q", data.RequestType, "mcp")
+		}
+		if data.StatusCode != http.StatusInternalServerError {
+			t.Errorf("StatusCode = %d, want %d", data.StatusCode, http.StatusInternalServerError)
+		}
+		if data.ClientAddr == "" {
+			t.Error("ClientAddr should not be empty")
+		}
+		if data.Denied {
+			t.Error("Denied should be false — this is a client/config error, not a policy decision")
+		}
+	})
+
+	t.Run("request construction failure (500)", func(t *testing.T) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer backend.Close()
+
+		p := &Proxy{
+			credStore: &mockCredentialStore{tokens: map[string]string{}},
+			mcpServers: []MCPServerConfig{
+				{Name: "test", URL: backend.URL, Auth: nil},
+			},
+		}
+
+		var mu sync.Mutex
+		var logged []RequestLogData
+		p.SetLogger(func(data RequestLogData) {
+			mu.Lock()
+			defer mu.Unlock()
+			logged = append(logged, data)
+		})
+
+		req := httptest.NewRequest("POST", "/mcp/test", strings.NewReader("{}"))
+		// An invalid HTTP method (containing a space) makes
+		// http.NewRequestWithContext fail when building the upstream request.
+		req.Method = "BAD METHOD"
+		rec := httptest.NewRecorder()
+		p.handleMCPRelay(rec, req)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(logged) != 1 {
+			t.Fatalf("logged %d entries, want exactly 1: %+v", len(logged), logged)
+		}
+		data := logged[0]
+		if data.RequestType != "mcp" {
+			t.Errorf("RequestType = %q, want %q", data.RequestType, "mcp")
+		}
+		if data.StatusCode != http.StatusInternalServerError {
+			t.Errorf("StatusCode = %d, want %d", data.StatusCode, http.StatusInternalServerError)
+		}
+		if data.ClientAddr == "" {
+			t.Error("ClientAddr should not be empty")
+		}
+		if data.Denied {
+			t.Error("Denied should be false — this is a client/config error, not a policy decision")
+		}
+		if data.Err == nil {
+			t.Error("Err should be set to the request construction error")
+		}
+	})
 }
 
 // TestMCPRelay_HeaderInjection verifies that credentials are injected as headers.
@@ -644,5 +843,112 @@ func TestServeHTTP_DirectAWSCredentials_NoAuth(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", rec.Code)
+	}
+}
+
+// TestMCPRelay_LogsCredentialInjection verifies that the canonical log line
+// for a successful MCP relay call records the injected credential — an
+// authenticated MCP call must not look unauthenticated in the audit trail.
+func TestMCPRelay_LogsCredentialInjection(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	}))
+	defer backend.Close()
+
+	mockStore := &mockCredentialStore{
+		tokens: map[string]string{
+			"mcp-test": "secret-token-123",
+		},
+	}
+
+	p := &Proxy{
+		credStore: mockStore,
+		mcpServers: []MCPServerConfig{
+			{
+				Name: "test",
+				URL:  backend.URL,
+				Auth: &MCPAuthConfig{
+					Grant:  "mcp-test",
+					Header: "X-API-Key",
+				},
+			},
+		},
+	}
+
+	var mu sync.Mutex
+	var logged []RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, data)
+	})
+
+	req := httptest.NewRequest("POST", "/mcp/test", strings.NewReader(`{"test":true}`))
+	rec := httptest.NewRecorder()
+	p.handleMCPRelay(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logged) != 1 {
+		t.Fatalf("logged %d entries, want exactly 1: %+v", len(logged), logged)
+	}
+	data := logged[0]
+	if !data.AuthInjected {
+		t.Error("AuthInjected = false, want true — a credential was injected for this MCP call")
+	}
+	if !data.InjectedHeaders["x-api-key"] {
+		t.Errorf("InjectedHeaders = %v, want to contain %q", data.InjectedHeaders, "x-api-key")
+	}
+}
+
+// TestMCPRelay_CopyErrorLogsErr verifies that when streaming the MCP response
+// body to the client fails partway through, the canonical log line records
+// the error instead of reporting a clean 200.
+func TestMCPRelay_CopyErrorLogsErr(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial-data"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		panic(http.ErrAbortHandler)
+	}))
+	defer backend.Close()
+
+	p := &Proxy{
+		credStore: &mockCredentialStore{tokens: map[string]string{}},
+		mcpServers: []MCPServerConfig{
+			{Name: "test", URL: backend.URL, Auth: nil},
+		},
+	}
+
+	var mu sync.Mutex
+	var logged []RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, data)
+	})
+
+	req := httptest.NewRequest("POST", "/mcp/test", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	p.handleMCPRelay(rec, req)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logged) != 1 {
+		t.Fatalf("logged %d entries, want exactly 1: %+v", len(logged), logged)
+	}
+	data := logged[0]
+	if data.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want %d (headers were already sent)", data.StatusCode, http.StatusOK)
+	}
+	if data.Err == nil {
+		t.Error("Err is nil, want the mid-stream copy error to be recorded")
 	}
 }

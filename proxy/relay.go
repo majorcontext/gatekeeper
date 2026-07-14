@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -66,26 +68,32 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 		rest = "/" + rest
 	}
 
+	// Base canonical log entry shared by every exit path below. Each path
+	// copies it and sets only its own StatusCode/Duration/Err/credential
+	// fields. URL and Host are refreshed once the target URL and lookup
+	// host are known.
+	logBase := RequestLogData{
+		Method:       r.Method,
+		URL:          r.URL.String(),
+		Host:         name,
+		Path:         rest,
+		RequestType:  "relay",
+		RequestSize:  r.ContentLength,
+		ResponseSize: -1,
+		ClientAddr:   r.RemoteAddr,
+	}
+
 	// Look up relay target
 	p.mu.RLock()
 	target, ok := p.relays[name]
 	p.mu.RUnlock()
 
 	if !ok {
-		p.logRequest(r, RequestLogData{
-			Method:       r.Method,
-			URL:          r.URL.String(),
-			Host:         name,
-			Path:         rest,
-			RequestType:  "relay",
-			StatusCode:   http.StatusNotFound,
-			Duration:     time.Since(start),
-			RequestSize:  r.ContentLength,
-			ResponseSize: -1,
-			ClientAddr:   r.RemoteAddr,
-			Denied:       true,
-			DenyReason:   "unknown relay endpoint: " + name,
-		})
+		logData := logBase
+		logData.StatusCode = http.StatusNotFound
+		logData.Duration = time.Since(start)
+		logData.Err = errors.New("unknown relay endpoint: " + name)
+		p.logRequest(r, logData)
 		http.Error(w, "MOAT: Unknown relay endpoint '"+name+"'", http.StatusNotFound)
 		return
 	}
@@ -93,19 +101,11 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// Build target URL
 	targetURL, err := url.Parse(target)
 	if err != nil {
-		p.logRequest(r, RequestLogData{
-			Method:       r.Method,
-			URL:          r.URL.String(),
-			Host:         name,
-			Path:         rest,
-			RequestType:  "relay",
-			StatusCode:   http.StatusInternalServerError,
-			Duration:     time.Since(start),
-			RequestSize:  r.ContentLength,
-			ResponseSize: -1,
-			ClientAddr:   r.RemoteAddr,
-			Err:          err,
-		})
+		logData := logBase
+		logData.StatusCode = http.StatusInternalServerError
+		logData.Duration = time.Since(start)
+		logData.Err = err
+		p.logRequest(r, logData)
 		http.Error(w, "MOAT: Invalid relay target URL", http.StatusInternalServerError)
 		return
 	}
@@ -118,23 +118,17 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// Computed before the request is built so logging on every exit path
 	// below (including request-construction failure) can carry it.
 	host := lookupHostForURL(targetURL)
+	logBase.URL = targetURL.String()
+	logBase.Host = host
 
 	// Create forwarded request
 	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), r.Body)
 	if err != nil {
-		p.logRequest(r, RequestLogData{
-			Method:       r.Method,
-			URL:          targetURL.String(),
-			Host:         host,
-			Path:         rest,
-			RequestType:  "relay",
-			StatusCode:   http.StatusInternalServerError,
-			Duration:     time.Since(start),
-			RequestSize:  r.ContentLength,
-			ResponseSize: -1,
-			ClientAddr:   r.RemoteAddr,
-			Err:          err,
-		})
+		logData := logBase
+		logData.StatusCode = http.StatusInternalServerError
+		logData.Duration = time.Since(start)
+		logData.Err = err
+		p.logRequest(r, logData)
 		http.Error(w, "MOAT: Failed to create relay request", http.StatusInternalServerError)
 		return
 	}
@@ -145,19 +139,11 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Warn("dynamic credential resolution failed",
 			"subsystem", "proxy", "host", host, "error", err)
-		p.logRequest(r, RequestLogData{
-			Method:       r.Method,
-			URL:          targetURL.String(),
-			Host:         host,
-			Path:         rest,
-			RequestType:  "relay",
-			StatusCode:   http.StatusBadGateway,
-			Duration:     time.Since(start),
-			RequestSize:  r.ContentLength,
-			ResponseSize: -1,
-			ClientAddr:   r.RemoteAddr,
-			Err:          err,
-		})
+		logData := logBase
+		logData.StatusCode = http.StatusBadGateway
+		logData.Duration = time.Since(start)
+		logData.Err = err
+		p.logRequest(r, logData)
 		http.Error(w, "credential resolution failed", http.StatusBadGateway)
 		return
 	}
@@ -194,21 +180,13 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 			"relay", name,
 			"target", targetURL.String(),
 			"error", err)
-		p.logRequest(r, RequestLogData{
-			Method:          r.Method,
-			URL:             targetURL.String(),
-			Host:            host,
-			Path:            rest,
-			RequestType:     "relay",
-			StatusCode:      http.StatusBadGateway,
-			Duration:        time.Since(start),
-			RequestSize:     r.ContentLength,
-			ResponseSize:    -1,
-			ClientAddr:      r.RemoteAddr,
-			Err:             err,
-			InjectedHeaders: credResult.InjectedHeaders,
-			Grants:          credResult.Grants,
-		})
+		logData := logBase
+		logData.StatusCode = http.StatusBadGateway
+		logData.Duration = time.Since(start)
+		logData.Err = err
+		logData.InjectedHeaders = credResult.InjectedHeaders
+		logData.Grants = credResult.Grants
+		p.logRequest(r, logData)
 		http.Error(w, "MOAT: Relay '"+name+"' connection failed", http.StatusBadGateway)
 		return
 	}
@@ -232,32 +210,39 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	if canFlush {
 		flusher.Flush()
 	}
+	// streamErr records an abnormal end of the stream: the upstream status
+	// was already sent, so the client sees a truncated body rather than an
+	// error status, and the canonical log line is the only place the
+	// failure can surface. An upstream read error is the one that matters;
+	// a client write error is recorded only when the upstream side was
+	// still healthy.
+	var streamErr error
 	buf := make([]byte, 4096)
 	for {
-		n, err := resp.Body.Read(buf)
+		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
-			_, _ = w.Write(buf[:n])
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				streamErr = fmt.Errorf("writing response to client: %w", writeErr)
+				break
+			}
 			if canFlush {
 				flusher.Flush()
 			}
 		}
-		if err != nil {
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				streamErr = fmt.Errorf("reading upstream response body: %w", readErr)
+			}
 			break
 		}
 	}
 
-	p.logRequest(r, RequestLogData{
-		Method:          r.Method,
-		URL:             targetURL.String(),
-		Host:            host,
-		Path:            rest,
-		RequestType:     "relay",
-		StatusCode:      resp.StatusCode,
-		Duration:        time.Since(start),
-		RequestSize:     r.ContentLength,
-		ResponseSize:    resp.ContentLength,
-		ClientAddr:      r.RemoteAddr,
-		InjectedHeaders: credResult.InjectedHeaders,
-		Grants:          credResult.Grants,
-	})
+	logData := logBase
+	logData.StatusCode = resp.StatusCode
+	logData.Duration = time.Since(start)
+	logData.Err = streamErr
+	logData.ResponseSize = resp.ContentLength
+	logData.InjectedHeaders = credResult.InjectedHeaders
+	logData.Grants = credResult.Grants
+	p.logRequest(r, logData)
 }

@@ -211,6 +211,18 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 
 	if mcpServer == nil {
 		// Include diagnostic info in error that will show up in Claude Code
+		p.logRequest(r, RequestLogData{
+			Method:       r.Method,
+			URL:          r.URL.String(),
+			Host:         serverName,
+			Path:         r.URL.Path,
+			RequestType:  "mcp",
+			StatusCode:   http.StatusNotFound,
+			Duration:     time.Since(start),
+			RequestSize:  r.ContentLength,
+			ResponseSize: -1,
+			ClientAddr:   r.RemoteAddr,
+		})
 		http.Error(w, fmt.Sprintf("MOAT: MCP server '%s' not configured. Available servers: %d. Check moat.yaml.",
 			serverName, len(mcpServers)), http.StatusNotFound)
 		return
@@ -219,6 +231,19 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	// Build target URL by replacing /mcp/{server-name} with the actual MCP server URL
 	targetURL, err := url.Parse(mcpServer.URL)
 	if err != nil {
+		p.logRequest(r, RequestLogData{
+			Method:       r.Method,
+			URL:          r.URL.String(),
+			Host:         serverName,
+			Path:         r.URL.Path,
+			RequestType:  "mcp",
+			StatusCode:   http.StatusInternalServerError,
+			Duration:     time.Since(start),
+			RequestSize:  r.ContentLength,
+			ResponseSize: -1,
+			ClientAddr:   r.RemoteAddr,
+			Err:          err,
+		})
 		http.Error(w, fmt.Sprintf("MOAT: Invalid MCP server URL for '%s': %s", serverName, mcpServer.URL),
 			http.StatusInternalServerError)
 		return
@@ -321,6 +346,19 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	// Create new request to target with context
 	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), r.Body)
 	if err != nil {
+		p.logRequest(r, RequestLogData{
+			Method:       r.Method,
+			URL:          targetURL.String(),
+			Host:         targetURL.Host,
+			Path:         targetURL.Path,
+			RequestType:  "mcp",
+			StatusCode:   http.StatusInternalServerError,
+			Duration:     time.Since(start),
+			RequestSize:  r.ContentLength,
+			ResponseSize: -1,
+			ClientAddr:   r.RemoteAddr,
+			Err:          err,
+		})
 		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
 		return
 	}
@@ -343,6 +381,10 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	// Inject credentials.
 	// In daemon mode, credentials are pre-resolved in RunContextData.Credentials
 	// (keyed by host, with Grant field). Try that first, then fall back to credStore.
+	// injectedHeaders and grants record the injection for the canonical log
+	// lines below, mirroring injectCredentials' credentialInjectionResult.
+	var injectedHeaders map[string]bool
+	var grants []string
 	if mcpServer.Auth != nil {
 		var credValue string
 
@@ -360,6 +402,18 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if credValue == "" {
+			p.logRequest(r, RequestLogData{
+				Method:       r.Method,
+				URL:          targetURL.String(),
+				Host:         targetURL.Host,
+				Path:         targetURL.Path,
+				RequestType:  "mcp",
+				StatusCode:   http.StatusInternalServerError,
+				Duration:     time.Since(start),
+				RequestSize:  r.ContentLength,
+				ResponseSize: -1,
+				ClientAddr:   r.RemoteAddr,
+			})
 			http.Error(w, fmt.Sprintf("MOAT: Failed to load credential for '%s'. Grant: %s. Run: moat grant %s",
 				serverName, mcpServer.Auth.Grant, grantToCommand(mcpServer.Auth.Grant)),
 				http.StatusInternalServerError)
@@ -368,6 +422,10 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 
 		// Inject the real credential
 		proxyReq.Header.Set(mcpServer.Auth.Header, formatCredValue(mcpServer.Auth.Grant, credValue))
+		injectedHeaders = map[string]bool{strings.ToLower(mcpServer.Auth.Header): true}
+		if mcpServer.Auth.Grant != "" {
+			grants = []string{mcpServer.Auth.Grant}
+		}
 	}
 
 	slog.Debug("MCP relay forwarding", "server", serverName, "method", proxyReq.Method, "url", targetURL.String())
@@ -376,17 +434,19 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	resp, err := mcpRelayClient.Do(proxyReq)
 	if err != nil {
 		p.logRequest(r, RequestLogData{
-			Method:       r.Method,
-			URL:          targetURL.String(),
-			Host:         targetURL.Host,
-			Path:         targetURL.Path,
-			RequestType:  "mcp",
-			StatusCode:   http.StatusBadGateway,
-			Duration:     time.Since(start),
-			RequestSize:  r.ContentLength,
-			ResponseSize: -1,
-			ClientAddr:   r.RemoteAddr,
-			Err:          err,
+			Method:          r.Method,
+			URL:             targetURL.String(),
+			Host:            targetURL.Host,
+			Path:            targetURL.Path,
+			RequestType:     "mcp",
+			StatusCode:      http.StatusBadGateway,
+			Duration:        time.Since(start),
+			RequestSize:     r.ContentLength,
+			ResponseSize:    -1,
+			ClientAddr:      r.RemoteAddr,
+			Err:             err,
+			InjectedHeaders: injectedHeaders,
+			Grants:          grants,
 		})
 		http.Error(w, fmt.Sprintf("MOAT: Failed to connect to MCP server '%s' at %s: %v",
 			serverName, targetURL.String(), err), http.StatusBadGateway)
@@ -411,19 +471,25 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	// Copy response body with streaming support
-	_, _ = io.Copy(w, resp.Body)
+	// Copy response body with streaming support. A copy error means the
+	// client received a truncated response even though the upstream status
+	// was already sent, so it must reach the canonical log line. The byte
+	// count is the real response size — ContentLength is -1 for streams.
+	written, copyErr := io.Copy(w, resp.Body)
 
 	p.logRequest(r, RequestLogData{
-		Method:       r.Method,
-		URL:          targetURL.String(),
-		Host:         targetURL.Host,
-		Path:         targetURL.Path,
-		RequestType:  "mcp",
-		StatusCode:   resp.StatusCode,
-		Duration:     time.Since(start),
-		RequestSize:  r.ContentLength,
-		ResponseSize: resp.ContentLength,
-		ClientAddr:   r.RemoteAddr,
+		Method:          r.Method,
+		URL:             targetURL.String(),
+		Host:            targetURL.Host,
+		Path:            targetURL.Path,
+		RequestType:     "mcp",
+		StatusCode:      resp.StatusCode,
+		Duration:        time.Since(start),
+		RequestSize:     r.ContentLength,
+		ResponseSize:    written,
+		ClientAddr:      r.RemoteAddr,
+		Err:             copyErr,
+		InjectedHeaders: injectedHeaders,
+		Grants:          grants,
 	})
 }

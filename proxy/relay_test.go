@@ -129,6 +129,56 @@ func TestRelay_UnknownName404(t *testing.T) {
 	}
 }
 
+// TestRelay_UnknownEndpointLogsErrNotDenied verifies that a request to an
+// unregistered relay name is logged with Err set and Denied left false.
+// A typo'd relay name is a client/config error, not a network/keep policy
+// decision, so RequestLogData.Denied (which the field doc reserves for
+// policy denials) must not be set for it.
+func TestRelay_UnknownEndpointLogsErrNotDenied(t *testing.T) {
+	p := NewProxy()
+	if err := p.AddRelay("anthropic", "http://localhost:9999"); err != nil {
+		t.Fatalf("AddRelay: %v", err)
+	}
+
+	var mu sync.Mutex
+	var logged []RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, data)
+	})
+
+	req := httptest.NewRequest("GET", "/relay/unknown/path", nil)
+	rec := httptest.NewRecorder()
+	p.handleRelay(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logged) != 1 {
+		t.Fatalf("logged %d entries, want exactly 1: %+v", len(logged), logged)
+	}
+	data := logged[0]
+	if data.StatusCode != http.StatusNotFound {
+		t.Errorf("StatusCode = %d, want %d", data.StatusCode, http.StatusNotFound)
+	}
+	if data.Denied {
+		t.Error("Denied = true, want false — an unknown relay name is a client/config error, not a policy decision")
+	}
+	if data.DenyReason != "" {
+		t.Errorf("DenyReason = %q, want empty", data.DenyReason)
+	}
+	if data.Err == nil {
+		t.Error("Err should be set to the unknown-relay-endpoint error")
+	}
+	if data.ClientAddr == "" {
+		t.Error("ClientAddr should not be empty")
+	}
+}
+
 func TestRelay_FiltersProxyHeaders(t *testing.T) {
 	var receivedProxyAuth, receivedContentType string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -349,6 +399,53 @@ func TestRelay_LogsClientAddr(t *testing.T) {
 		if data.ClientAddr != "192.0.2.1:1234" {
 			t.Errorf("ClientAddr = %q, want %q", data.ClientAddr, "192.0.2.1:1234")
 		}
+	}
+}
+
+// TestRelay_StreamingErrorLogsErr verifies that when the upstream connection
+// is aborted mid-body (after headers and some bytes are already on the
+// wire), the canonical log line for the relay records the error instead of
+// reporting a clean 200. StatusCode still reflects the upstream status since
+// the headers were already sent to the client.
+func TestRelay_StreamingErrorLogsErr(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial-data"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		panic(http.ErrAbortHandler)
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	if err := p.AddRelay("anthropic", backend.URL); err != nil {
+		t.Fatalf("AddRelay: %v", err)
+	}
+
+	var mu sync.Mutex
+	var logged []RequestLogData
+	p.SetLogger(func(data RequestLogData) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, data)
+	})
+
+	req := httptest.NewRequest("POST", "/relay/anthropic/v1/messages", nil)
+	rec := httptest.NewRecorder()
+	p.handleRelay(rec, req)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logged) != 1 {
+		t.Fatalf("logged %d entries, want exactly 1: %+v", len(logged), logged)
+	}
+	data := logged[0]
+	if data.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want %d (headers were already sent)", data.StatusCode, http.StatusOK)
+	}
+	if data.Err == nil {
+		t.Error("Err is nil, want the mid-stream read error to be recorded")
 	}
 }
 
