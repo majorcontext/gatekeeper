@@ -139,6 +139,33 @@ func postgresResolverFromEntries(entries []PostgresResolverEntry, host string) P
 	return nil
 }
 
+// matchHostPostgres reports whether host matches any of patterns for
+// Postgres data-plane traffic, which is always evaluated at the Postgres
+// default port (5432). It applies the same port-default override as
+// postgresResolverFromEntries above: a pattern with no explicit port (e.g.
+// "*.neon.tech") is treated as pinned to 5432 rather than matchesPattern's
+// HTTP-centric default of 80/443. Without this override, matchHost's shared
+// HTTP semantics would make a portless allow pattern unmatchable for any
+// Postgres connection — exactly the same trap postgresResolverFromEntries
+// works around for resolver lookups, and the two matchers must agree: a host
+// with a configured resolver but a denying policy (or vice versa) would be
+// an internally inconsistent proxy. explicit-port patterns (e.g.
+// "*.neon.tech:5433") are untouched, so a pattern pinned to a non-5432 port
+// still never matches. This is Postgres-specific: matchHost/matchesPattern
+// and their HTTP/CONNECT callers (checkNetworkPolicy,
+// checkNetworkPolicyForRequest) are unchanged.
+func matchHostPostgres(patterns []hostPattern, host string) bool {
+	for _, pattern := range patterns {
+		if pattern.port == 0 {
+			pattern.port = postgresDefaultPort
+		}
+		if matchesPattern(pattern, host, postgresDefaultPort) {
+			return true
+		}
+	}
+	return false
+}
+
 // upstreamParams describes how to reach and authenticate to the upstream
 // Postgres server.
 type upstreamParams struct {
@@ -723,9 +750,9 @@ func (s *PostgresServer) serveAuthenticated(ctx context.Context, clientConn net.
 	// public DNS, so host-gateway routing does not apply to the Postgres data plane.
 	var allowed bool
 	if rc != nil {
-		allowed = rc.Policy != "strict" || matchHost(rc.AllowedHosts, sniHost, postgresDefaultPort)
+		allowed = rc.Policy != "strict" || matchHostPostgres(rc.AllowedHosts, sniHost)
 	} else {
-		allowed = s.proxy.checkNetworkPolicy(sniHost, postgresDefaultPort)
+		allowed = s.proxy.checkNetworkPolicyPostgres(sniHost)
 	}
 	if !allowed {
 		if s.proxy.policyLogger != nil {

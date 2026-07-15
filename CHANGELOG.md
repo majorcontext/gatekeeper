@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.17.3 — 2026-07-15
+
+### Fixed
+
+- **A portless `network.allow` pattern denied every Postgres data-plane connection under strict policy — including the shipped example** — `hostPattern.port == 0` (an unspecified pattern port) is documented and enforced by `matchesPattern` as "match only ports 80 and 443," an HTTP-scheme assumption. The Postgres data plane's policy check (`serveAuthenticated`, `proxy/postgres.go`) called that same HTTP-oriented `matchHost`/`checkNetworkPolicy` with the literal Postgres port (5432), so a pattern like `*.neon.tech` — which matches neither 80 nor 443 — could never match a live Postgres connection: every connection was denied with `FATAL: connection not allowed by network policy` (SQLSTATE 28000), regardless of how the allow list was written. This left the network-policy matcher inconsistent with the credential-resolver matcher for the identical connection: `postgresResolverFromEntries` already defaults an unspecified pattern port to 5432 when matching Postgres credential resolvers, so a host could be accepted for credential resolution and simultaneously rejected by policy. `examples/gatekeeper-postgres.yaml` and `docs/content/guides/13-postgres-neon.md` both document exactly this configuration (`policy: strict` + `allow: ["*.neon.tech"]`), so the shipped example was broken as written. Fixed by giving the Postgres data plane its own matcher, `matchHostPostgres` (`proxy/postgres.go`), and a corresponding `Proxy.checkNetworkPolicyPostgres` — both mirror the existing HTTP-facing functions exactly, but apply the same port-0-defaults-to-5432 override `postgresResolverFromEntries` already uses, so the two matchers can no longer disagree about the same connection. `matchHost`, `matchesPattern`, `checkNetworkPolicy`, and `checkNetworkPolicyForRequest` — the shared matcher and its HTTP/CONNECT callers — are untouched: a portless allow pattern still means "ports 80 and 443 only" for HTTP traffic, and an allow pattern pinned to an explicit non-5432 port still denies Postgres connections, exactly as before
+
 ## v0.17.2 — 2026-07-15
 
 ### Added
