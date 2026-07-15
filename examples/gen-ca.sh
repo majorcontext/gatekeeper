@@ -11,12 +11,38 @@ if [ -f ca.crt ] && [ -f ca.key ]; then
   exit 0
 fi
 
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-  -days 365 -nodes \
-  -keyout ca.key -out ca.crt \
-  -subj "/CN=Gate Keeper Example CA" \
-  -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
-  -addext "keyUsage=critical,keyCertSign,cRLSign" \
+# An explicit [v3_ca] section (referenced via -config/-extensions) is used
+# instead of -addext. Some OpenSSL builds (e.g. Homebrew OpenSSL 1.1.1) merge
+# -addext extensions with the default config's own req_extensions, producing
+# a certificate with a duplicate basicConstraints extension that Go's x509
+# parser rejects ("certificate contains duplicate extension"). A self-
+# contained config file has no default extensions to collide with.
+openssl_config=$(mktemp)
+trap 'rm -f "$openssl_config"' EXIT
+
+cat > "$openssl_config" <<'EOF'
+[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_ca
+prompt = no
+
+[req_distinguished_name]
+CN = Gate Keeper Example CA
+
+[v3_ca]
+basicConstraints = critical,CA:TRUE,pathlen:0
+keyUsage = critical,keyCertSign,cRLSign
+EOF
+
+# EC key generation is split into two steps (ecparam + req) rather than
+# `openssl req -newkey ec -pkeyopt ...` because LibreSSL (the OpenSSL variant
+# shipped as macOS system /usr/bin/openssl) mishandles the one-step form,
+# emitting EC parameters that Go's x509 parser rejects with "invalid ECDSA
+# parameters" when gatekeeper loads the CA.
+openssl ecparam -name prime256v1 -genkey -noout -out ca.key
+openssl req -new -x509 -key ca.key -days 365 \
+  -out ca.crt \
+  -config "$openssl_config" -extensions v3_ca \
   2>/dev/null
 
 chmod 0600 ca.key

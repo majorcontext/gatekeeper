@@ -37,6 +37,8 @@ For each request, the handler:
 
 The `statusRecorder` implements `http.Hijacker` by delegating to the underlying writer. This is critical — CONNECT requests call `Hijack()` to take over the raw connection, and the OTel wrapper must not break this.
 
+`OTelHandler` wraps only the HTTP proxy listener. The Postgres data-plane listener (see [Postgres Data Plane](./08-postgres-data-plane.md)) is a separate `net.Listener` that this middleware never sees, so it produces no `proxy.request`-family spans or `proxy.request.duration`/`proxy.request.count` metrics — `postgres` connections are observable only through the canonical log line below.
+
 ## Canonical Log Lines
 
 Gatekeeper emits one wide structured log entry per request at completion. Each log line contains all request context in a single record:
@@ -49,12 +51,17 @@ Gatekeeper emits one wide structured log entry per request at completion. Each l
 | `http_path` | Request path |
 | `http_status` | Response status code |
 | `duration_ms` | Request duration in milliseconds |
-| `proxy_type` | Request classification (`http`, `connect`, `mcp`, `relay`) |
+| `proxy_type` | Request classification (`http`, `connect`, `mcp`, `relay`, `postgres`) |
 | `credential_injected` | Whether any credential was injected |
 | `injected_headers` | Comma-separated list of injected header names |
 | `grants` | Comma-separated list of grant names used |
 | `denied` | Whether the request was denied by policy |
 | `deny_reason` | Denial reason (e.g., `Host not in allow list: example.com`) |
+| `request_size` | Content-Length of the request body, when known. Omitted (not zero) when unknown — always omitted for postgres connections, which report size in `request_messages` instead. |
+| `response_size` | Bytes delivered to the client (streaming paths) or response Content-Length, when known. Omitted when unknown — always omitted for postgres connections. |
+| `request_messages` | Postgres protocol messages relayed client→upstream. Present only for postgres connections. |
+| `response_messages` | Postgres protocol messages relayed upstream→client. Present only for postgres connections. |
+| `error` | Error message, when the request ended in an error |
 | `run_id` | Per-run identifier (daemon mode) |
 | `user_id` | User ID from proxy auth username |
 

@@ -227,3 +227,4 @@ The proxy log shows credential injection with the grant name.
 
 - [Network Lockdown](./07-network-lockdown.md) — combine token exchange with strict network policy
 - [OpenTelemetry](./08-opentelemetry.md) — trace token exchange calls end-to-end
+- [STS Endpoint Implementation Notes](../../token-exchange-endpoint.md) — the full wire contract and implementation checklist for building an STS endpoint

@@ -1,5 +1,7 @@
 # Implementing an RFC 8693 Token Exchange Endpoint for Gatekeeper
 
+This document is the STS-implementer contract: authentication, wire format, and caching semantics for the endpoint gatekeeper calls. For configuring gatekeeper itself as the token-exchange client — subject/actor modes, YAML fields, actor-token forwarding — see the [Token Exchange guide](content/guides/06-token-exchange.md).
+
 ## Context
 
 Gatekeeper is a credential-injecting TLS proxy. It can be configured with a `token-exchange` credential source that dynamically resolves per-user OAuth tokens by calling an external Security Token Service (STS) endpoint using the [RFC 8693 OAuth 2.0 Token Exchange](https://datatracker.ietf.org/doc/html/rfc8693) protocol.
@@ -91,6 +93,7 @@ Gatekeeper caches tokens per `(subject_token, actor_token)` pair within each cre
 - If `expires_in` is `0` or omitted, the cap is used.
 - There is no proactive refresh or sliding window. Expired entries are replaced on the next request.
 - A `401` or `403` from the destination drops the cache entry, so the next request exchanges afresh. Evictions are rate-limited to one per key per 10 seconds.
+- Concurrent requests that share a cache-miss key are coalesced with `singleflight.Group` — only one exchange call reaches your endpoint per key at a time; the other callers block on the same in-flight call and share its result. You do not need your own request-level locking or idempotency handling to survive a burst of simultaneous requests for the same subject, though duplicate exchanges can still happen across separate cache keys (e.g. different actor tokens) or after a cache entry has expired and a new one hasn't populated yet.
 
 The cap bounds how long a rotated or revoked upstream credential keeps being injected. Because of it, an `expires_in` above 60 seconds does not reduce STS request volume — size the endpoint for roughly one exchange per subject per minute.
 

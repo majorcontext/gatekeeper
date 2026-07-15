@@ -32,6 +32,14 @@ export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <token>"
 
 Gatekeeper creates OTLP HTTP exporters for traces, metrics, and logs and registers them as global providers.
 
+To disable the OTel SDK entirely, set `OTEL_SDK_DISABLED=true` (case-insensitive; any other value, or leaving it unset, keeps the SDK enabled):
+
+```bash
+export OTEL_SDK_DISABLED=true
+```
+
+With the SDK disabled, gatekeeper skips exporter setup and provider registration -- no traces, metrics, or logs are emitted, and no connection to a collector is attempted.
+
 ## Traces
 
 Every proxy request creates a span. Span names reflect the request type:
@@ -91,6 +99,12 @@ Make a request through the proxy, then open `http://localhost:16686` to view tra
 ## Verification
 
 After sending requests through the proxy, confirm traces and metrics are arriving at the collector. In Jaeger, search for service `gatekeeper` and look for `proxy.request` spans with `credential_injected=true` events.
+
+## Troubleshooting
+
+Export failures (for example, no collector listening at the configured `OTEL_EXPORTER_OTLP_ENDPOINT`) log at `DEBUG` level rather than `INFO`, so they don't drown canonical request log lines when the log level is `info`. If traces or metrics aren't arriving and nothing appears in gatekeeper's logs, set `log.level: debug` (or run with a debug-level slog handler) to surface the underlying export errors.
+
+> **Note:** Without a registered OTel error handler, export errors fall through to the standard library `log` package, which gatekeeper's logging setup rewires through the configured slog handler at `INFO` level. Gatekeeper registers its own handler so these errors log at `DEBUG` instead.
 
 ## Next Steps
 

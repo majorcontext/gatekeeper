@@ -10,21 +10,16 @@ Gatekeeper injects authentication headers into proxied HTTP requests based on ho
 
 ## Host Matching
 
-Each credential is configured with a `host` pattern. When gatekeeper intercepts a request, it matches the target hostname against configured patterns to determine which credentials to inject.
+Each credential is configured with a `host` pattern. When gatekeeper intercepts a request, it looks up credentials for the target hostname, stripping any port from the request host unconditionally before comparing — there is no notion of a default or matched port in credential lookup.
 
 Matching rules:
 
 | Pattern | Matches | Does Not Match |
 |---|---|---|
-| `api.github.com` | `api.github.com` | `github.com`, `foo.api.github.com` |
+| `api.github.com` | `api.github.com`, `api.github.com:443` (port stripped before comparison) | `github.com`, `foo.api.github.com` |
 | `*.github.com` | `api.github.com`, `foo.bar.github.com` | `github.com` |
-| `api.example.com:8080` | `api.example.com:8080` | `api.example.com:443` |
 
-Port handling:
-
-- Patterns without an explicit port match only ports 80 and 443 (the standard HTTP/HTTPS ports).
-- Patterns with an explicit port match that port exactly.
-- Port numbers are stripped from the request host before hostname comparison — `api.github.com:443` matches a pattern for `api.github.com`.
+A `host` pattern cannot contain a port — `credentials[].host` is validated and any value containing `:` is rejected (silently dropped, logged at debug level), so a pattern like `api.example.com:8080` can never be configured. This differs from network policy's `allow` patterns, which do support an explicit port and default unported patterns to matching only ports 80 and 443 — that port-aware matching is specific to network policy and does not apply to credential host matching. See [Network Policy](./04-network-policy.md).
 
 Host comparison is case-insensitive. `API.GitHub.com` matches `api.github.com`.
 

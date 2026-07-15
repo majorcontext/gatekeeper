@@ -27,11 +27,13 @@ proxy/              Core TLS-intercepting proxy engine
   mcp.go             MCP relay handler (SSE streaming, tool credential injection)
   llmpolicy.go       LLM response policy evaluation via Keep
   relay.go           HTTP relay for non-CONNECT requests
+  stream.go          Chunked, per-write-flushed response streaming (SSE and other incremental bodies)
   postgres.go        Postgres data-plane listener (TLS termination, run-token auth, SCRAM upstream, message relay)
   otel.go            OpenTelemetry handler wrapper, metrics instruments, span helpers
   server.go          Proxy server lifecycle (start/stop/listen)
 
 gatekeeper.go       Standalone server wiring (config → proxy + credential sources)
+gatekeeper_tokenexchange.go  Token-exchange credential resolver wiring (config → CredentialResolver, proxy-auth subject/actor extraction)
 config.go           YAML config parsing (proxy, TLS, credentials, network, log)
 config_credential.go  Credential source resolution (maps source config to backends)
 
@@ -46,6 +48,8 @@ credentialsource/   Pluggable credential backends
   githubapp.go       GitHub App installation token source
   tokenexchange.go   RFC 8693 token exchange source
   neon.go            Neon endpoint parsing + per-branch Postgres password resolver
+  httputil.go        Shared bounded token-response reader (readTokenResponse)
+  jwt.go             Shared RS256 JWT signing (signRS256JWT)
 
 cmd/gatekeeper/     CLI entry point (--config flag)
 
@@ -81,7 +85,7 @@ OTel integration uses a callback-based architecture — the proxy core (`proxy/p
 - **`proxy.OTelHandler`** wraps the proxy as HTTP middleware, creating root spans and recording request duration/count metrics. Its `statusRecorder` implements `http.Hijacker` so CONNECT requests still work after hijack.
 - **Request/policy loggers** (set in `gatekeeper.go`) attach span events and record credential injection/policy denial metrics via exported functions `proxy.RecordCredentialInjection` and `proxy.RecordPolicyDenial`.
 - **slog bridge** — `gatekeeper.go` uses a `multiHandler` to fan out log records to both the configured slog handler and `otelslog.NewHandler`, correlating logs with trace context.
-- **Provider setup** — `cmd/gatekeeper/main.go` creates OTLP HTTP exporters for traces, metrics, and logs, registering them as global providers. All configuration is via standard `OTEL_*` env vars (no YAML knobs).
+- **Provider setup** — `cmd/gatekeeper/main.go` creates OTLP HTTP exporters for traces, metrics, and logs, registering them as global providers, unless the standard `OTEL_SDK_DISABLED=true` env var is set (case-insensitive), in which case no exporters or providers are created at all. A dedicated OTel error handler (`logOTelError`, `main.go:31-54`) logs SDK/export failures — e.g. no collector reachable — at DEBUG instead of letting them fall through to the OTel SDK's default handler, which routes through the standard `log` package and, once `slog.SetDefault` rewires it, would otherwise flood the canonical request log at INFO. All configuration is via standard `OTEL_*` env vars (no YAML knobs).
 
 ## Development Commands
 

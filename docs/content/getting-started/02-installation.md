@@ -48,7 +48,13 @@ docker run --rm -v ./gatekeeper.yaml:/etc/gatekeeper/gatekeeper.yaml \
 ## Verify
 
 ```bash
-gatekeeper --config /dev/null
+gatekeeper
 ```
 
-The binary starts and exits with a config error, confirming it is installed correctly.
+Gatekeeper requires a config file and refuses to start without one. With no `--config` flag and no `GATEKEEPER_CONFIG` environment variable set, the binary exits immediately:
+
+```text
+error: --config or GATEKEEPER_CONFIG required
+```
+
+An exit status of `1` with this message confirms the binary is installed and runs.

@@ -26,7 +26,9 @@ This creates two files:
 - `ca.crt` — the CA certificate (distribute to clients)
 - `ca.key` — the CA private key (keep private, permissions set to `0600`)
 
-The generated CA uses an EC P-256 key, valid for 365 days, with `CA:TRUE` and `keyCertSign` constraints.
+The generated CA uses an EC P-256 key, valid for 365 days, with `CA:TRUE, pathlen:0` and `keyCertSign` constraints.
+
+> **Note:** The script generates the certificate from an explicit OpenSSL config file (rather than `-addext`) and splits EC key generation into `openssl ecparam` + `openssl req -new -x509` steps. Both choices avoid toolchain-specific failures: some OpenSSL builds duplicate the `basicConstraints` extension when it's supplied via `-addext` alongside a default config that already defines `req_extensions`, which Go's `x509` parser rejects; LibreSSL (the `openssl` on a stock macOS install) mishandles the single-step `openssl req -newkey ec -pkeyopt ...` form, emitting EC parameters that Go's `x509` parser rejects with "invalid ECDSA parameters" when gatekeeper loads the CA.
 
 ## Trust the CA
 
