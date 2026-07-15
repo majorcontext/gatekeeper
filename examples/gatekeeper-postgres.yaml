@@ -43,6 +43,11 @@ proxy:
 postgres:
   host: 127.0.0.1   # optional; defaults to the proxy host
   port: 5432
+  # Parse PROXY protocol v1/v2 headers from a fronting TCP load balancer so
+  # the client_ip log attribute records the real client address. Fail-open:
+  # connections without a header use the TCP peer address. Only enable when
+  # the port is reachable solely through the load balancer.
+  # proxy_protocol: true
 
 tls:
   ca_cert: ca.crt

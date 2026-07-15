@@ -703,7 +703,7 @@ func captureServerLog(t *testing.T, srv *Server) func() proxy.RequestLogData {
 // runs behind a GCP global TCP Proxy load balancer, which terminates the
 // client TCP connection and dials gatekeeper from its own front-end IP
 // (35.191.0.0/16), prepending a PROXY protocol v1 header naming the real
-// client. With network.proxy_protocol enabled, the canonical log line's
+// client. With proxy.proxy_protocol enabled, the canonical log line's
 // ClientAddr must reflect that real client — here a spoofed Modal egress IP,
 // 100.52.56.181 — not the load balancer's peer address.
 func TestServerProxyProtocol_V1(t *testing.T) {
@@ -714,8 +714,8 @@ func TestServerProxyProtocol_V1(t *testing.T) {
 	backendURL, _ := url.Parse(backend.URL)
 
 	cfg := &Config{
-		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1"},
-		Network: NetworkConfig{Policy: "permissive", ProxyProtocol: true},
+		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1", ProxyProtocol: true},
+		Network: NetworkConfig{Policy: "permissive"},
 	}
 	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
@@ -774,8 +774,8 @@ func TestServerProxyProtocol_V2(t *testing.T) {
 	backendURL, _ := url.Parse(backend.URL)
 
 	cfg := &Config{
-		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1"},
-		Network: NetworkConfig{Policy: "permissive", ProxyProtocol: true},
+		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1", ProxyProtocol: true},
+		Network: NetworkConfig{Policy: "permissive"},
 	}
 	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
@@ -828,14 +828,14 @@ func TestServerProxyProtocol_V2(t *testing.T) {
 }
 
 // TestServerProxyProtocol_FailSafeNoHeader verifies that a connection with no
-// PROXY header still succeeds when network.proxy_protocol is enabled — the LB's
+// PROXY header still succeeds when proxy.proxy_protocol is enabled — the LB's
 // own health checks and any direct probe of the port do not send one, and
 // must not be rejected.
 func TestServerProxyProtocol_FailSafeNoHeader(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "gatekeeper.log")
 	cfg := &Config{
-		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1"},
-		Network: NetworkConfig{Policy: "permissive", ProxyProtocol: true},
+		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1", ProxyProtocol: true},
+		Network: NetworkConfig{Policy: "permissive"},
 		Log:     LogConfig{Level: "debug", Output: logPath},
 	}
 	srv, err := New(context.Background(), cfg, "")
@@ -878,7 +878,7 @@ func TestServerProxyProtocol_FailSafeNoHeader(t *testing.T) {
 }
 
 // TestServerProxyProtocol_MalformedHeader verifies that when
-// network.proxy_protocol is enabled, a connection that opens with something
+// proxy.proxy_protocol is enabled, a connection that opens with something
 // that looks like a PROXY header but fails to parse (as opposed to one that
 // simply lacks a header entirely — see TestServerProxyProtocol_FailSafeNoHeader,
 // which must stay quiet) is dropped AND logged at DEBUG level with the real
@@ -890,8 +890,8 @@ func TestServerProxyProtocol_FailSafeNoHeader(t *testing.T) {
 func TestServerProxyProtocol_MalformedHeader(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "gatekeeper.log")
 	cfg := &Config{
-		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1"},
-		Network: NetworkConfig{Policy: "permissive", ProxyProtocol: true},
+		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1", ProxyProtocol: true},
+		Network: NetworkConfig{Policy: "permissive"},
 		Log:     LogConfig{Level: "debug", Output: logPath},
 	}
 	srv, err := New(context.Background(), cfg, "")
@@ -949,7 +949,7 @@ func TestServerProxyProtocol_MalformedHeader(t *testing.T) {
 }
 
 // TestServerProxyProtocol_DisabledDefault verifies that behavior is
-// unchanged when network.proxy_protocol is left unset (the default): the
+// unchanged when proxy.proxy_protocol is left unset (the default): the
 // canonical log line's ClientAddr is the raw TCP peer address, exactly as
 // before this feature existed.
 func TestServerProxyProtocol_DisabledDefault(t *testing.T) {
@@ -1013,12 +1013,12 @@ func TestServerProxyProtocol_ConnectIntercepted(t *testing.T) {
 	}))
 
 	cfg := &Config{
-		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1", ProxyProtocol: true},
 		TLS: TLSConfig{
 			CACert: filepath.Join(caDir, "ca.crt"),
 			CAKey:  filepath.Join(caDir, "ca.key"),
 		},
-		Network: NetworkConfig{Policy: "permissive", ProxyProtocol: true},
+		Network: NetworkConfig{Policy: "permissive"},
 	}
 	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
@@ -2799,6 +2799,133 @@ func TestServerStartsPostgresListener(t *testing.T) {
 	}
 	if buf[0] != 'S' {
 		t.Errorf("SSLRequest response = %q, want 'S'", buf[0])
+	}
+}
+
+// TestServerPostgresProxyProtocol verifies the postgres.proxy_protocol config
+// field wires the Postgres data-plane listener through the same
+// proxy.WrapProxyProtocolListener helper the HTTP listener uses: a PROXY
+// protocol v1 header sent as the very first bytes — ahead of the client's
+// SSLRequest — is parsed before the Postgres handshake begins, and the
+// canonical log line's ClientAddr reflects the header's advertised address
+// rather than the raw loopback peer the test dialed from.
+func TestServerPostgresProxyProtocol(t *testing.T) {
+	caDir := t.TempDir()
+	ca, err := proxy.NewCA(caDir)
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+	caPool := x509.NewCertPool()
+	if !caPool.AppendCertsFromPEM(ca.CertPEM()) {
+		t.Fatal("failed to add CA cert to pool")
+	}
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		TLS: TLSConfig{
+			CACert: filepath.Join(caDir, "ca.crt"),
+			CAKey:  filepath.Join(caDir, "ca.key"),
+		},
+		Postgres: &PostgresConfig{Port: 0, ProxyProtocol: true},
+		Credentials: []CredentialConfig{
+			{
+				Host:     "*.neon.tech",
+				Postgres: &PostgresCredentialConfig{Resolver: "static"},
+				Source:   SourceConfig{Type: "static", Value: "pw"},
+			},
+		},
+	}
+
+	srv, err := New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	waitLog := captureServerLog(t, srv)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+
+	// Poll until the postgres listener has an address.
+	deadline := time.Now().Add(2 * time.Second)
+	var pgAddr string
+	for {
+		pgAddr = srv.PostgresAddr()
+		if pgAddr != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("postgres listener did not start in time")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	conn, err := net.DialTimeout("tcp", pgAddr, time.Second)
+	if err != nil {
+		t.Fatalf("dial postgres listener: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	if _, err := conn.Write([]byte("PROXY TCP4 100.52.56.181 10.0.0.1 51234 5432\r\n")); err != nil {
+		t.Fatalf("write PROXY header: %v", err)
+	}
+
+	// The listener still speaks Postgres normally after the header: an
+	// SSLRequest gets a single 'S' byte back.
+	frontend := pgproto3.NewFrontend(conn, conn)
+	frontend.Send(&pgproto3.SSLRequest{})
+	if err := frontend.Flush(); err != nil {
+		t.Fatalf("send SSLRequest: %v", err)
+	}
+	buf := make([]byte, 1)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read SSLRequest response: %v", err)
+	}
+	if buf[0] != 'S' {
+		t.Fatalf("SSLRequest response = %q, want 'S'", buf[0])
+	}
+
+	// Complete the rest of the handshake so the connection reaches
+	// serveAuthenticated, which is where ClientAddr gets logged: TLS with the
+	// real CA-issued certificate for the SNI host, a startup message, then any
+	// password (standalone mode with no proxy.auth_token configured accepts
+	// every token — "localhost trust"). db.test.local matches no configured
+	// credential host, so the connection is denied for lack of a resolver —
+	// but only after the deny path logs ClientAddr, which is all this test
+	// needs.
+	tlsConn := tls.Client(conn, &tls.Config{ServerName: "db.test.local", RootCAs: caPool})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	defer tlsConn.Close()
+
+	fe := pgproto3.NewFrontend(tlsConn, tlsConn)
+	fe.Send(&pgproto3.StartupMessage{
+		ProtocolVersion: pgproto3.ProtocolVersionNumber,
+		Parameters:      map[string]string{"user": "app", "database": "appdb"},
+	})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("send startup: %v", err)
+	}
+	if _, err := fe.Receive(); err != nil {
+		t.Fatalf("receive auth request: %v", err)
+	}
+	fe.Send(&pgproto3.PasswordMessage{Password: "any-token"})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("send password: %v", err)
+	}
+	if _, err := fe.Receive(); err != nil {
+		t.Fatalf("receive auth result: %v", err)
+	}
+
+	logged := waitLog()
+	host, _, err := net.SplitHostPort(logged.ClientAddr)
+	if err != nil {
+		t.Fatalf("ClientAddr = %q: SplitHostPort: %v", logged.ClientAddr, err)
+	}
+	if host != "100.52.56.181" {
+		t.Errorf("ClientAddr host = %q, want 100.52.56.181 (the PROXY-header source), not the raw TCP peer address", host)
 	}
 }
 

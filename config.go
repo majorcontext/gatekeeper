@@ -22,6 +22,23 @@ type Config struct {
 type PostgresConfig struct {
 	Port int    `yaml:"port"`           // listener port (e.g. 5432)
 	Host string `yaml:"host,omitempty"` // bind address (default: same as proxy host)
+
+	// ProxyProtocol enables PROXY protocol v1/v2 parsing on the Postgres
+	// data-plane listener, mirroring proxy.proxy_protocol: when true, each
+	// inbound connection is checked for a leading PROXY protocol header (as
+	// prepended by a TCP-terminating load balancer in front of the Postgres
+	// port) and, if present, the advertised source address replaces the raw
+	// TCP peer address as the connection's client address for logging.
+	// Connections that do not open with a PROXY header fall back to the raw
+	// TCP peer address (fail-open), so load balancer health checks and
+	// direct probes of the port keep working. Default false.
+	//
+	// Because headers are honored from any peer, a client that can reach
+	// this listener directly (bypassing the load balancer) can forge the
+	// logged client_ip by prepending its own PROXY header. Only enable this
+	// when the port is reachable solely through the load balancer, and never
+	// use client_ip for security decisions.
+	ProxyProtocol bool `yaml:"proxy_protocol,omitempty"`
 }
 
 // ProxyConfig configures the proxy listener.
@@ -29,6 +46,23 @@ type ProxyConfig struct {
 	Port      int    `yaml:"port"`
 	Host      string `yaml:"host"`
 	AuthToken string `yaml:"auth_token,omitempty"` // Optional token clients must provide via Proxy-Authorization
+
+	// ProxyProtocol enables PROXY protocol v1/v2 parsing on the HTTP/CONNECT
+	// proxy listener. When true, each inbound connection is checked for a
+	// leading PROXY protocol header (as prepended by a TCP load balancer,
+	// e.g. GCP's global TCP Proxy LB) and, if present, the advertised source
+	// address replaces the raw TCP peer address as the connection's client
+	// address for logging (the client_ip request-log attribute). Connections
+	// that do not open with a PROXY header fall back to the raw TCP peer
+	// address (fail-open), so load balancer health checks and direct probes
+	// of the port keep working. Default false.
+	//
+	// Because headers are honored from any peer, a client that can reach the
+	// listener directly (bypassing the load balancer) can forge the logged
+	// client_ip by prepending its own PROXY header. Only enable this when
+	// the port is reachable solely through the load balancer, and never use
+	// client_ip for security decisions.
+	ProxyProtocol bool `yaml:"proxy_protocol,omitempty"`
 }
 
 // TLSConfig configures the CA certificate used for TLS interception.
@@ -110,23 +144,6 @@ type SourceConfig struct {
 type NetworkConfig struct {
 	Policy string   `yaml:"policy"`
 	Allow  []string `yaml:"allow,omitempty"`
-
-	// ProxyProtocol enables PROXY protocol v1/v2 parsing on the proxy
-	// listener. When true, each inbound connection is checked for a leading
-	// PROXY protocol header (as prepended by a TCP load balancer, e.g. GCP's
-	// global TCP Proxy LB) and, if present, the advertised source address
-	// replaces the TCP peer address as the connection's client address for
-	// logging (the client_ip request-log attribute). Connections that do not
-	// open with a PROXY header fall back to the raw TCP peer address
-	// (fail-open), so load balancer health checks and direct probes of the
-	// port keep working. Default false.
-	//
-	// Because headers are honored from any peer, a client that can reach the
-	// listener directly (bypassing the load balancer) can forge the logged
-	// client_ip by prepending its own PROXY header. Only enable this when
-	// the port is reachable solely through the load balancer, and never use
-	// client_ip for security decisions.
-	ProxyProtocol bool `yaml:"proxy_protocol,omitempty"`
 }
 
 // LogConfig configures logging.

@@ -41,6 +41,8 @@ log:
   output: stderr
 ```
 
+PROXY protocol (recovering the real client IP behind a TCP load balancer) is configured per listener: `proxy.proxy_protocol` for the HTTP/CONNECT listener, `postgres.proxy_protocol` for the Postgres data-plane listener. See [proxy.proxy_protocol](#proxyproxy_protocol) and [postgres.proxy_protocol](#postgresproxy_protocol) below.
+
 | Section | Description |
 |---------|-------------|
 | `proxy` | Proxy listener address and authentication |
@@ -104,6 +106,27 @@ export HTTP_PROXY=http://user:my-secret-token@127.0.0.1:8080
 ```
 
 The username portion is ignored. The token comparison is constant-time to prevent timing attacks.
+
+### proxy.proxy_protocol
+
+Parse PROXY protocol v1/v2 headers on the HTTP/CONNECT proxy listener to recover the real client address behind a TCP-terminating load balancer.
+
+```yaml
+proxy:
+  proxy_protocol: true
+```
+
+- **Type:** `bool`
+- **Required:** No
+- **Default:** `false`
+
+When enabled, each inbound connection to the proxy listener is checked for a leading PROXY protocol header — as prepended by a TCP load balancer such as GCP's global TCP Proxy load balancer — and, if present, the header's advertised source address replaces the raw TCP peer address as the connection's client address. This flows through to the `client_ip` request-log attribute on every request path, including CONNECT-intercepted TLS traffic.
+
+Connections that open without a PROXY header, or that don't send one within a 10s read timeout, fall back to the raw TCP peer address instead of being rejected (fail-open), so load balancer health checks and direct probes of the port keep working.
+
+Because the header is honored from any peer, a client that can reach the listener directly (bypassing the load balancer) can forge its logged `client_ip` by prepending its own PROXY header. Only enable this when the port is reachable solely through the load balancer, and never use `client_ip` for security decisions.
+
+The Postgres data-plane listener has its own, independent toggle — see [postgres.proxy_protocol](#postgresproxy_protocol).
 
 ---
 
@@ -176,6 +199,25 @@ postgres:
 - **Type:** `string`
 - **Required:** No
 - **Default:** the `proxy.host` value
+
+### postgres.proxy_protocol
+
+Parse PROXY protocol v1/v2 headers on the Postgres data-plane listener to recover the real client address behind a TCP-terminating load balancer, mirroring [proxy.proxy_protocol](#proxyproxy_protocol) for this listener.
+
+```yaml
+postgres:
+  proxy_protocol: true
+```
+
+- **Type:** `bool`
+- **Required:** No
+- **Default:** `false`
+
+Semantics are identical to `proxy.proxy_protocol`, applied to this listener instead: each inbound connection is checked for a leading PROXY protocol header, and, if present, the header's advertised source address replaces the raw TCP peer address as the connection's client address (the `client_ip` request-log attribute and the `client_addr` field on a failed run-token authentication log line). Connections that open without a header, or that don't send one within a 10s read timeout, fall back to the raw TCP peer address instead of being rejected (fail-open). The PROXY header is always the first bytes on the wire, so it is parsed before the client's `SSLRequest` and the TLS handshake.
+
+Because the header is honored from any peer, only enable this when the Postgres port is reachable solely through the load balancer, and never use `client_ip` for security decisions.
+
+This is a separate toggle from `proxy.proxy_protocol` — enabling one does not enable the other, since the two listeners are typically fronted by different load balancers (or only one of them is exposed at all).
 
 ---
 
@@ -373,25 +415,6 @@ network:
 - **Default:** `[]`
 
 Patterns support glob syntax. Port numbers are stripped before matching.
-
-### network.proxy_protocol
-
-Parse PROXY protocol v1/v2 headers on the proxy listener to recover the real client address behind a TCP-terminating load balancer.
-
-```yaml
-network:
-  proxy_protocol: true
-```
-
-- **Type:** `bool`
-- **Required:** No
-- **Default:** `false`
-
-When enabled, each inbound connection to the proxy listener is checked for a leading PROXY protocol header — as prepended by a TCP load balancer such as GCP's global TCP Proxy load balancer — and, if present, the header's advertised source address replaces the raw TCP peer address as the connection's client address. This flows through to the `client_ip` request-log attribute on every request path, including CONNECT-intercepted TLS traffic.
-
-Connections that open without a PROXY header, or that don't send one within a 10s read timeout, fall back to the raw TCP peer address instead of being rejected (fail-open), so load balancer health checks and direct probes of the port keep working.
-
-Because the header is honored from any peer, a client that can reach the listener directly (bypassing the load balancer) can forge its logged `client_ip` by prepending its own PROXY header. Only enable this when the port is reachable solely through the load balancer, and never use `client_ip` for security decisions. The postgres data-plane listener does not parse PROXY protocol headers — it is a separate listener and port.
 
 ---
 
