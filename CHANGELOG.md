@@ -4,6 +4,14 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.20.0 — 2026-07-15
+
+### Added
+
+- **The Postgres data-plane request log now captures the client's `application_name` startup parameter as a tracing slug** — the Postgres analogue of the HTTP `capture_headers` feature. A run can open many Postgres connections over its lifetime, and until now the canonical log line's only per-connection handle was `run_id`, which identifies the *run* but not which caller within it opened a given connection. Standard Postgres clients already let a caller label a connection via `PGAPPNAME`, a driver's `application_name=` connection option, or `libpq`'s `application_name` keyword; gatekeeper now reads that value out of the client's `StartupMessage` parameters (`proxy.RunContextData` continues to forward it upstream unchanged, so it still surfaces in Neon's own `pg_stat_activity` too) and records it on `RequestLogData.ApplicationName` (`proxy/proxy.go`), which `serveAuthenticated` (`proxy/postgres.go`) populates on every audit-log exit path — including denied connections (no resolver, network-policy denial), so a rejected connection is still traceable back to its origin, not just a successful one. `gatekeeper.go`'s canonical-log-line callback emits it as an `application_name` slog attribute, gated on non-empty exactly like `run_id`/`client_ip`.
+  Because `application_name` is client-supplied, unauthenticated free text with no protocol grammar constraining it (unlike an HTTP header value), it is sanitized before it ever reaches a log line: a new shared helper, `proxy.SanitizeLogValue`, discards invalid UTF-8, strips control characters (newlines, carriage returns, NUL, tabs, ...) so a crafted value can't forge additional log lines or otherwise corrupt structured log output, and bounds the result to 256 bytes, truncating at a valid UTF-8 boundary rather than splitting a multi-byte rune. `gatekeeper.go`'s existing `capture_headers` truncation logic — previously inlined and only bounding length, never stripping control characters — now calls the same helper, so both capture paths share one bound and one sanitization behavior.
+  `application_name` is a correlation slug the client controls, not a trusted identity — `run_id`, populated only from the authenticated run token, remains the trusted identity for anything security-relevant. Documented in the [observability](docs/content/concepts/06-observability.md) canonical-log-field table and a new "Tracing a connection to its origin" section in the [Postgres data plane](docs/content/concepts/08-postgres-data-plane.md) and [Postgres + Neon](docs/content/guides/13-postgres-neon.md) docs
+
 ## v0.19.1 — 2026-07-15
 
 ### Fixed

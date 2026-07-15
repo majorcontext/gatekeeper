@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestProxy_ForwardsRequests(t *testing.T) {
@@ -4066,6 +4067,55 @@ func TestProxy_CaptureHeaders_StrippedBeforeForwarding(t *testing.T) {
 	}
 	if receivedHeaders.Get("X-Other") != "keep-this" {
 		t.Errorf("X-Other = %q, want keep-this (non-capture headers should pass through)", receivedHeaders.Get("X-Other"))
+	}
+}
+
+// TestSanitizeLogValue exercises SanitizeLogValue, the shared helper used to
+// bound and clean client-controlled strings (captured HTTP header values and
+// the Postgres application_name startup parameter) before they reach a log
+// line. Control characters must be stripped -- a raw newline or carriage
+// return in a client-supplied value could otherwise forge additional log
+// lines (log injection) in a text-formatted log.
+func TestSanitizeLogValue(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"plain", "box-abc123", "box-abc123"},
+		{
+			name: "strips embedded newline and carriage return",
+			in:   "box-abc123\nrun_id=fake-admin-run\r",
+			want: "box-abc123run_id=fake-admin-run",
+		},
+		{
+			name: "strips embedded NUL",
+			in:   "box-abc\x00123",
+			want: "box-abc123",
+		},
+		{
+			name: "truncates to the bound at a valid UTF-8 boundary",
+			in:   strings.Repeat("a", maxCapturedLogValueLen+10),
+			want: strings.Repeat("a", maxCapturedLogValueLen),
+		},
+		{
+			name: "truncates multi-byte UTF-8 without splitting a rune",
+			// Each "é" is 2 bytes; 200 of them is 400 bytes, well past the
+			// 256-byte bound, and the bound (256) falls in the middle of a rune.
+			in:   strings.Repeat("é", 200),
+			want: strings.Repeat("é", maxCapturedLogValueLen/2),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SanitizeLogValue(tt.in); got != tt.want {
+				t.Errorf("SanitizeLogValue(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+			if !utf8.ValidString(SanitizeLogValue(tt.in)) {
+				t.Errorf("SanitizeLogValue(%q) produced invalid UTF-8", tt.in)
+			}
+		})
 	}
 }
 

@@ -253,21 +253,23 @@ func newTestPostgresListenerWithProxyProtocol(t *testing.T, p *Proxy) *PostgresS
 // message, and answers AuthenticationCleartextPassword with password. It returns
 // the message received after sending the password (the auth result or an error)
 // and the TLS conn so the caller can Close it. caPool trusts the proxy CA.
-func pgClientHandshake(t *testing.T, addr, sniHost string, caPool *x509.CertPool, user, db, password string) (pgproto3.BackendMessage, net.Conn) {
+// extraParams, when non-nil, is merged into the StartupMessage's Parameters
+// alongside user/database (e.g. {"application_name": "box-abc123"}).
+func pgClientHandshake(t *testing.T, addr, sniHost string, caPool *x509.CertPool, user, db, password string, extraParams ...map[string]string) (pgproto3.BackendMessage, net.Conn) {
 	t.Helper()
 
 	raw, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	return pgClientHandshakeOnConn(t, raw, sniHost, caPool, user, db, password)
+	return pgClientHandshakeOnConn(t, raw, sniHost, caPool, user, db, password, extraParams...)
 }
 
 // pgClientHandshakeOnConn is pgClientHandshake but driven over an
 // already-established raw connection, letting a caller write bytes ahead of
 // the Postgres wire protocol — e.g. a PROXY protocol header — before the
 // handshake begins.
-func pgClientHandshakeOnConn(t *testing.T, raw net.Conn, sniHost string, caPool *x509.CertPool, user, db, password string) (pgproto3.BackendMessage, net.Conn) {
+func pgClientHandshakeOnConn(t *testing.T, raw net.Conn, sniHost string, caPool *x509.CertPool, user, db, password string, extraParams ...map[string]string) (pgproto3.BackendMessage, net.Conn) {
 	t.Helper()
 
 	_ = raw.SetDeadline(time.Now().Add(10 * time.Second))
@@ -299,6 +301,11 @@ func pgClientHandshakeOnConn(t *testing.T, raw net.Conn, sniHost string, caPool 
 	params := map[string]string{"user": user}
 	if db != "" {
 		params["database"] = db
+	}
+	for _, extra := range extraParams {
+		for k, v := range extra {
+			params[k] = v
+		}
 	}
 	fe = pgproto3.NewFrontend(tlsConn, tlsConn)
 	fe.Send(&pgproto3.StartupMessage{
@@ -648,13 +655,22 @@ func TestPostgresStopNilListenerIsSafe(t *testing.T) {
 // connectThroughGatekeeper drives a real pgx client through the gatekeeper
 // Postgres listener: it authenticates with token (the run token, sent as the
 // cleartext password) and presents sniHost as the TLS server name.
-func connectThroughGatekeeper(t *testing.T, srv *PostgresServer, caPool *x509.CertPool, sniHost, user, db, token string) (*pgconn.PgConn, error) {
+// connectThroughGatekeeper connects through the gatekeeper Postgres listener.
+// Any runtimeParams maps are merged into the connection's startup parameters
+// (e.g. {"application_name": "box-abc123"}), letting a caller exercise
+// startup parameters beyond user/database.
+func connectThroughGatekeeper(t *testing.T, srv *PostgresServer, caPool *x509.CertPool, sniHost, user, db, token string, runtimeParams ...map[string]string) (*pgconn.PgConn, error) {
 	t.Helper()
 	cfg, err := pgconn.ParseConfig(fmt.Sprintf("postgres://%s:%s@%s/%s", user, token, srv.Addr(), db))
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg.TLSConfig = &tls.Config{ServerName: sniHost, RootCAs: caPool}
+	for _, params := range runtimeParams {
+		for k, v := range params {
+			cfg.RuntimeParams[k] = v
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return pgconn.ConnectConfig(ctx, cfg)
@@ -767,6 +783,137 @@ func TestPostgresEndToEnd(t *testing.T) {
 		t.Errorf("ClientAddr = %q: SplitHostPort: %v", e.ClientAddr, err)
 	} else if host != "127.0.0.1" {
 		t.Errorf("ClientAddr host = %q, want 127.0.0.1", host)
+	}
+}
+
+// TestPostgresLogsApplicationName verifies that the client-supplied Postgres
+// "application_name" startup parameter is captured into the request log as a
+// tracing slug -- the Postgres analogue of the HTTP capture_headers feature.
+// application_name is a correlation slug the client sets (e.g. a box ID),
+// not a trusted identity: RunID, populated from the authenticated run token,
+// remains the trusted identity. Each case also confirms that capturing for
+// the log does not disturb what gatekeeper forwards to the real upstream
+// server -- the fake upstream must always see the client's raw,
+// un-sanitized value.
+func TestPostgresLogsApplicationName(t *testing.T) {
+	tests := []struct {
+		name            string
+		applicationName string // what the client sends; "" means the parameter is omitted entirely
+		wantLogged      string // what should land in the log entry
+	}{
+		{
+			name:            "captured verbatim when clean",
+			applicationName: "box-abc123",
+			wantLogged:      "box-abc123",
+		},
+		{
+			name:       "absent when the client does not set it",
+			wantLogged: "",
+		},
+		{
+			name:            "sanitized: control characters stripped and value bounded",
+			applicationName: "box-abc\r\n123" + strings.Repeat("x", 300),
+			wantLogged:      "box-abc123" + strings.Repeat("x", maxCapturedLogValueLen-len("box-abc123")),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := startFakePostgres(t, "ep-foo-123.aws.neon.tech", "app_rw", "real-password")
+
+			ca, err := generateCA()
+			if err != nil {
+				t.Fatalf("generateCA: %v", err)
+			}
+			p := NewProxy()
+			p.SetCA(ca)
+			p.SetUpstreamCAs(fake.certPool)
+			p.SetAuthToken("run-token")
+			p.SetPostgresResolver("*.neon.tech", NewStaticPostgresResolver("real-password"))
+			cap := &logCapture{}
+			p.SetLogger(cap.log)
+
+			srv := newTestPostgresListener(t, p)
+			srv.dialUpstream = func(ctx context.Context, h string) (string, error) {
+				return fake.addr, nil
+			}
+
+			var runtimeParams []map[string]string
+			if tt.applicationName != "" {
+				runtimeParams = append(runtimeParams, map[string]string{"application_name": tt.applicationName})
+			}
+			conn, err := connectThroughGatekeeper(t, srv, caTrustPool(t, ca),
+				"ep-foo-123.aws.neon.tech", "app_rw", "appdb", "run-token", runtimeParams...)
+			if err != nil {
+				t.Fatalf("connect through gatekeeper: %v", err)
+			}
+
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := conn.Close(closeCtx); err != nil {
+				t.Errorf("Close: %v", err)
+			}
+
+			var entries []RequestLogData
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				entries = cap.snapshot()
+				if len(entries) >= 1 {
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if len(entries) != 1 {
+				t.Fatalf("got %d log entries, want exactly 1", len(entries))
+			}
+			if got := entries[0].ApplicationName; got != tt.wantLogged {
+				t.Errorf("ApplicationName = %q, want %q", got, tt.wantLogged)
+			}
+
+			if got := fake.lastApplicationName(); got != tt.applicationName {
+				t.Errorf("upstream application_name = %q, want %q (capturing for the log must not alter what's forwarded)", got, tt.applicationName)
+			}
+		})
+	}
+}
+
+// TestPostgresDeniedConnectionLogsApplicationName verifies that a connection
+// denied before it ever reaches the upstream (here: network policy denies
+// the host) still carries the client's application_name in the audit log --
+// a denied connection must remain traceable back to its origin just like an
+// allowed one.
+func TestPostgresDeniedConnectionLogsApplicationName(t *testing.T) {
+	ca, err := generateCA()
+	if err != nil {
+		t.Fatalf("generateCA: %v", err)
+	}
+	p := NewProxy()
+	p.SetCA(ca)
+	p.SetAuthToken("run-token")
+	p.SetNetworkPolicy("strict", []string{"api.github.com"}, nil)
+	p.SetPostgresResolver("*.neon.tech", NewStaticPostgresResolver("real-password"))
+	cap := &logCapture{}
+	p.SetLogger(cap.log)
+
+	srv := newTestPostgresListener(t, p)
+
+	msg, conn := pgClientHandshake(t, srv.Addr(), "ep-foo.aws.neon.tech", caTrustPool(t, ca),
+		"app_rw", "appdb", "run-token", map[string]string{"application_name": "box-abc123"})
+	defer conn.Close()
+
+	if _, ok := msg.(*pgproto3.ErrorResponse); !ok {
+		t.Fatalf("expected ErrorResponse (policy denial), got %T", msg)
+	}
+
+	entries := cap.snapshot()
+	if len(entries) != 1 {
+		t.Fatalf("got %d log entries, want exactly 1", len(entries))
+	}
+	if !entries[0].Denied {
+		t.Errorf("Denied = false, want true")
+	}
+	if got := entries[0].ApplicationName; got != "box-abc123" {
+		t.Errorf("ApplicationName = %q, want box-abc123 (denied connections must remain traceable)", got)
 	}
 }
 

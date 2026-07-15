@@ -802,6 +802,13 @@ func (s *PostgresServer) serveAuthenticated(ctx context.Context, clientConn net.
 		RequestSize:  -1,
 		ResponseSize: -1,
 		ClientAddr:   clientConn.RemoteAddr().String(),
+		// ApplicationName is a tracing slug, not identity: it comes straight
+		// from the client's startup parameters, unauthenticated, so it is
+		// sanitized before it ever reaches a log line. The raw value in
+		// startupParams is left untouched — it is still forwarded upstream
+		// as-is (see connectWithRetry) so Neon's own pg_stat_activity keeps
+		// seeing exactly what the client sent.
+		ApplicationName: SanitizeLogValue(startupParams["application_name"]),
 	}
 	if rc != nil {
 		logEntry.RunID = rc.RunID

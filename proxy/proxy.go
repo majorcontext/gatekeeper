@@ -49,6 +49,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	keeplib "github.com/majorcontext/keep"
 	"go.jetify.com/typeid"
@@ -194,6 +196,15 @@ type RequestLogData struct {
 	// TLS-terminated) connection carrying the individual inner requests. For
 	// postgres connections it is the TCP peer of the data-plane listener.
 	ClientAddr string
+
+	// ApplicationName is the client-supplied Postgres "application_name"
+	// startup parameter, captured for request tracing. It is free-form,
+	// client-controlled text (sanitized before being placed here — see
+	// SanitizeLogValue) and, unlike RunID, is a correlation slug rather than
+	// a trusted identity: a client can set it to anything, including another
+	// caller's label. Empty for non-postgres connections and for postgres
+	// connections whose client did not set it.
+	ApplicationName string
 }
 
 // RequestLogger is called for each proxied request.
@@ -807,6 +818,41 @@ func ValidateCaptureHeaders(headers []string) error {
 		seen[lower] = true
 	}
 	return nil
+}
+
+// maxCapturedLogValueLen bounds how many bytes of a client-controlled string
+// are kept in a request log entry.
+const maxCapturedLogValueLen = 256
+
+// SanitizeLogValue prepares a client-controlled string for inclusion in a
+// structured log line: it discards invalid UTF-8, strips control characters
+// (newlines, carriage returns, NUL, tabs, ...) so the value cannot forge
+// additional log lines or otherwise corrupt structured log output, and
+// bounds the result to maxCapturedLogValueLen bytes, truncating at a valid
+// UTF-8 boundary rather than splitting a multi-byte rune. Used for both
+// captured HTTP header values (capture_headers) and the Postgres
+// application_name startup parameter — both are free-form text supplied by
+// the client, not constrained by any protocol grammar the way most other
+// logged fields are.
+func SanitizeLogValue(s string) string {
+	if !utf8.ValidString(s) {
+		s = strings.ToValidUTF8(s, "")
+	}
+	if strings.ContainsFunc(s, unicode.IsControl) {
+		s = strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) {
+				return -1
+			}
+			return r
+		}, s)
+	}
+	if len(s) > maxCapturedLogValueLen {
+		s = s[:maxCapturedLogValueLen]
+		for len(s) > 0 && !utf8.ValidString(s) {
+			s = s[:len(s)-1]
+		}
+	}
+	return s
 }
 
 // ResolveContext looks up per-run context data by auth token.

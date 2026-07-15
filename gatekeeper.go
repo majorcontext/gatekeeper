@@ -24,7 +24,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/majorcontext/gatekeeper/credentialsource"
 	"github.com/majorcontext/gatekeeper/proxy"
@@ -313,6 +312,11 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 			}
 			attrs = append(attrs, slog.String("client_ip", clientIP))
 		}
+		if data.ApplicationName != "" {
+			// A correlation slug the client set (e.g. via PGAPPNAME), not a
+			// trusted identity — run_id, above, is the trusted identity.
+			attrs = append(attrs, slog.String("application_name", data.ApplicationName))
+		}
 		if data.AuthInjected {
 			attrs = append(attrs, slog.Bool("credential_injected", true))
 			var headerNames []string
@@ -348,18 +352,13 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 		}
 
 		// Append captured request headers as structured log attributes.
+		// SanitizeLogValue bounds and cleans the value the same way
+		// data.ApplicationName above already was — see its doc comment.
 		if data.RequestHeaders != nil {
 			for _, h := range cfg.Log.CaptureHeaders {
 				if v := data.RequestHeaders.Get(h); v != "" {
-					if len(v) > 256 {
-						// Truncate at a valid UTF-8 boundary to avoid splitting multi-byte characters.
-						v = v[:256]
-						for len(v) > 0 && !utf8.ValidString(v) {
-							v = v[:len(v)-1]
-						}
-					}
 					key := strings.ReplaceAll(strings.ToLower(h), "-", "_")
-					attrs = append(attrs, slog.String(key, v))
+					attrs = append(attrs, slog.String(key, proxy.SanitizeLogValue(v)))
 				}
 			}
 		}
