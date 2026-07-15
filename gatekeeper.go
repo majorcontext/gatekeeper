@@ -79,9 +79,56 @@ func configureLogging(cfg LogConfig) (func(), error) {
 	} else {
 		handler = slog.NewTextHandler(w, opts)
 	}
-	handler = newMultiHandler(handler, otelslog.NewHandler("gatekeeper"))
+	handler = newMultiHandler(handler, newOTelDiagnosticFilter(otelslog.NewHandler("gatekeeper")))
 	slog.SetDefault(slog.New(handler))
 	return cleanup, nil
+}
+
+// OTelDiagnosticKey marks a log record as gatekeeper's own diagnostic about
+// the OTel pipeline itself — currently, the OTel SDK/export error records
+// cmd/gatekeeper's logOTelError logs at DEBUG. configureLogging's otelslog
+// bridge handler excludes any record carrying this attribute (see
+// newOTelDiagnosticFilter): without the exclusion, a failed OTel log export
+// produces a DEBUG diagnostic that is itself fanned out to the same OTel
+// log-export pipeline that just failed, so it gets queued, fails on the
+// next export attempt, produces another diagnostic, and so on indefinitely
+// while a collector is unreachable. The console/file handler still receives
+// every record regardless of this marker.
+const OTelDiagnosticKey = "otel_diagnostic"
+
+// otelDiagnosticFilter wraps a slog.Handler — the otelslog bridge — and
+// drops any record carrying OTelDiagnosticKey before it reaches the wrapped
+// handler, keeping gatekeeper's own OTel diagnostics out of the OTel log
+// export pipeline. Records without the marker pass through unchanged.
+type otelDiagnosticFilter struct {
+	slog.Handler
+}
+
+func newOTelDiagnosticFilter(h slog.Handler) slog.Handler {
+	return &otelDiagnosticFilter{Handler: h}
+}
+
+func (f *otelDiagnosticFilter) Handle(ctx context.Context, record slog.Record) error {
+	marked := false
+	record.Attrs(func(a slog.Attr) bool {
+		if a.Key == OTelDiagnosticKey && a.Value.Kind() == slog.KindBool && a.Value.Bool() {
+			marked = true
+			return false
+		}
+		return true
+	})
+	if marked {
+		return nil
+	}
+	return f.Handler.Handle(ctx, record)
+}
+
+func (f *otelDiagnosticFilter) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &otelDiagnosticFilter{Handler: f.Handler.WithAttrs(attrs)}
+}
+
+func (f *otelDiagnosticFilter) WithGroup(name string) slog.Handler {
+	return &otelDiagnosticFilter{Handler: f.Handler.WithGroup(name)}
 }
 
 // multiHandler fans out log records to multiple slog handlers.

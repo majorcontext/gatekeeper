@@ -46,8 +46,16 @@ func otelSDKDisabled(getenv func(string) string) bool {
 // with no backoff between attempts) produced an INFO log line that drowned
 // the canonical request lines whenever no collector was present. Logging
 // export errors at DEBUG here keeps them observable without the noise.
+//
+// The record is tagged with gatekeeper.OTelDiagnosticKey so
+// configureLogging's otelslog bridge filter excludes it from the OTel log
+// export pipeline. Without that exclusion, a failed OTel log export
+// produces this very DEBUG record, which — like any other record — gets
+// fanned out to the same OTel log pipeline that just failed; it's queued,
+// fails on the next export attempt, produces another diagnostic, and so on
+// indefinitely while the collector stays unreachable.
 func logOTelError(err error) {
-	slog.Default().Debug("otel error", "error", err)
+	slog.Default().Debug("otel error", "error", err, gatekeeper.OTelDiagnosticKey, true)
 }
 
 func initOTel(ctx context.Context, getenv func(string) string) (shutdown func(context.Context) error, err error) {
