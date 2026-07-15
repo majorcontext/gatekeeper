@@ -1,6 +1,7 @@
 package gatekeeper
 
 import (
+	"fmt"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -170,4 +171,72 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	return ParseConfig(data)
+}
+
+// listenTopology is the resolved result of applying gatekeeper's host
+// default rules to Config.Proxy and Config.Postgres, and deciding whether
+// they collapse onto one shared listener. See resolveListenTopology.
+type listenTopology struct {
+	proxyHost string
+	proxyPort int
+	pgHost    string // "" when no Postgres listener is configured
+	pgPort    int
+	multiplex bool
+}
+
+// resolveListenTopology applies gatekeeper's host-default rules
+// (proxy.host defaults to defaultProxyHost; postgres.host defaults to the
+// resolved proxy host) and decides whether the proxy and Postgres listeners
+// collapse onto one shared port. There is no separate flag for this — an
+// operator declares "one listener" purely by pointing both configs at the
+// same port and host; resolveListenTopology and Server.Start both call this
+// function so the declaration and the actual wiring can never disagree.
+//
+// Multiplexing triggers only when postgres.port is a real, non-zero port
+// and it equals proxy.port, and the two configs' hosts resolve to the same
+// address. Port 0 (ask the OS for an ephemeral port) never triggers
+// multiplexing, even when both sides leave it unset: two independent
+// net.Listen(...:0) calls are not "the same port," and treating them as
+// such would silently change today's two-listener behavior for every
+// config — and every test in this suite — that leaves the port unset on
+// both listeners.
+//
+// It returns a fatal, user-facing error for the two configurations
+// gatekeeper refuses to start with once ports are declared equal: different
+// hosts (ambiguous — which address should the one shared listener bind?),
+// and proxy.proxy_protocol != postgres.proxy_protocol (a single shared
+// listener can only have one PROXY protocol setting, owned by
+// proxy.proxy_protocol since proxy.proxy_protocol is the listener owner).
+func resolveListenTopology(cfg *Config) (listenTopology, error) {
+	proxyHost := cfg.Proxy.Host
+	if proxyHost == "" {
+		proxyHost = defaultProxyHost
+	}
+	topo := listenTopology{proxyHost: proxyHost, proxyPort: cfg.Proxy.Port}
+	if cfg.Postgres == nil {
+		return topo, nil
+	}
+
+	pgHost := cfg.Postgres.Host
+	if pgHost == "" {
+		pgHost = proxyHost
+	}
+	topo.pgHost = pgHost
+	topo.pgPort = cfg.Postgres.Port
+
+	if cfg.Postgres.Port == 0 || cfg.Postgres.Port != cfg.Proxy.Port {
+		return topo, nil
+	}
+
+	// Equal, non-zero ports: this is the multiplex declaration.
+	if pgHost != proxyHost {
+		return topo, fmt.Errorf("postgres.port (%d) equals proxy.port but postgres.host (%q) differs from proxy.host (%q); a shared listener can only bind one address — use the same host on both, or different ports",
+			cfg.Postgres.Port, pgHost, proxyHost)
+	}
+	if cfg.Postgres.ProxyProtocol != cfg.Proxy.ProxyProtocol {
+		return topo, fmt.Errorf("postgres.port (%d) equals proxy.port but postgres.proxy_protocol (%v) differs from proxy.proxy_protocol (%v); a shared listener has one PROXY protocol setting, owned by proxy.proxy_protocol",
+			cfg.Postgres.Port, cfg.Postgres.ProxyProtocol, cfg.Proxy.ProxyProtocol)
+	}
+	topo.multiplex = true
+	return topo, nil
 }

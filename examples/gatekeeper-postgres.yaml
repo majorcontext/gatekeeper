@@ -40,6 +40,18 @@ proxy:
   auth_token: local-test-token
 
 # Postgres data-plane listener. Omit this block to disable the data plane.
+#
+# Setting postgres.port to the SAME value as proxy.port above (with a
+# matching host, and a matching proxy_protocol setting) collapses both
+# listeners onto one shared port instead of binding two — no separate flag,
+# the port equality alone is the declaration. Useful behind a single load
+# balancer / firewall rule. See the "Sharing one listener with the HTTP
+# proxy" section of the config reference and the load-balancer guide's
+# "Single load balancer, one shared port" section for the full rules
+# (equal ports + different hosts, or mismatched proxy_protocol, both fail
+# fast at startup instead of binding).
+#   postgres:
+#     port: 9080   # == proxy.port -> one shared listener, not two
 postgres:
   host: 127.0.0.1   # optional; defaults to the proxy host
   port: 5432
