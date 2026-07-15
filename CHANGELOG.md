@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.17.0 — 2026-07-14
+
+### Fixed
+
+- **OTel export failures no longer drown the request log when no collector is reachable** — `cmd/gatekeeper` unconditionally created OTLP HTTP exporters and registered them as global providers, and never installed an OTel error handler. The OTel SDK's default handler routes SDK/export errors through the standard library `log` package, which gatekeeper's `slog.SetDefault` call rewires to the configured slog handler at INFO level (documented `log/slog` behavior) — so every failed export attempt logged an INFO line, once per batch interval, with no backoff: `{"level":"INFO","msg":"Post \"https://localhost:4318/v1/logs\": dial tcp [::1]:4318: connect: connection refused"}`. Two changes: the standard `OTEL_SDK_DISABLED=true` env var now suppresses OTel entirely (no exporters, no providers, no OTel-related log lines), and a dedicated error handler now logs export/SDK failures at DEBUG instead of the SDK default, so they're observable with debug logging on but no longer flood the default `info` level. Default behavior (no env vars set) is unchanged — exporters still target the standard OTLP endpoint and traces/metrics/logs still flow when a collector is present
+
 ## v0.16.0 — 2026-07-13
 
 ### Added
