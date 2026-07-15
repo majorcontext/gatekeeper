@@ -211,6 +211,7 @@ type Server struct {
 	proxyServer *http.Server
 	pgServer    *proxy.PostgresServer // postgres data-plane listener, if configured
 	pgAddr      string                // actual postgres listener address after Start
+	demux       *proxy.Demux          // non-nil when proxy and postgres share one listener (see resolveListenTopology)
 	logCleanup  func()                // closes log file if output is a file path
 
 	pendingRefreshes []pendingRefresh
@@ -267,6 +268,14 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 	// certificates, so a CA is mandatory when it is configured.
 	if cfg.Postgres != nil && (cfg.TLS.CACert == "" || cfg.TLS.CAKey == "") {
 		return nil, fmt.Errorf("postgres listener requires tls.ca_cert and tls.ca_key to be configured")
+	}
+
+	// Fail fast on an invalid or ambiguous proxy/postgres listener topology
+	// (e.g. equal ports but different hosts) rather than discovering it only
+	// once Start tries to bind. Start recomputes the same topology right
+	// before wiring listeners, so the two can never disagree.
+	if _, err := resolveListenTopology(cfg); err != nil {
+		return nil, err
 	}
 
 	// Load credentials from config and set directly on the proxy.
@@ -793,11 +802,17 @@ func (s *Server) Start(ctx context.Context) error {
 	s.started = true
 	s.mu.Unlock()
 
-	// Default to localhost if no host is configured.
-	host := s.cfg.Proxy.Host
-	if host == "" {
-		host = defaultProxyHost
+	// Resolve host defaults and decide whether proxy and postgres share one
+	// listener (see resolveListenTopology's doc comment): equal, non-zero
+	// ports on matching hosts is the entire declaration — there's no
+	// separate flag. New already validated this at construction time from
+	// the same function, so an error here would only surface if cfg were
+	// mutated after New returned.
+	topology, err := resolveListenTopology(s.cfg)
+	if err != nil {
+		return err
 	}
+	host := topology.proxyHost
 
 	// Start proxy listener.
 	addr := fmt.Sprintf("%s:%d", host, s.cfg.Proxy.Port)
@@ -817,12 +832,17 @@ func (s *Server) Start(ctx context.Context) error {
 	// which all log from the outer request's RemoteAddr) ever sees it. See
 	// proxy.WrapProxyProtocolListener for the fail-open USE policy, the 10s
 	// header-read timeout, and the malformed-header debug log — the Postgres
-	// data-plane listener below shares this exact same helper.
+	// data-plane listener (or, when topology.multiplex is true, this same
+	// shared listener) uses this exact same helper.
 	if s.cfg.Proxy.ProxyProtocol {
 		ln = proxy.WrapProxyProtocolListener(ln)
 	}
 
-	slog.Info("gatekeeper listening", "addr", ln.Addr().String(), "version", s.version)
+	if topology.multiplex {
+		slog.Info("proxy and postgres multiplexed on one listener", "addr", ln.Addr().String(), "version", s.version)
+	} else {
+		slog.Info("gatekeeper listening", "addr", ln.Addr().String(), "version", s.version)
+	}
 
 	s.mu.Lock()
 	s.proxyLn = ln
@@ -838,38 +858,26 @@ func (s *Server) Start(ctx context.Context) error {
 		// CONNECT tunnels are long-lived, and a write timeout would kill
 		// idle but valid connections.
 	}
-	go func() { _ = s.proxyServer.Serve(ln) }()
 
-	// Start the Postgres data-plane listener if configured.
-	if s.cfg.Postgres != nil {
-		pgHost := s.cfg.Postgres.Host
-		if pgHost == "" {
-			pgHost = host // same default the HTTP listener resolved
-		}
-		pgAddr := fmt.Sprintf("%s:%d", pgHost, s.cfg.Postgres.Port)
-		pgLn, err := net.Listen("tcp", pgAddr)
-		if err != nil {
-			// Tear down the already-running HTTP server so a postgres bind
-			// failure doesn't leak the HTTP listener. http.Server.Shutdown
-			// closes the listener it was Serve-ing, so closing the server is
-			// sufficient — closing ln again here would race the Serve goroutine.
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = s.proxyServer.Shutdown(shutdownCtx)
-			cancel()
-			return fmt.Errorf("starting postgres listener: %w", err)
-		}
-		// Wrap before StartListener: the PROXY header arrives as the very
-		// first bytes on the wire, ahead of the client's SSLRequest, so the
-		// listener must be PROXY-protocol-aware from the first Accept. See
-		// proxy.WrapProxyProtocolListener — same fail-open USE policy, 10s
-		// header-read timeout, and malformed-header debug log as the HTTP
-		// listener above.
-		if s.cfg.Postgres.ProxyProtocol {
-			pgLn = proxy.WrapProxyProtocolListener(pgLn)
-		}
+	if topology.multiplex {
+		// resolveListenTopology already confirmed proxy.port == postgres.port,
+		// matching hosts, and matching proxy_protocol settings, so ln alone
+		// (already PROXY-protocol-wrapped above if configured) carries both
+		// planes. NewDemux classifies each connection by its first bytes
+		// (proxy/demux.go) and routes it to one of two virtual listeners;
+		// http.Server.Serve and PostgresServer.StartListener run completely
+		// unmodified against those, unaware they aren't backed by a real
+		// socket.
+		dx := proxy.NewDemux(ln)
+		s.demux = dx
+
+		go func() { _ = s.proxyServer.Serve(dx.HTTPListener()) }()
+
 		pg := proxy.NewPostgresServer(s.proxy)
-		if err := pg.StartListener(pgLn); err != nil {
-			_ = pgLn.Close()
+		if err := pg.StartListener(dx.PostgresListener()); err != nil {
+			// Tear down the already-running HTTP server and the demux's real
+			// listener so a postgres wiring failure doesn't leak either.
+			_ = dx.Close()
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			_ = s.proxyServer.Shutdown(shutdownCtx)
 			cancel()
@@ -880,6 +888,46 @@ func (s *Server) Start(ctx context.Context) error {
 		s.pgAddr = pg.Addr()
 		s.mu.Unlock()
 		slog.Info("gatekeeper postgres listener", "addr", pg.Addr(), "subsystem", "proxy")
+	} else {
+		go func() { _ = s.proxyServer.Serve(ln) }()
+
+		// Start the Postgres data-plane listener if configured.
+		if s.cfg.Postgres != nil {
+			pgAddr := fmt.Sprintf("%s:%d", topology.pgHost, s.cfg.Postgres.Port)
+			pgLn, err := net.Listen("tcp", pgAddr)
+			if err != nil {
+				// Tear down the already-running HTTP server so a postgres bind
+				// failure doesn't leak the HTTP listener. http.Server.Shutdown
+				// closes the listener it was Serve-ing, so closing the server is
+				// sufficient — closing ln again here would race the Serve goroutine.
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = s.proxyServer.Shutdown(shutdownCtx)
+				cancel()
+				return fmt.Errorf("starting postgres listener: %w", err)
+			}
+			// Wrap before StartListener: the PROXY header arrives as the very
+			// first bytes on the wire, ahead of the client's SSLRequest, so the
+			// listener must be PROXY-protocol-aware from the first Accept. See
+			// proxy.WrapProxyProtocolListener — same fail-open USE policy, 10s
+			// header-read timeout, and malformed-header debug log as the HTTP
+			// listener above.
+			if s.cfg.Postgres.ProxyProtocol {
+				pgLn = proxy.WrapProxyProtocolListener(pgLn)
+			}
+			pg := proxy.NewPostgresServer(s.proxy)
+			if err := pg.StartListener(pgLn); err != nil {
+				_ = pgLn.Close()
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = s.proxyServer.Shutdown(shutdownCtx)
+				cancel()
+				return fmt.Errorf("starting postgres listener: %w", err)
+			}
+			s.mu.Lock()
+			s.pgServer = pg
+			s.pgAddr = pg.Addr()
+			s.mu.Unlock()
+			slog.Info("gatekeeper postgres listener", "addr", pg.Addr(), "subsystem", "proxy")
+		}
 	}
 
 	// Start background refresh goroutines for any RefreshingSource credentials.
@@ -910,6 +958,16 @@ func (s *Server) Stop(ctx context.Context) error {
 	}
 	if s.logCleanup != nil {
 		defer s.logCleanup()
+	}
+	if s.demux != nil {
+		// Stop accepting new connections on the shared listener immediately.
+		// This deliberately does not close the demux's virtual listeners
+		// (Demux.StopAccepting, not Close): pgServer.Shutdown and
+		// proxyServer.Shutdown below each close the virtual listener they own
+		// as part of their own graceful drain, and closing it out from under
+		// them here first would race their own closed-flag bookkeeping — see
+		// StopAccepting's doc comment in proxy/demux.go.
+		_ = s.demux.StopAccepting()
 	}
 	// Drain both planes concurrently so each gets the full ctx budget rather
 	// than the Postgres drain eating into the HTTP server's deadline.

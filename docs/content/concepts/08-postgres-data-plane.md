@@ -8,6 +8,8 @@ keywords: ["gatekeeper", "postgres", "neon", "SCRAM", "credential injection", "d
 
 Gatekeeper runs a second listener that speaks the Postgres wire protocol. A client connects to it with the real database hostname and an authentication token in place of the database password. Gatekeeper resolves the real password, authenticates upstream, and relays the connection. The database password never reaches the client.
 
+This is a genuinely separate listener from the HTTP/CONNECT proxy — except when `postgres.port` is configured to the same value as `proxy.port`, in which case gatekeeper multiplexes both planes onto one shared listener, classifying each connection by its first bytes. See [Sharing one listener with the HTTP proxy](../reference/02-config-file.md#sharing-one-listener-with-the-http-proxy) in the config reference.
+
 This mirrors the HTTP credential-injection plane: the client presents a weak identity (its run token), and Gatekeeper substitutes the real credential before talking to the upstream. The two planes share configuration, network policy, per-run context scoping, and audit logging.
 
 ## What it solves

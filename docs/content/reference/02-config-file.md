@@ -71,6 +71,8 @@ proxy:
 - **Required:** No
 - **Default:** `0` (random available port)
 
+If this equals `postgres.port` (and `proxy.host` equals `postgres.host`, after defaults), the two listeners collapse onto one shared physical listener instead of binding separately — see [Sharing one listener with the HTTP proxy](#sharing-one-listener-with-the-http-proxy) under `postgres` below. There is no separate flag for this: setting both ports the same **is** the declaration.
+
 ### proxy.host
 
 Bind address for the proxy listener.
@@ -217,7 +219,29 @@ Semantics are identical to `proxy.proxy_protocol`, applied to this listener inst
 
 Because the header is honored from any peer, only enable this when the Postgres port is reachable solely through the load balancer, and never use `client_ip` for security decisions.
 
-This is a separate toggle from `proxy.proxy_protocol` — enabling one does not enable the other, since the two listeners are typically fronted by different load balancers (or only one of them is exposed at all).
+This is a separate toggle from `proxy.proxy_protocol` — enabling one does not enable the other, since the two listeners are typically fronted by different load balancers (or only one of them is exposed at all). **Exception:** when `postgres.port` equals `proxy.port` (see below), the two settings must agree.
+
+### Sharing one listener with the HTTP proxy
+
+When `postgres.port` equals `proxy.port` — and `proxy.host` and `postgres.host` are the same string, after their defaults are applied — gatekeeper multiplexes both planes onto **one** real listener instead of binding two. (The host comparison is a literal string match, not address resolution: `proxy.host: localhost` and `postgres.host: 127.0.0.1` are treated as *different* and rejected as an ambiguous bind rather than guessed to be equivalent.) Each accepted connection is classified by its first bytes: a recognized Postgres startup signature (`SSLRequest`, `GSSENCRequest`, or the v3 `StartupMessage`) routes to the Postgres data plane, and everything else — HTTP methods, the h2 preface — routes to the HTTP/CONNECT plane, unchanged. There is no dedicated config flag for this; the port equality itself is the trigger.
+
+```yaml
+proxy:
+  host: 0.0.0.0
+  port: 5432
+
+postgres:
+  port: 5432 # same host (defaulted from proxy.host) and same port as above -> shared listener
+```
+
+Gatekeeper refuses to start, with a fatal, descriptive error, in two situations once the ports are equal:
+
+- **Different hosts.** `postgres.port == proxy.port` but the two configs' hosts (after defaults) don't match — there's only one socket to bind, and which address to use is ambiguous.
+- **Mismatched `proxy_protocol`.** `postgres.proxy_protocol != proxy.proxy_protocol` — a single shared listener can only have one PROXY protocol setting. `proxy.proxy_protocol` is the setting actually applied; set both fields (or leave `postgres.proxy_protocol` unset, which mirrors `proxy.proxy_protocol`'s own default of `false`) so they agree.
+
+Port `0` (letting the OS assign an ephemeral port) never triggers multiplexing on its own, even if both `proxy.port` and `postgres.port` are left unset — two independent ephemeral-port binds are not "the same port." Multiplexing requires an explicit, matching, non-zero port on both listeners.
+
+If `postgres` isn't configured at all, or the two ports differ, gatekeeper binds two listeners exactly as it always has. See [Deploying behind a TCP load balancer](../guides/11-load-balancer-proxy-protocol.md#single-load-balancer-one-shared-port) for the full walkthrough, including PROXY protocol and health checks on the shared listener.
 
 ---
 

@@ -8,7 +8,7 @@ keywords: ["gatekeeper", "load balancer", "PROXY protocol", "GCP", "client IP", 
 
 Recover the real client IP when gatekeeper runs behind a TCP-terminating load balancer, such as GCP's global TCP Proxy load balancer. Without this, every request's `client_ip` log attribute shows the load balancer's hop instead of the actual client.
 
-PROXY protocol support is configured per listener: `proxy.proxy_protocol` for the HTTP/CONNECT listener, and `postgres.proxy_protocol` for the [Postgres data-plane listener](../concepts/08-postgres-data-plane.md) (if configured). They are independent toggles — enabling one does not enable the other — because the two listeners are commonly fronted by different load balancers, or only one of them is exposed publicly at all. Everything below applies identically to both; the config examples call out where the field name differs.
+PROXY protocol support is configured per listener: `proxy.proxy_protocol` for the HTTP/CONNECT listener, and `postgres.proxy_protocol` for the [Postgres data-plane listener](../concepts/08-postgres-data-plane.md) (if configured). They are independent toggles — enabling one does not enable the other — because the two listeners are commonly fronted by different load balancers, or only one of them is exposed publicly at all. Everything below applies identically to both; the config examples call out where the field name differs. (The one exception: when `proxy.port` and `postgres.port` are set to the same value, the two listeners collapse into one shared listener behind a single load balancer, and the two `proxy_protocol` settings must then agree — see [Single load balancer, one shared port](#single-load-balancer-one-shared-port) below.)
 
 ## Prerequisites
 
@@ -69,9 +69,39 @@ postgres:
   proxy_protocol: true
 ```
 
+## Single load balancer, one shared port
+
+The two listeners above don't have to be separate ports. If `proxy.port` and `postgres.port` are set to the *same* value (and the same host), gatekeeper multiplexes both planes onto one real listener instead of binding two — useful when you only want to stand up one backend service, one health check, and one firewall rule in front of gatekeeper, rather than one per listener.
+
+There's no separate flag for this: the port equality itself is the declaration. Each accepted connection is classified by its first bytes — a Postgres startup signature (`SSLRequest`, `GSSENCRequest`, or the v3 `StartupMessage`) routes to the Postgres data plane, and everything else (HTTP methods, the h2 preface) routes to the HTTP/CONNECT plane — before being handed to the same HTTP server or Postgres server code that runs the ordinary, separate-port configuration. Classification happens per-connection, not in the shared accept loop, so a silent or slow-to-classify client (an LB health check that opens a socket and never sends anything, for example) can't stall every other pending connection.
+
+```yaml
+proxy:
+  host: 0.0.0.0
+  port: 5432
+  proxy_protocol: true
+
+tls:
+  ca_cert: ca.crt
+  ca_key: ca.key
+
+postgres:
+  port: 5432
+  proxy_protocol: true
+```
+
+A shared listener has exactly one PROXY protocol setting, since there's only one physical socket to wrap: `proxy.proxy_protocol` and `postgres.proxy_protocol` must agree (both `true` or both `false`, or simply leave `postgres.proxy_protocol` unset — see the [config reference](../reference/02-config-file.md#postgres) for the exact default). Gatekeeper refuses to start otherwise, with an error naming the mismatch — this is checked at startup, before either listener binds, so a typo doesn't surface as a mysterious connection-classification bug later. `proxy.proxy_protocol` is the setting that's actually applied to the shared listener; `postgres.proxy_protocol` exists in this mode purely so the two fields can't silently drift apart in a config that's meant to describe one listener.
+
+Two configuration mistakes are also rejected at startup for the same reason:
+
+- **Equal ports, different hosts** — e.g. `proxy.host: 127.0.0.1` with `postgres.host: 0.0.0.0` and the same port. There's only one socket to bind, and gatekeeper can't guess which address you meant.
+- **Equal ports, mismatched `proxy_protocol`** — described above.
+
+If `postgres` isn't configured at all, or the two ports differ, gatekeeper binds two listeners exactly as it always has — the shared-port path only ever engages when you've explicitly pointed both configs at the same port and host.
+
 ## Configuring the GCP backend service
 
-Enabling `proxy_protocol` on gatekeeper is only half the change — the load balancer must also be told to send the header. For a global TCP Proxy load balancer, this is the backend service's `proxyHeader` field. Configure this on whichever backend service fronts the listener you enabled — the HTTP/CONNECT port, the Postgres port, or both, if both are load-balanced.
+Enabling `proxy_protocol` on gatekeeper is only half the change — the load balancer must also be told to send the header. For a global TCP Proxy load balancer, this is the backend service's `proxyHeader` field. Configure this on whichever backend service fronts the listener you enabled — the HTTP/CONNECT port, the Postgres port, or both, if both are load-balanced. On the shared-port setup above, there's only one backend service and one health check to configure, since there's only one listener.
 
 Update an existing backend service:
 
@@ -163,6 +193,8 @@ level=DEBUG msg="dropping connection: malformed PROXY protocol header" peer=35.1
 ## Health check notes
 
 Gatekeeper's fail-open policy means a load balancer health check keeps working whether or not it carries a PROXY header: a probe that includes one is parsed normally, and a probe that doesn't falls back to the raw TCP peer address. Neither case is rejected, so flipping `proxy_protocol` on and off does not require a matching change to the health check configuration. This holds for both the HTTP listener's `/healthz` endpoint and a bare TCP connect check against the Postgres listener.
+
+On the shared-port setup, `/healthz` still works exactly as it does on a dedicated HTTP listener: an HTTP health check's request line is classified as HTTP traffic (it isn't a Postgres startup signature) and routed to the same handler that serves `/healthz` on a distinct port. A bare TCP connect-then-close probe — the kind a plain TCP health check performs — never sends enough bytes to be classified either way, so it's simply dropped once the classification read times out, the same clean, silent outcome as connecting and disconnecting from any other gatekeeper listener.
 
 ## Next steps
 
