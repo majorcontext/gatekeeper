@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.19.1 — 2026-07-15
+
+### Fixed
+
+- **The Postgres data-plane accept loop no longer dies permanently on a transient `Accept` error** — `PostgresServer.acceptLoop` (`proxy/postgres.go`) treated any non-shutdown `Accept` error as fatal, logging `postgres accept loop exited` and returning for good; a transient failure (EMFILE/ENFILE under fd exhaustion, ECONNABORTED — realistic for a proxy holding many long-lived Postgres relay connections) permanently killed the data-plane listener until process restart, with no automatic recovery. This is the identical unconditional-exit-on-any-Accept-error bug `Demux.acceptLoop` had until [#56](https://github.com/majorcontext/gatekeeper/pull/56) fixed it for the shared-listener demux path, and was intentionally left out of that PR's scope as a separate follow-up. `PostgresServer.acceptLoop` now mirrors `Demux.acceptLoop` exactly, which in turn mirrors `net/http.Server.Serve`: on an `Accept` error, it exits cleanly and silently only when the server is already shutting down (`beginClose` sets the `closed` flag before closing the listener, exactly as before); any other error is treated as transient, logged once at WARN with the error and the computed backoff (never connection content or credentials), and retried after a capped exponential delay (5ms doubling to a 1s cap), which resets to zero after the next successful `Accept`. The two loops now share the same backoff constants (`demuxAcceptRetryBaseDelay`, `demuxAcceptRetryMaxDelay`, defined once in `demux.go`) so they can't drift apart, and — like the demux loop — deliberately do not gate the retry on the deprecated, unreliable `net.Error.Temporary()`; a genuinely dead-but-unclosed listener retries once per second forever with a WARN each time, the same visible, capped pathological case `net/http` and the demux loop already tolerate rather than a zero-delay spin. All other behavior is unchanged: the clean-shutdown path, per-connection goroutine dispatch via `trackConn`/`untrackConn`, and existing logging
+
 ## v0.19.0 — 2026-07-15
 
 ### Added
