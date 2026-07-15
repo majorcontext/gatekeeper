@@ -111,7 +111,7 @@ func newOTelDiagnosticFilter(h slog.Handler) slog.Handler {
 func (f *otelDiagnosticFilter) Handle(ctx context.Context, record slog.Record) error {
 	marked := false
 	record.Attrs(func(a slog.Attr) bool {
-		if a.Key == OTelDiagnosticKey {
+		if a.Key == OTelDiagnosticKey && a.Value.Kind() == slog.KindBool && a.Value.Bool() {
 			marked = true
 			return false
 		}

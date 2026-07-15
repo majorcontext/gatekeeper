@@ -2965,15 +2965,22 @@ func TestOTelDiagnosticFilter_KeepsBridgeOutOfLoop(t *testing.T) {
 
 	logger.Debug("otel error", "error", "dial tcp [::1]:4318: connect: connection refused", OTelDiagnosticKey, true)
 	logger.Info("normal request", "host", "example.com")
+	// A record carrying the key set to false is not a diagnostic and must
+	// still reach the bridge — the filter keys off the value, not mere
+	// presence of the attribute.
+	logger.Info("opted-in request", "host", "example.com", OTelDiagnosticKey, false)
 
-	if got := len(console.records); got != 2 {
-		t.Fatalf("console handler received %d records, want 2 (both records)", got)
+	if got := len(console.records); got != 3 {
+		t.Fatalf("console handler received %d records, want 3 (all records)", got)
 	}
-	if got := len(bridge.records); got != 1 {
-		t.Fatalf("bridge handler received %d records, want 1 (the marked diagnostic must be filtered out)", got)
+	if got := len(bridge.records); got != 2 {
+		t.Fatalf("bridge handler received %d records, want 2 (only the true-marked diagnostic is filtered out)", got)
 	}
 	if got := bridge.records[0].Message; got != "normal request" {
-		t.Errorf("bridge handler's surviving record = %q, want %q (the unmarked one)", got, "normal request")
+		t.Errorf("bridge handler's first surviving record = %q, want %q", got, "normal request")
+	}
+	if got := bridge.records[1].Message; got != "opted-in request" {
+		t.Errorf("bridge handler's second surviving record = %q, want %q (key=false must pass through)", got, "opted-in request")
 	}
 }
 
