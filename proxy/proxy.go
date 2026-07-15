@@ -2036,6 +2036,24 @@ func (p *Proxy) checkNetworkPolicy(host string, port int) bool {
 	return matchHost(p.allowedHosts, host, port)
 }
 
+// checkNetworkPolicyPostgres checks if host is allowed by the network policy
+// for Postgres data-plane traffic, evaluated at the Postgres default port
+// (5432). It is the Postgres-plane counterpart to checkNetworkPolicy: same
+// policy and allowedHosts state, but matched with matchHostPostgres
+// (postgres.go) instead of matchHost, so a portless allow pattern (e.g.
+// "*.neon.tech") means "matches port 5432" here instead of checkNetworkPolicy's
+// HTTP-centric "matches ports 80/443". checkNetworkPolicy itself, and the
+// HTTP/CONNECT path that calls it, are unaffected by this method's existence.
+func (p *Proxy) checkNetworkPolicyPostgres(host string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if p.policy != "strict" {
+		return true
+	}
+	return matchHostPostgres(p.allowedHosts, host)
+}
+
 // writeProxyAuthRequired writes a 407 with a Proxy-Authenticate challenge.
 // Without the challenge header, clients like git's libcurl treat 407 as fatal
 // and never retry with credentials.
