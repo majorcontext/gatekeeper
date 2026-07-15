@@ -4,11 +4,11 @@ description: "How Gatekeeper resolves credentials from pluggable backends includ
 keywords: ["gatekeeper", "credential sources", "background refresh", "credential resolver"]
 ---
 
-# Credential Sources
+# Credential sources
 
 Gatekeeper resolves credentials from pluggable backends called **credential sources**. Each source implements a single method — `Fetch` — that returns a credential value. Sources range from simple (read an environment variable) to complex (exchange tokens with an external STS).
 
-## The Source Interface
+## The source interface
 
 All credential sources implement `CredentialSource`:
 
@@ -21,7 +21,7 @@ type CredentialSource interface {
 
 `Fetch` retrieves the current credential value. It accepts a context for cancellation and timeout — gatekeeper enforces a 10-second timeout on all startup fetches. `Type` returns a string identifier for logging (e.g., `"env"`, `"aws-secretsmanager"`).
 
-## Static vs Dynamic Sources
+## Static vs dynamic sources
 
 **Static sources** return the same value on every call. They are fetched once at startup and cached:
 
@@ -40,7 +40,7 @@ type CredentialSource interface {
 | `gcp-service-account` | key location, `scopes` | Mints GCP OAuth2 access tokens from a service account key |
 | `github-app` | `app_id`, `installation_id`, private key | Generates GitHub App installation tokens |
 
-## RefreshingSource and Background Refresh
+## RefreshingSource and background refresh
 
 Sources whose credentials expire implement `RefreshingSource`:
 
@@ -59,7 +59,7 @@ type RefreshingSource interface {
 
 The `github-app` and `gcp-service-account` sources are `RefreshingSource`s. Both produce tokens that expire after one hour, so gatekeeper refreshes them every 45 minutes. The `process` source is also a `RefreshingSource`: when its command output is AWS `credential_process`-format JSON, TTL is the time until the embedded `Expiration`; otherwise it reports a fixed interval (`ttl` in the source config, default 5 minutes).
 
-## Source Deduplication
+## Source deduplication
 
 When multiple credential entries share the same `SourceConfig` (identical `type`, `var`, `secret`, etc.), gatekeeper fetches the credential once and applies it to all matching hosts. A single background refresh goroutine updates every host that shares the source.
 
@@ -85,7 +85,7 @@ credentials:
 
 Both entries share the same `github-app` source. Gatekeeper makes one API call to GitHub, generates one installation token, and applies it to both `api.github.com` (as `Bearer`) and `github.com` (as `Basic x-access-token:token`).
 
-## CredentialResolver for Dynamic Resolution
+## CredentialResolver for dynamic resolution
 
 Some credential flows require per-request context — for example, RFC 8693 token exchange, where the proxy exchanges a caller's identity token for a scoped access token. These flows use `CredentialResolver` instead of `CredentialSource`:
 
@@ -97,7 +97,7 @@ Unlike static sources (fetched once at startup), resolvers are called on every r
 
 The `token-exchange` source type creates a `CredentialResolver`. All other source types create a `CredentialSource`.
 
-## Error Handling
+## Error handling
 
 Credential source errors at startup are fatal — gatekeeper refuses to start if any `Fetch` call fails. This fail-fast behavior prevents the proxy from running without required credentials.
 

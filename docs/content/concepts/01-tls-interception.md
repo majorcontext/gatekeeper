@@ -4,17 +4,17 @@ description: "How Gatekeeper terminates TLS connections, generates per-host cert
 keywords: ["gatekeeper", "TLS interception", "MITM proxy", "certificate generation"]
 ---
 
-# TLS Interception
+# TLS interception
 
 Gatekeeper is a TLS-intercepting proxy. It terminates the client's TLS connection, reads the plaintext HTTP request, injects credentials, and forwards the request to the real server over a separate TLS connection. This is a man-in-the-middle architecture — the client must trust gatekeeper's CA certificate.
 
 This page explains why TLS interception is necessary and how the certificate chain works.
 
-## Why MITM Is Necessary
+## Why MITM is necessary
 
 HTTP proxies see CONNECT tunnels as opaque byte streams. Without interception, the proxy knows the destination host but cannot read or modify the encrypted HTTP request inside the tunnel. Credential injection requires access to the plaintext request headers — so gatekeeper must terminate the client's TLS, read the request, inject headers, and re-encrypt for the upstream server.
 
-## The CONNECT Flow
+## The CONNECT flow
 
 When a client sends an HTTPS request through gatekeeper, the flow has five stages:
 
@@ -37,7 +37,7 @@ Client                    Gatekeeper                   api.github.com
   |<-- 200 OK ---------------|                               |
 ```
 
-## Two Separate TLS Connections
+## Two separate TLS connections
 
 The proxy maintains two independent TLS sessions per intercepted request:
 
@@ -48,11 +48,11 @@ The proxy maintains two independent TLS sessions per intercepted request:
 
 These connections use independent keys and cipher suites. The client never sees the origin server's certificate — it only sees gatekeeper's generated certificate.
 
-## Per-Host Certificate Generation
+## Per-host certificate generation
 
 When gatekeeper intercepts a CONNECT tunnel for a host, `CA.GenerateCert` creates a certificate on the fly:
 
-- The certificate's `CommonName` and SAN (Subject Alternative Name) match the target host.
+- The certificate's `CommonName` and Subject Alternative Name (SAN) match the target host.
 - IP addresses are added as IP SANs; hostnames as DNS SANs.
 - Each certificate is signed by gatekeeper's CA private key.
 - Generated certificates are cached in memory by hostname to avoid repeated key generation.
@@ -60,19 +60,19 @@ When gatekeeper intercepts a CONNECT tunnel for a host, `CA.GenerateCert` create
 
 The CA supports RSA, EC, and Ed25519 private keys via PKCS1, PKCS8, and SEC 1 formats.
 
-## ALPN Negotiation
+## ALPN negotiation
 
 The client-facing TLS handshake advertises `h2` before `http/1.1` in its ALPN `NextProtos` list, so gatekeeper prefers HTTP/2 with clients that support it and falls back to HTTP/1.1 otherwise. The negotiated protocol determines which transport gatekeeper uses to reach the upstream server: when the client negotiated `h2`, gatekeeper forwards over an `http2.Transport`, since an h2 request cannot be round-tripped through an HTTP/1.1 transport without framing errors; otherwise it forwards over a standard `http.Transport`. This matters for gRPC clients, which require h2 end-to-end — gatekeeper's `http2.Transport` never falls back to HTTP/1.1, so if the upstream only speaks HTTP/1.1, a connection from an h2 client to that upstream fails.
 
 WebSocket upgrades follow a related but separate path through TLS interception — see [WebSockets](../guides/10-websockets.md).
 
-## Why the Client Must Trust the CA
+## Why the client must trust the CA
 
 The dynamically generated certificates are not signed by a public CA. Clients reject them unless they explicitly trust gatekeeper's CA certificate. In container environments, the CA certificate is mounted into the container's trust store (e.g., `/etc/ssl/certs/`). Without this, every HTTPS request through the proxy fails with a certificate verification error.
 
 > **Note:** Applications with certificate pinning will fail even with the CA trusted. This is expected — interception requires replacing the origin certificate.
 
-## Non-CONNECT Relay Path
+## Non-CONNECT relay path
 
 Plain HTTP requests (no TLS) bypass the interception flow entirely. Gatekeeper reads the request directly, injects credentials, and forwards it using a standard `http.Transport`. No certificate generation occurs.
 

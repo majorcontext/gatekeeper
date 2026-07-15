@@ -4,7 +4,7 @@ description: "Resolve per-user credentials dynamically by calling an external Se
 keywords: ["gatekeeper", "token exchange", "RFC 8693", "STS", "OAuth"]
 ---
 
-# Token Exchange (RFC 8693)
+# Token exchange (RFC 8693)
 
 Resolve per-user credentials dynamically by calling an external Security Token Service (STS). Multiple callers with different identities share a single gatekeeper instance. Each request triggers a token exchange -- or uses a cached token -- scoped to the caller's identity.
 
@@ -16,7 +16,7 @@ This guide covers gatekeeper configuration and the STS endpoint contract. Implem
 - An STS endpoint that implements RFC 8693 token exchange (see [STS Endpoint Requirements](#sts-endpoint-requirements) below)
 - Client credentials (`client_id` and `client_secret`) for authenticating gatekeeper to the STS
 
-## How It Works
+## How it works
 
 1. A request arrives at gatekeeper with a subject identity (via header or proxy auth username).
 2. Gatekeeper checks its cache for a valid token for that subject.
@@ -24,11 +24,11 @@ This guide covers gatekeeper configuration and the STS endpoint contract. Implem
 4. The STS returns an `access_token` (and optional `expires_in`).
 5. Gatekeeper caches the token and injects it into the upstream request.
 
-## Subject Identity Modes
+## Subject identity modes
 
 Gatekeeper extracts the subject identity from one of two sources. The two modes are mutually exclusive.
 
-### Mode 1: Subject from Request Header
+### Mode 1: Subject from request header
 
 The subject identity is read from a named HTTP header on each request. Gatekeeper strips the header before forwarding upstream.
 
@@ -54,7 +54,7 @@ curl --proxy http://127.0.0.1:9080 --cacert ca.crt \
   https://api.github.com/user
 ```
 
-### Mode 2: Subject from Proxy Auth
+### Mode 2: Subject from proxy auth
 
 The subject identity is extracted from the username in proxy authentication credentials. No request headers are modified.
 
@@ -79,7 +79,7 @@ export HTTP_PROXY="http://alice%40example.com:proxypass@127.0.0.1:9080"
 curl --cacert ca.crt https://api.github.com/user
 ```
 
-## Configuration Reference
+## Configuration reference
 
 | Field                | Required       | Default                                                | Description                                              |
 |----------------------|----------------|--------------------------------------------------------|----------------------------------------------------------|
@@ -94,7 +94,7 @@ curl --cacert ca.crt https://api.github.com/user
 | `actor_token_from`   | No             | --                                                     | Set to `proxy-auth-password` to forward the proxy auth password as actor token |
 | `actor_token_type`   | No             | `urn:ietf:params:oauth:token-type:access_token`        | Token type URI for the actor token                       |
 
-## Actor Token Forwarding
+## Actor token forwarding
 
 By default, subject identities are self-asserted -- any caller can claim any identity. In shared environments, use **actor token forwarding** to let the STS verify caller identity.
 
@@ -125,7 +125,7 @@ Gatekeeper sends both `subject_token=alice@example.com` and `actor_token=ak_alic
 
 When `actor_token_from` is configured on any credential, gatekeeper requires all clients to provide Basic proxy auth with a non-empty password. The password is not checked against a static value -- it is forwarded to the STS.
 
-## Caching Behavior
+## Caching behavior
 
 Gatekeeper caches tokens per `(subject_token, actor_token)` pair:
 
@@ -140,11 +140,11 @@ The cap exists because a long `expires_in` only means the token *may* live that 
 
 A consequence: `expires_in` values above the cap no longer reduce STS request volume. Sizing the STS for roughly one exchange per subject per minute is the safe assumption.
 
-## STS Endpoint Requirements
+## STS endpoint requirements
 
 Gatekeeper sends a `POST` with `Content-Type: application/x-www-form-urlencoded` and HTTP Basic authentication.
 
-### Request Format
+### Request format
 
 ```http
 POST /token HTTP/1.1
@@ -155,7 +155,7 @@ Content-Type: application/x-www-form-urlencoded
 grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=alice%40example.com&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&resource=https%3A%2F%2Fapi.github.com
 ```
 
-### Success Response (HTTP 200)
+### Success response (HTTP 200)
 
 ```json
 {
@@ -175,7 +175,7 @@ grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_tok
 
 `access_token` must be non-empty. Gatekeeper treats an empty value as an error.
 
-### Error Response (non-200)
+### Error response (non-200)
 
 Gatekeeper treats any non-200 status as a failure and returns HTTP 502 to the client. Use standard OAuth error format:
 
@@ -188,7 +188,7 @@ Gatekeeper treats any non-200 status as a failure and returns HTTP 502 to the cl
 
 > **Note:** Do not echo `actor_token` in error responses. Gatekeeper logs up to 200 bytes of STS error bodies, so sensitive values would appear in proxy logs.
 
-## Implementation Checklist
+## Implementation checklist
 
 - [ ] Accept `POST` with `Content-Type: application/x-www-form-urlencoded`
 - [ ] Validate HTTP Basic auth credentials (`client_id` / `client_secret`)
@@ -223,7 +223,7 @@ curl --cacert ca.crt --proxy http://127.0.0.1:9080 \
 
 The proxy log shows credential injection with the grant name.
 
-## Next Steps
+## Next steps
 
 - [Network Lockdown](./07-network-lockdown.md) — combine token exchange with strict network policy
 - [OpenTelemetry](./08-opentelemetry.md) — trace token exchange calls end-to-end

@@ -32,6 +32,14 @@
 - [OpenTelemetry](./content/guides/08-opentelemetry.md) — Distributed tracing, metrics, and logs
 - [Go Library](./content/guides/09-go-library.md) — Embed the proxy engine in a custom Go application
 - [WebSocket Support](./content/guides/10-websockets.md) — WebSocket upgrades through TLS interception
+- [Deploying Behind a TCP Load Balancer](./content/guides/11-load-balancer-proxy-protocol.md) — recover real client IPs with PROXY protocol behind a TCP-terminating load balancer
+- [Running the Container Image](./content/guides/12-docker-deployment.md) — pull and run the published container image with config and CA material mounted
+- [Postgres Data Plane with Neon](./content/guides/13-postgres-neon.md) — run the Postgres listener against a Neon project with run-token authentication
+- [Host Command Credentials](./content/guides/14-process-credentials.md) — inject credentials from any secret manager that has a CLI via the process source
+- [GCP Service Account Tokens](./content/guides/15-gcp-service-account.md) — mint and refresh GCP OAuth2 access tokens from a service account key
+- [MCP Relay Setup](./content/guides/16-mcp-relay.md) — configure the MCP relay end-to-end using the Go library
+- [Credential Caching, Refresh, and Invalidation](./content/guides/17-credential-lifecycle.md) — the full credential lifecycle from startup fetch through 401/403-triggered eviction
+- [Keep Policy Scopes](./content/guides/18-keep-policy-scopes.md) — the http, mcp-<server>, and llm-gateway policy scopes and their denial logs
 
 ### Reference
 

@@ -12,7 +12,7 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It sits 
 
 - **Credential injection** — Resolve credentials from environment variables, static values, host command output, AWS Secrets Manager, GCP Secret Manager, or GitHub App tokens, then inject them as HTTP headers for matching hosts.
 - **TLS interception** — Man-in-the-middle proxy with per-host certificate generation from a configured CA. The proxy terminates TLS, reads plaintext requests, injects credentials, and forwards to the real server.
-- **Multiple credential sources** — Pluggable backend system. Environment variables, static values, and host commands (`process`) for development and local helpers. AWS Secrets Manager, GCP Secret Manager, and GitHub App tokens for production. RFC 8693 token exchange for multi-user deployments.
+- **Multiple credential sources** — Pluggable source system. Environment variables, static values, and host commands (`process`) for development and local helpers. AWS Secrets Manager, GCP Secret Manager, and GitHub App tokens for production. RFC 8693 token exchange for multi-user deployments.
 - **Network policy** — Allow or deny traffic by host pattern. `permissive` mode allows all traffic. `strict` mode denies all traffic except explicitly allowed hosts.
 - **Postgres data plane** — A second listener that speaks the Postgres wire protocol, authenticating clients with a run token and resolving the real upstream password (a static value or a per-branch Neon password) so the database secret never reaches the client.
 - **MCP relay** — Forward Model Context Protocol requests to upstream servers with credential injection and SSE streaming.

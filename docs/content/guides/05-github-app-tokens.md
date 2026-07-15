@@ -4,7 +4,7 @@ description: "Generate short-lived GitHub installation tokens from a GitHub App 
 keywords: ["gatekeeper", "GitHub App", "installation tokens", "auto-refresh"]
 ---
 
-# GitHub App Tokens
+# GitHub App tokens
 
 Generate short-lived GitHub installation tokens from a GitHub App private key. Tokens refresh automatically in the background.
 
@@ -55,7 +55,7 @@ log:
 
 Set either `private_key_path` or `private_key_env`, not both.
 
-### Private Key via Environment Variable
+### Private key via environment variable
 
 For environments where files are not practical (containers, CI):
 
@@ -71,7 +71,7 @@ source:
 export GITHUB_APP_PRIVATE_KEY="$(cat github-app-key.pem)"
 ```
 
-## Auto-Refresh Behavior
+## Auto-refresh behavior
 
 GitHub installation tokens expire after one hour. Gatekeeper refreshes them automatically:
 
@@ -82,7 +82,7 @@ GitHub installation tokens expire after one hour. Gatekeeper refreshes them auto
 
 When multiple credential entries share the same `github-app` source (e.g., `api.github.com` and `github.com`), a single refresh goroutine updates all of them.
 
-## Start the Proxy
+## Start the proxy
 
 ```bash
 gatekeeper --config gatekeeper.yaml
@@ -108,7 +108,7 @@ level=DEBUG msg="credential refreshed" host=api.github.com grant=github ttl=1h0m
 
 See [`examples/gatekeeper-github-app.yaml`](https://github.com/majorcontext/gatekeeper/blob/main/examples/gatekeeper-github-app.yaml) for a complete working example.
 
-## Next Steps
+## Next steps
 
 - [Token Exchange](./06-token-exchange.md) — per-user credential resolution via RFC 8693
 - [Network Lockdown](./07-network-lockdown.md) — restrict proxy traffic to specific hosts

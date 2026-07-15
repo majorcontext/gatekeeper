@@ -4,11 +4,11 @@ description: "How Gatekeeper matches hostnames, injects authentication headers, 
 keywords: ["gatekeeper", "credential injection", "host matching", "authorization headers"]
 ---
 
-# Credential Injection
+# Credential injection
 
 Gatekeeper injects authentication headers into proxied HTTP requests based on hostname matching. Clients never handle raw credentials — they send requests through the proxy, which resolves the correct credential and sets the appropriate header before forwarding to the upstream server.
 
-## Host Matching
+## Host matching
 
 Each credential is configured with a `host` pattern. When gatekeeper intercepts a request, it looks up credentials for the target hostname, stripping any port from the request host unconditionally before comparing — there is no notion of a default or matched port in credential lookup.
 
@@ -23,7 +23,7 @@ A `host` pattern cannot contain a port — `credentials[].host` is validated and
 
 Host comparison is case-insensitive. `API.GitHub.com` matches `api.github.com`.
 
-## Header Injection
+## Header injection
 
 The default injection header is `Authorization`. Override it with the `header` field:
 
@@ -42,7 +42,7 @@ Gatekeeper injects credentials in two modes:
 
 2. **Auto-injection.** If the client sends no matching header, gatekeeper injects the credential unconditionally. When multiple credentials share the same header name for a host, the `claude` grant is deprioritized — it is only injected when the client explicitly sends a placeholder.
 
-## Grant Names
+## Grant names
 
 The `grant` field is an optional label that identifies a credential for logging and MCP relay matching. Grant names appear in canonical log lines and OpenTelemetry span attributes.
 
@@ -57,7 +57,7 @@ credentials:
 
 Built-in grant names (`github`, `anthropic`, `openai`, `aws`, and others) map to predefined host patterns. These mappings are used by network policy to auto-allow hosts for configured grants.
 
-## Prefix and Format
+## Prefix and format
 
 For `Authorization` headers, gatekeeper ensures the value includes an auth scheme prefix. The behavior depends on configuration:
 
@@ -77,7 +77,7 @@ credentials:
       var: GITHUB_TOKEN
 ```
 
-## Multiple Credentials Per Host
+## Multiple credentials per host
 
 A host can have multiple credential entries with different header names. All matching credentials are injected:
 
@@ -98,6 +98,6 @@ credentials:
 
 When multiple credentials share the same header name, placeholder replacement takes priority. If no placeholder matched, auto-injection picks the non-`claude` grant to avoid overriding explicit OAuth flows.
 
-## Credential Stripping
+## Credential stripping
 
 Gatekeeper removes `Proxy-Authorization` and `Proxy-Connection` headers from all forwarded requests. These are hop-by-hop headers used between the client and the proxy — they must never reach the upstream server. Injected credential headers (like `Authorization`) are also redacted in log output to prevent credential leakage.

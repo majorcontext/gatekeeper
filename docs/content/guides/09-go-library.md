@@ -4,7 +4,7 @@ description: "Import Gatekeeper as a Go module to embed the credential-injecting
 keywords: ["gatekeeper", "Go library", "embedding", "proxy API"]
 ---
 
-# Go Library Usage
+# Go library usage
 
 Import gatekeeper as a Go module to embed the proxy in a custom application. This is how [moat](https://github.com/majorcontext/moat) integrates gatekeeper -- importing the proxy engine and adding per-run credential scoping via a daemon layer.
 
@@ -18,7 +18,7 @@ Import gatekeeper as a Go module to embed the proxy in a custom application. Thi
 go get github.com/majorcontext/gatekeeper/proxy
 ```
 
-## Basic Setup
+## Basic setup
 
 Create a proxy, load a CA, and set credentials:
 
@@ -109,7 +109,7 @@ p.SetContextResolver(func(token string) (*proxy.RunContextData, bool) {
 
 Each caller authenticates via `Proxy-Authorization` (or the username/password in `HTTP_PROXY`). The resolver returns per-caller credentials, network policy, and MCP server configuration.
 
-## How Moat Uses Gatekeeper
+## How Moat uses Gatekeeper
 
 Moat imports `github.com/majorcontext/gatekeeper/proxy` and layers a daemon on top:
 
@@ -120,7 +120,7 @@ Moat imports `github.com/majorcontext/gatekeeper/proxy` and layers a daemon on t
 
 Gatekeeper has no knowledge of moat. It exposes the `ContextResolver` hook and `RunContextData` struct; moat provides the implementation.
 
-## OTel Middleware
+## OTel middleware
 
 Wrap the proxy with `OTelHandler` for OpenTelemetry instrumentation:
 
@@ -131,6 +131,6 @@ log.Fatal(http.ListenAndServe("127.0.0.1:9080", handler))
 
 This adds request spans, duration histograms, and request counters. See [OpenTelemetry](./08-opentelemetry.md) for details on emitted signals.
 
-## Next Steps
+## Next steps
 
 - [WebSocket Support](./10-websockets.md) — WebSocket upgrades through the proxy

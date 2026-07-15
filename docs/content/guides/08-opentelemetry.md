@@ -75,7 +75,7 @@ Four instruments are registered under the `gatekeeper` meter:
 
 Gatekeeper bridges `slog` output to OTel via `otelslog`. Structured log records are sent to both the configured slog handler (text/JSON to stderr) and the OTel log exporter. Log records carry trace context for correlation.
 
-## Local Collector Example
+## Local collector example
 
 Run a local OpenTelemetry Collector with Jaeger:
 
@@ -106,6 +106,6 @@ Export failures (for example, no collector listening at the configured `OTEL_EXP
 
 > **Note:** Without a registered OTel error handler, export errors fall through to the standard library `log` package, which gatekeeper's logging setup rewires through the configured slog handler at `INFO` level. Gatekeeper registers its own handler so these errors log at `DEBUG` instead.
 
-## Next Steps
+## Next steps
 
 - [Go Library](./09-go-library.md) — embed gatekeeper in a Go application with custom instrumentation
