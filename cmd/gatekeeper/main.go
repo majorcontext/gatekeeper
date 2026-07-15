@@ -5,8 +5,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,7 +28,35 @@ import (
 
 var version = "dev"
 
-func initOTel(ctx context.Context) (shutdown func(context.Context) error, err error) {
+// otelSDKDisabled reports whether the standard OTEL_SDK_DISABLED env var
+// requests that the OTel SDK be disabled entirely. Per the OpenTelemetry
+// spec this is a boolean env var: only a case-insensitive "true" disables
+// the SDK — absent, "false", or any other value leaves it enabled.
+func otelSDKDisabled(getenv func(string) string) bool {
+	return strings.EqualFold(getenv("OTEL_SDK_DISABLED"), "true")
+}
+
+// logOTelError is registered as the global OTel error handler. Without it,
+// SDK/export errors (e.g. no collector reachable) fall through to the OTel
+// SDK's default handler, which calls the standard library "log" package.
+// gatekeeper's logging setup (configureLogging in gatekeeper.go) calls
+// slog.SetDefault, which per slog's documented behavior rewires the
+// standard "log" package's output through the configured slog handler at
+// INFO level — so every failed export attempt (once per batch interval,
+// with no backoff between attempts) produced an INFO log line that drowned
+// the canonical request lines whenever no collector was present. Logging
+// export errors at DEBUG here keeps them observable without the noise.
+func logOTelError(err error) {
+	slog.Default().Debug("otel error", "error", err)
+}
+
+func initOTel(ctx context.Context, getenv func(string) string) (shutdown func(context.Context) error, err error) {
+	if otelSDKDisabled(getenv) {
+		return func(context.Context) error { return nil }, nil
+	}
+
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(logOTelError))
+
 	var shutdowns []func(context.Context) error
 	cleanup := func() {
 		for _, fn := range shutdowns {
@@ -115,7 +145,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	otelShutdown, err := initOTel(ctx)
+	otelShutdown, err := initOTel(ctx, os.Getenv)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error initializing otel: %v\n", err)
 		os.Exit(1)
