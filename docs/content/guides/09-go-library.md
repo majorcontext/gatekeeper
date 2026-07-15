@@ -69,6 +69,7 @@ func main() {
 | `SetCA(ca)`                  | Set the CA for TLS interception                      |
 | `SetCredentialWithGrant(host, header, value, grant)` | Set a static credential for a host  |
 | `SetCredentialResolver(host, resolver)`               | Set a dynamic per-request resolver  |
+| `SetCredentialResolverWithStripHeaders(host, resolver, headers...)` | Set a dynamic resolver that also removes request headers it consumes; prefer this over `SetCredentialResolver` when the resolver reads a subject-identity or other header that must not reach the upstream, since the proxy strips those headers even when a better-matched static credential skips calling the resolver |
 | `SetNetworkPolicy(policy, allows, grants)`            | Configure network allow/deny        |
 | `SetAuthToken(token)`        | Require proxy authentication                         |
 | `SetContextResolver(fn)`     | Map proxy auth tokens to per-caller contexts         |

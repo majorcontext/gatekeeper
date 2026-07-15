@@ -71,6 +71,7 @@ Gatekeeper initializes OTLP HTTP exporters for traces, metrics, and logs. All co
 | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Override endpoint for logs only |
 | `OTEL_RESOURCE_ATTRIBUTES` | Additional resource attributes (e.g., `deployment.environment=production`) |
 | `OTEL_SERVICE_NAME` | Override the service name (default: `gatekeeper`) |
+| `OTEL_SDK_DISABLED` | When exactly `true` (case-insensitive; any other value is treated as unset), disables the OTel SDK entirely — no exporters are created and no traces, metrics, or logs are emitted. |
 
 Gatekeeper registers the following OTel resource attributes at startup:
 

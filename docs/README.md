@@ -27,6 +27,7 @@
 - [GCP Secret Manager](./content/guides/04-gcp-secret-manager.md) — Fetch credentials from Google Cloud Secret Manager
 - [GitHub App Tokens](./content/guides/05-github-app-tokens.md) — Auto-refreshing short-lived GitHub installation tokens
 - [Token Exchange](./content/guides/06-token-exchange.md) — Per-user credential resolution via RFC 8693
+  - [Token Exchange Endpoint](./token-exchange-endpoint.md) — STS-implementer contract: wire format, auth, and caching semantics for the endpoint gatekeeper calls
 - [Network Lockdown](./content/guides/07-network-lockdown.md) — Restrict proxy traffic to specific hosts
 - [OpenTelemetry](./content/guides/08-opentelemetry.md) — Distributed tracing, metrics, and logs
 - [Go Library](./content/guides/09-go-library.md) — Embed the proxy engine in a custom Go application
@@ -48,6 +49,7 @@
 docs/
   README.md                     # This file
   STYLE-GUIDE.md                # Writing guidelines
+  token-exchange-endpoint.md    # STS-implementer contract for the token-exchange credential source
   content/                      # User-facing documentation
     getting-started/
     concepts/

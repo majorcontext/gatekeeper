@@ -16,13 +16,13 @@ Start a credential-injecting proxy in under five minutes.
 
 ## Step 1: Generate a CA certificate
 
-The proxy needs a CA to sign per-host TLS certificates. Use the included script:
+The proxy needs a CA to sign per-host TLS certificates. From the repository root, run the included script:
 
 ```bash
-cd examples && ./gen-ca.sh
+./examples/gen-ca.sh
 ```
 
-This creates `ca.crt` and `ca.key` in the `examples/` directory.
+This creates `ca.crt` and `ca.key` in the `examples/` directory. The remaining steps assume commands run from the repository root, so the config and `curl` examples below reference `examples/ca.crt`.
 
 ## Step 2: Write a minimal config
 
@@ -88,7 +88,7 @@ Gatekeeper intercepts the connection, injects the `Authorization: Bearer sk-xxxx
 The proxy logs each request with credential injection details:
 
 ```text
-level=INFO msg=request http_method=GET http_host=api.example.com http_path=/v1/resource http_status=200 duration_ms=142 credential_injected=true injected_headers=Authorization grants=example-api
+level=INFO msg=request request_id=req_01h455vb4pex5vsknk084sn02q http_method=GET http_host=api.example.com http_path=/v1/resource http_status=200 duration_ms=142 proxy_type=connect client_ip=127.0.0.1 credential_injected=true injected_headers=authorization grants=example-api
 ```
 
 The `credential_injected=true` and `grants=example-api` fields confirm the proxy injected the credential.

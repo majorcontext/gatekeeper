@@ -269,7 +269,7 @@ When set to `"basic"`, the credential is encoded as HTTP Basic authentication: `
 
 ### credentials[].grant
 
-Label for logging and metrics. Does not affect credential injection behavior.
+Label for logging and metrics.
 
 ```yaml
 credentials:
@@ -282,6 +282,8 @@ credentials:
 - **Default:** —
 
 Grant names appear in the `grants` field of canonical request log lines and in OTel span attributes.
+
+Grant names normally have no effect on which credential is injected. The one exception: when multiple credentials targeting the same host share a header name, gatekeeper breaks the tie by grant name. If the client sent a placeholder value in that header, the credential with `grant: claude` wins (letting the client explicitly opt into that grant). Otherwise, for unprompted auto-injection, a non-`claude` grant wins over `claude`, so `claude` is only injected when the client explicitly requests it via a placeholder. This tie-break only matters when two or more credentials collide on the same host and header; with no collision, `grant` is purely a logging label.
 
 ### credentials[].source
 
@@ -299,7 +301,7 @@ credentials:
 - **Required:** Yes
 - **Default:** —
 
-The `type` field selects the source backend. Each type accepts different fields. Extraneous fields for the selected type cause a validation error.
+The `type` field selects the credential source. Each type accepts different fields. Extraneous fields for the selected type cause a validation error.
 
 ### credentials[].postgres
 

@@ -60,6 +60,12 @@ When gatekeeper intercepts a CONNECT tunnel for a host, `CA.GenerateCert` create
 
 The CA supports RSA, EC, and Ed25519 private keys via PKCS1, PKCS8, and SEC 1 formats.
 
+## ALPN Negotiation
+
+The client-facing TLS handshake advertises `h2` before `http/1.1` in its ALPN `NextProtos` list, so gatekeeper prefers HTTP/2 with clients that support it and falls back to HTTP/1.1 otherwise. The negotiated protocol determines which transport gatekeeper uses to reach the upstream server: when the client negotiated `h2`, gatekeeper forwards over an `http2.Transport`, since an h2 request cannot be round-tripped through an HTTP/1.1 transport without framing errors; otherwise it forwards over a standard `http.Transport`. This matters for gRPC clients, which require h2 end-to-end — gatekeeper's `http2.Transport` never falls back to HTTP/1.1, so if the upstream only speaks HTTP/1.1, a connection from an h2 client to that upstream fails.
+
+WebSocket upgrades follow a related but separate path through TLS interception — see [WebSockets](../guides/10-websockets.md).
+
 ## Why the Client Must Trust the CA
 
 The dynamically generated certificates are not signed by a public CA. Clients reject them unless they explicitly trust gatekeeper's CA certificate. In container environments, the CA certificate is mounted into the container's trust store (e.g., `/etc/ssl/certs/`). Without this, every HTTPS request through the proxy fails with a certificate verification error.

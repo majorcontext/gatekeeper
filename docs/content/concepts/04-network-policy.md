@@ -69,6 +69,22 @@ When gatekeeper has path-level rules (configured via `RequestChecker`), it evalu
 
 When a request targets a host gateway address (synthetic hostname or loopback), gatekeeper applies a separate check: the destination port must be in the run's `AllowedHostPorts` list. This prevents containers from reaching arbitrary services on the host machine. See [Host Gateway](./07-host-gateway.md) for details.
 
+## HTTP-Scope Keep Policy
+
+On intercepted requests, a second, distinct policy layer runs after network policy allows the request: if the run's `RunContextData.KeepEngines` has an entry keyed `"http"`, gatekeeper evaluates that Keep engine against the request before forwarding it. Unlike network policy, this check can inspect the request body — the engine's rules are evaluated against a parsed HTTP call (method, host, headers, and body), not just the host.
+
+This layer is engine-driven: the `"http"` engine comes from an embedder's `RunContextData` (moat's daemon layer compiles Keep rule files into engines and attaches them per run), not from `gatekeeper.yaml`. Standalone gatekeeper has no YAML knob for it.
+
+Body inspection fails closed — if the body can't be parsed or evaluation errors, the request is denied rather than passed through. A denial returns `403 Forbidden` with `X-Moat-Blocked: keep-policy` (distinct from network policy's `407`/`request-rule` denials) and a plaintext body describing the host and, for body-inspection failures, that the body couldn't be inspected.
+
 ## Blocked Response Format
 
-Blocked requests receive a `407 Proxy Authentication Required` response with a `Proxy-Authenticate: Moat-Policy` header and a plaintext body explaining which host was denied. The `X-Moat-Blocked` header indicates the denial reason (`request-rule` for network policy, `host-service` for host gateway blocks).
+Blocked requests receive one of two denial styles depending on which layer denied them:
+
+| Layer | Status | `X-Moat-Blocked` |
+|---|---|---|
+| Network policy (host/path rules) | `407 Proxy Authentication Required` with `Proxy-Authenticate: Moat-Policy` | `request-rule` |
+| Host gateway | `407 Proxy Authentication Required` with `Proxy-Authenticate: Moat-Policy` | `host-service` |
+| HTTP-scope Keep policy | `403 Forbidden` | `keep-policy` |
+
+Each response carries a plaintext body explaining which host was denied.

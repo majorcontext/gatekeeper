@@ -36,12 +36,13 @@ A relay request follows this path:
 
 A request to `/mcp/context7/v1/endpoint` forwards to `https://mcp.context7.com/mcp/v1/endpoint` with the `Authorization` header set to the resolved credential.
 
+## Daemon-Mode Token-Embedded Path
+
+The relay path above (`/mcp/{server-name}`) relies on `Proxy-Authorization` to resolve run context, which requires the request to go through the proxy mechanism. When gatekeeper runs with a `ContextResolver` (daemon mode — moat's per-run registration, not standalone `gatekeeper.yaml` mode) and a request arrives directly rather than proxied, gatekeeper also serves `/mcp/{token}/{server-name}[/path]`: the run's proxy auth token is embedded in the URL itself, since a direct request carries no `Proxy-Authorization` header. Gatekeeper extracts the token, resolves it to run context, strips the token from the path, and dispatches to the same relay handling described above. This form only exists in daemon mode — standalone gatekeeper has no `ContextResolver` and does not serve it.
+
 ## SSE Streaming
 
-MCP uses Server-Sent Events (SSE) for streaming responses. Gatekeeper supports this by flushing response data incrementally:
-
-- After writing response headers, gatekeeper calls `Flush()` on the `http.ResponseWriter` if it implements `http.Flusher`.
-- The response body is streamed with `io.Copy`, delivering events to the client as they arrive from the upstream server.
+MCP uses Server-Sent Events (SSE) for streaming responses. Gatekeeper supports this with a per-chunk flush loop (`streamResponseBody`), not `io.Copy`'s buffered copy: it reads the upstream body in 4096-byte chunks and, after writing each chunk to the client, calls `Flush()` on the `http.ResponseWriter` if it implements `http.Flusher` — so events reach the client as they arrive rather than waiting for a larger buffer to fill.
 
 The relay HTTP client has no client-level timeout — MCP SSE streams are long-lived connections that may remain open indefinitely.
 

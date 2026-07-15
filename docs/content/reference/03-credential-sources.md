@@ -450,4 +450,14 @@ OAuth token type URI for the actor token.
 - **Required:** No
 - **Default:** `"urn:ietf:params:oauth:token-type:access_token"`
 
-Exchanged tokens are cached per subject (and actor, if present) using the TTL from the STS `expires_in` response field. If the STS does not return `expires_in`, a default TTL of 5 minutes is used. Concurrent requests for the same subject are coalesced into a single STS call.
+Exchanged tokens are cached per subject (and actor, if present) using the TTL from the STS `expires_in` response field, but the cached TTL is always capped at 1 minute regardless of what the STS advertises — a longer `expires_in` only means the token may remain valid that long, not that it stays valid, since the upstream credential behind the exchange can be revoked or rotated without gatekeeper's knowledge. If the STS does not return `expires_in` (or returns a non-positive value), the same 1-minute cap is used as the TTL. Concurrent requests for the same subject are coalesced into a single STS call via singleflight, so the 1-minute cap does not translate into an STS call per request.
+
+See [Credential invalidation](#credential-invalidation) below for how gatekeeper evicts a cached token before its TTL expires.
+
+## Credential invalidation
+
+When the upstream server rejects a forwarded request with `401 Unauthorized` or `403 Forbidden`, gatekeeper invalidates every credential that was injected into that request, so the next request re-resolves rather than replaying a credential the destination has already refused. This applies to any credential source that supports invalidation, not just `token-exchange`. Statuses other than 401/403 are left alone — a 5xx says nothing about the credential's validity, and a 401/403 also covers cases unrelated to a stale credential (rate limits, missing repo access), not only rotation.
+
+For `token-exchange`, invalidation evicts the cached token for that subject (and actor) so the next request performs a fresh exchange. Evictions are rate-limited per subject/actor key to a 10-second cooldown: repeated 401/403 responses for the same key within 10 seconds are no-ops after the first eviction. This bounds how often a client that is looping on a failing, non-idempotent request (e.g., a repeated `git push`) can force STS calls; the trade-off is that a genuinely rotated credential can take up to 10 seconds to be picked up after the first eviction.
+
+Invalidation is evict-only — the request that triggered it is not retried by gatekeeper.

@@ -10,7 +10,7 @@ Gatekeeper evaluates Anthropic API responses against [Keep](https://github.com/m
 
 ## Overview
 
-LLM policy evaluation is configured through `RunContextData.KeepEngines` — a map of hostnames to Keep engine instances. When a proxied response matches a host with a Keep engine, gatekeeper buffers the response body, evaluates it against the engine's rules, and either forwards or blocks the response.
+`RunContextData.KeepEngines` is a map keyed by fixed scope names, not hostnames: `"llm-gateway"` for LLM policy, `"http"` for the HTTP-scope Keep policy applied to intercepted requests (see [Network Policy](../concepts/04-network-policy.md)), and `"mcp-<server-name>"` for per-MCP-server tool-call policy. LLM policy evaluation looks up `KeepEngines["llm-gateway"]` and only runs when the response's request host is `api.anthropic.com` — that host is hardcoded, not derived from a hostname-keyed lookup. When that engine is set and the host matches, gatekeeper buffers the response body, evaluates it against the engine's rules, and either forwards or blocks the response.
 
 This feature is primarily used through moat's configuration layer, which compiles Keep rule files into engines and attaches them to per-run context. Standalone gatekeeper does not expose Keep configuration in `gatekeeper.yaml`.
 
@@ -18,7 +18,7 @@ This feature is primarily used through moat's configuration layer, which compile
 
 ## Evaluation flow
 
-1. The proxy intercepts an HTTPS response from a host that has a Keep engine configured (e.g., `api.anthropic.com`).
+1. The proxy intercepts an HTTPS response from `api.anthropic.com` — the only host LLM policy evaluates — when `RunContextData.KeepEngines["llm-gateway"]` is set.
 2. The response body is buffered up to 10 MB (`maxLLMResponseSize`). Responses exceeding this limit are denied (fail-closed).
 3. If the response is gzip-compressed, it is decompressed for evaluation.
 4. The response is evaluated based on its `Content-Type`:
@@ -41,7 +41,7 @@ All evaluation errors result in denial:
 
 ## Denied response format
 
-When a response is denied, the client receives an HTTP 200 with a JSON body matching the Keep LLM gateway format:
+When a response is denied, the client receives an HTTP 400 with a JSON body matching the Keep LLM gateway format:
 
 ```json
 {

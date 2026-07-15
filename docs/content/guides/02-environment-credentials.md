@@ -53,7 +53,15 @@ export GITHUB_TOKEN="ghp_xxxxxxxxxxxxxxxxxxxx"
 gatekeeper --config gatekeeper.yaml
 ```
 
-Gatekeeper resolves the credential at startup. For `Authorization` headers, the auth scheme is auto-detected from the token prefix (`ghp_` maps to `token`, `github_pat_` to `Bearer`). Override with the `prefix` field if needed.
+Gatekeeper resolves the credential at startup. For `Authorization` headers, the auth scheme is auto-detected from the token prefix:
+
+| Token prefix | Auth scheme |
+|---|---|
+| `ghp_`, `ghs_` | `token` |
+| `gho_`, `github_pat_` | `Bearer` |
+| any other value | `Bearer` |
+
+Override with the `prefix` field if needed.
 
 ## Make a Request
 
@@ -70,7 +78,7 @@ The proxy intercepts the TLS connection, injects the `Authorization` header, and
 Check the proxy log output. A successful injection produces a line like:
 
 ```text
-level=INFO msg=request http_method=GET http_host=api.github.com http_status=200 credential_injected=true injected_headers=Authorization grants=github
+level=INFO msg=request http_method=GET http_host=api.github.com http_status=200 credential_injected=true injected_headers=authorization grants=github
 ```
 
 ## Next Steps

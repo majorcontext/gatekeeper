@@ -2,6 +2,8 @@
 
 A credential-injecting TLS-intercepting proxy. Route HTTPS traffic through Gatekeeper and it transparently injects authentication headers based on hostname matching. Clients never see raw credentials.
 
+Full documentation: [docs/README.md](docs/README.md).
+
 ```bash
 # Start the proxy
 gatekeeper --config gatekeeper.yaml
@@ -21,6 +23,15 @@ go install github.com/majorcontext/gatekeeper/cmd/gatekeeper@latest
 ```
 
 **Requires:** Go 1.25+
+
+Or pull the published Docker image:
+
+```bash
+docker pull ghcr.io/majorcontext/gatekeeper:latest
+
+docker run --rm -v ./gatekeeper.yaml:/etc/gatekeeper/gatekeeper.yaml \
+  ghcr.io/majorcontext/gatekeeper --config /etc/gatekeeper/gatekeeper.yaml
+```
 
 ## How it works
 
@@ -130,6 +141,30 @@ network:
 Policies: `permissive` (allow all), `strict` (deny all, allow listed).
 
 Behind a TCP-terminating load balancer (e.g. GCP's global TCP Proxy LB), every connection's peer address is the load balancer's, not the real client — `network.proxy_protocol: true` parses a PROXY protocol v1/v2 header from the LB and uses its advertised source as the `client_ip` recorded in request logs. It's fail-open (headerless connections, like LB health checks, fall back to the raw peer address) and should only be enabled when the port is reachable solely through the load balancer, since the header is otherwise forgeable by any direct client.
+
+## MCP relay
+
+For MCP clients that can't route through `HTTP_PROXY`, Gatekeeper relays Model Context Protocol requests directly, injecting credentials and streaming SSE responses:
+
+```
+POST http://127.0.0.1:9080/mcp/context7/v1/endpoint
+```
+
+Gatekeeper resolves the credential configured for the `context7` MCP server and injects it before forwarding to the real server. MCP servers are registered via `MCPServerConfig` in the Go library — not exposed in `gatekeeper.yaml` — which is how [Moat](https://github.com/majorcontext/moat)'s daemon layer wires it up per run.
+
+## LLM policy
+
+Gatekeeper can evaluate Anthropic API responses against [Keep](https://github.com/majorcontext/keep) policy rules before they reach the client, blocking a response that violates a rule instead of forwarding it. Like MCP relay, this is configured via `RunContextData.KeepEngines` in the Go library, not `gatekeeper.yaml` — it's primarily used through Moat's daemon layer.
+
+## Host gateway
+
+A synthetic hostname used inside a sandboxed container can be mapped to the real host machine's IP, so containers reach host services without relying on `host.docker.internal`:
+
+```
+container ──▶ moat-host-gateway:8080 ──▶ gatekeeper ──▶ {HostGatewayIP}:8080
+```
+
+Set via `RunContextData.HostGateway`/`HostGatewayIP` in the Go library. Destination ports must be explicitly listed in `AllowedHostPorts` — traffic to unlisted ports is denied.
 
 ## Postgres data plane
 
