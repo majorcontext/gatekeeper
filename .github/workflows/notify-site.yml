@@ -23,6 +23,10 @@ on:
 jobs:
   dispatch:
     runs-on: ubuntu-latest
+    # This job uses SITE_DISPATCH_TOKEN, never GITHUB_TOKEN — pin the default
+    # token to read-only so its scope can't silently widen with org defaults.
+    permissions:
+      contents: read
     steps:
       - name: Send repository_dispatch to majorcontext.com
         env:
