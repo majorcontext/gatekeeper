@@ -29,6 +29,7 @@ import (
 	"github.com/majorcontext/gatekeeper/credentialsource"
 	"github.com/majorcontext/gatekeeper/proxy"
 
+	"github.com/pires/go-proxyproto"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -759,6 +760,40 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("starting proxy listener: %w", err)
 	}
 
+	// GCE deployments sit behind a GCP global TCP Proxy load balancer, which
+	// terminates the client TCP connection and dials gatekeeper from its own
+	// front-end IP (35.191.0.0/16) — so without this, the client_ip request-log
+	// attribute always shows the LB, never the real client. When enabled, the
+	// LB prepends a PROXY protocol v1/v2 header naming the real source
+	// address; wrapping the listener here rewrites each accepted conn's
+	// RemoteAddr() to that address before http.Server (and therefore every
+	// request-logging path, including CONNECT-intercepted inner requests,
+	// which all log from the outer request's RemoteAddr) ever sees it.
+	//
+	// The policy is pinned to USE (rather than left at the library default)
+	// so a connection without a PROXY header still passes through using its
+	// real TCP peer address instead of being rejected — fail-open, so LB
+	// health checks and direct probes of the port keep working.
+	if s.cfg.Network.ProxyProtocol {
+		ln = &proxyproto.Listener{
+			Listener:          ln,
+			ReadHeaderTimeout: 10 * time.Second,
+			ConnPolicy: func(proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) {
+				return proxyproto.USE, nil
+			},
+		}
+		// go-proxyproto has no error-callback hook for header parse failures
+		// in this version: ValidateHeader only runs against a *successfully*
+		// parsed header, and header parsing itself is lazy — it happens
+		// inside the returned Conn on the first Read/RemoteAddr, not in
+		// Accept. A malformed header (as opposed to a merely absent one,
+		// which is the correct, silent USE-policy fallback) therefore
+		// surfaces only as an error from Conn.Read, which net/http treats as
+		// a dead connection and closes without a trace. Wrap the listener so
+		// that case gets one DEBUG log line instead of vanishing silently.
+		ln = &proxyProtoLogListener{Listener: ln}
+	}
+
 	slog.Info("gatekeeper listening", "addr", ln.Addr().String(), "version", s.version)
 
 	s.mu.Lock()
@@ -816,6 +851,52 @@ func (s *Server) Start(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return s.Stop(shutdownCtx)
+}
+
+// proxyProtoLogListener wraps a *proxyproto.Listener so that a connection
+// whose PROXY header fails to parse gets a single DEBUG log line before it's
+// dropped. See the comment where this is constructed in Start for why the
+// hook is needed at all.
+type proxyProtoLogListener struct {
+	net.Listener
+}
+
+func (l *proxyProtoLogListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	// Prefer the raw underlying TCP conn's address over conn.RemoteAddr():
+	// on a *proxyproto.Conn, RemoteAddr() itself triggers header processing,
+	// which would force a blocking header read here in Accept before the
+	// peer has necessarily sent anything. Raw() has no such side effect.
+	peer := conn.RemoteAddr()
+	if pc, ok := conn.(*proxyproto.Conn); ok {
+		peer = pc.Raw().RemoteAddr()
+	}
+	return &proxyProtoLogConn{Conn: conn, peer: peer}, nil
+}
+
+// proxyProtoLogConn wraps an accepted connection to detect and log genuine
+// PROXY header parse failures. Header parsing is lazy: it happens inside the
+// wrapped proxyproto.Conn on the first Read, not in Accept, and a parse
+// failure surfaces only as an error from that Read. A connection that simply
+// has no PROXY header at all is not an error here (proxyproto's USE policy
+// falls back to the real peer address for it) and must stay quiet.
+type proxyProtoLogConn struct {
+	net.Conn
+	peer net.Addr
+	once sync.Once
+}
+
+func (c *proxyProtoLogConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if err != nil && !errors.Is(err, proxyproto.ErrNoProxyProtocol) && strings.HasPrefix(err.Error(), "proxyproto:") {
+		c.once.Do(func() {
+			slog.Debug("dropping connection: malformed PROXY protocol header", "peer", c.peer.String(), "err", err)
+		})
+	}
+	return n, err
 }
 
 // Stop gracefully shuts down the proxy server and all background refresh goroutines.

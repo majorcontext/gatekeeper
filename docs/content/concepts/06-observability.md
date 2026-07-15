@@ -60,6 +60,14 @@ Gatekeeper emits one wide structured log entry per request at completion. Each l
 
 Log level is determined by outcome: `ERROR` for server errors or transport failures, `WARN` for policy denials or client errors, `INFO` for successful requests.
 
+## Client IP Attribution Behind a Load Balancer
+
+By default, `client_ip` comes from the raw TCP peer address of the proxy listener's accepted connection. That's accurate for a directly-exposed listener, but not for one that sits behind a TCP-terminating load balancer (e.g. GCP's global TCP Proxy load balancer) — every connection appears to originate from the load balancer's own front-end range (`35.191.0.0/16` for GCP), not the real client.
+
+Setting `network.proxy_protocol: true` wraps the proxy listener with PROXY protocol v1/v2 parsing. When the load balancer prepends a PROXY header, gatekeeper uses its advertised source address as the connection's client address instead of the TCP peer, flowing through to `client_ip` on every request path, including CONNECT-intercepted inner requests. Connections opened without a header — load balancer health checks, direct probes of the port — fall back to the raw TCP peer address rather than being rejected.
+
+Because the header is honored from any peer that can reach the listener, only enable `proxy_protocol` when the port is reachable solely through the load balancer, and never use `client_ip` for security decisions — it's a logging convenience, not an authenticated identity.
+
 ## Request ID Tracking
 
 Every request receives a unique identifier. Gatekeeper checks for an `X-Request-Id` header from the caller. If present, it is reused. Otherwise, gatekeeper generates a TypeID with a `req` prefix (e.g., `req_01h455vb4pex5vsknk084sn02q`).

@@ -372,6 +372,25 @@ network:
 
 Patterns support glob syntax. Port numbers are stripped before matching.
 
+### network.proxy_protocol
+
+Parse PROXY protocol v1/v2 headers on the proxy listener to recover the real client address behind a TCP-terminating load balancer.
+
+```yaml
+network:
+  proxy_protocol: true
+```
+
+- **Type:** `bool`
+- **Required:** No
+- **Default:** `false`
+
+When enabled, each inbound connection to the proxy listener is checked for a leading PROXY protocol header — as prepended by a TCP load balancer such as GCP's global TCP Proxy load balancer — and, if present, the header's advertised source address replaces the raw TCP peer address as the connection's client address. This flows through to the `client_ip` request-log attribute on every request path, including CONNECT-intercepted TLS traffic.
+
+Connections that open without a PROXY header, or that don't send one within a 10s read timeout, fall back to the raw TCP peer address instead of being rejected (fail-open), so load balancer health checks and direct probes of the port keep working.
+
+Because the header is honored from any peer, a client that can reach the listener directly (bypassing the load balancer) can forge its logged `client_ip` by prepending its own PROXY header. Only enable this when the port is reachable solely through the load balancer, and never use `client_ip` for security decisions. The postgres data-plane listener does not parse PROXY protocol headers — it is a separate listener and port.
+
 ---
 
 ## log

@@ -42,6 +42,7 @@ network:
   allow:
     - "*.github.com"
     - api.anthropic.com
+  proxy_protocol: true
 log:
   level: debug
   format: json
@@ -110,6 +111,9 @@ log:
 	if cfg.Network.Allow[0] != "*.github.com" {
 		t.Errorf("Network.Allow[0] = %q, want *.github.com", cfg.Network.Allow[0])
 	}
+	if !cfg.Network.ProxyProtocol {
+		t.Error("Network.ProxyProtocol = false, want true")
+	}
 	// Log
 	if cfg.Log.Level != "debug" {
 		t.Errorf("Log.Level = %q, want debug", cfg.Log.Level)
@@ -133,6 +137,9 @@ proxy:
 	}
 	if len(cfg.Credentials) != 0 {
 		t.Errorf("len(Credentials) = %d, want 0", len(cfg.Credentials))
+	}
+	if cfg.Network.ProxyProtocol {
+		t.Error("Network.ProxyProtocol = true, want false when absent from config")
 	}
 }
 
