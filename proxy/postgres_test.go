@@ -944,3 +944,149 @@ func TestPostgresPolicyDeniesHost(t *testing.T) {
 		t.Fatal("connect succeeded, want a policy-denial error")
 	}
 }
+
+// TestPostgresPolicyAllowsPortlessPattern verifies that a portless allow
+// pattern -- as shipped in examples/gatekeeper-postgres.yaml
+// ("network.policy: strict" + "allow: [\"*.neon.tech\"]") -- permits a
+// Postgres data-plane connection. Before the fix, matchHost/matchesPattern's
+// HTTP-centric default (an unspecified pattern port matches only 80/443)
+// applied here too, so the connection was denied even though
+// postgresResolverForHost (via postgresResolverFromEntries, postgres.go)
+// already defaults an unspecified pattern port to 5432 when matching
+// resolvers -- the same connection was accepted by the resolver but rejected
+// by network policy.
+func TestPostgresPolicyAllowsPortlessPattern(t *testing.T) {
+	fake := startFakePostgres(t, "ep-foo.aws.neon.tech", "app_rw", "real-password")
+
+	ca, err := generateCA()
+	if err != nil {
+		t.Fatalf("generateCA: %v", err)
+	}
+	p := NewProxy()
+	p.SetCA(ca)
+	p.SetUpstreamCAs(fake.certPool)
+	p.SetAuthToken("run-token")
+	p.SetNetworkPolicy("strict", []string{"*.neon.tech"}, nil)
+	p.SetPostgresResolver("*.neon.tech", NewStaticPostgresResolver("real-password"))
+
+	srv := newTestPostgresListener(t, p)
+	srv.dialUpstream = func(ctx context.Context, h string) (string, error) {
+		return fake.addr, nil
+	}
+
+	conn, err := connectThroughGatekeeper(t, srv, caTrustPool(t, ca),
+		"ep-foo.aws.neon.tech", "app_rw", "appdb", "run-token")
+	if err != nil {
+		t.Fatalf("connect through gatekeeper: %v -- want strict policy with portless allow pattern %q to allow a Postgres connection to %q", err, "*.neon.tech", "ep-foo.aws.neon.tech")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := conn.Close(ctx); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+}
+
+// TestPostgresPolicyDeniesUnlistedHostUnderPortlessPattern proves the fix for
+// TestPostgresPolicyAllowsPortlessPattern doesn't widen the allow surface: a
+// host that doesn't match the portless pattern is still denied.
+func TestPostgresPolicyDeniesUnlistedHostUnderPortlessPattern(t *testing.T) {
+	ca, err := generateCA()
+	if err != nil {
+		t.Fatalf("generateCA: %v", err)
+	}
+	p := NewProxy()
+	p.SetCA(ca)
+	p.SetAuthToken("run-token")
+	p.SetNetworkPolicy("strict", []string{"*.neon.tech"}, nil)
+	p.SetPostgresResolver("*.neon.tech", NewStaticPostgresResolver("real-password"))
+
+	srv := newTestPostgresListener(t, p)
+
+	conn, err := connectThroughGatekeeper(t, srv, caTrustPool(t, ca),
+		"evil.com", "app_rw", "appdb", "run-token")
+	if err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn.Close(ctx)
+		t.Fatal("connect succeeded, want evil.com denied under strict policy with allow *.neon.tech")
+	}
+}
+
+// TestPostgresPolicyExplicitWrongPortDenied proves the fix doesn't relax
+// explicit-port patterns: a pattern pinned to a port other than 5432 must
+// still deny a Postgres connection (which is always evaluated at 5432).
+func TestPostgresPolicyExplicitWrongPortDenied(t *testing.T) {
+	ca, err := generateCA()
+	if err != nil {
+		t.Fatalf("generateCA: %v", err)
+	}
+	p := NewProxy()
+	p.SetCA(ca)
+	p.SetAuthToken("run-token")
+	p.SetNetworkPolicy("strict", []string{"*.neon.tech:5433"}, nil)
+	p.SetPostgresResolver("*.neon.tech", NewStaticPostgresResolver("real-password"))
+
+	srv := newTestPostgresListener(t, p)
+
+	conn, err := connectThroughGatekeeper(t, srv, caTrustPool(t, ca),
+		"ep-foo.aws.neon.tech", "app_rw", "appdb", "run-token")
+	if err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn.Close(ctx)
+		t.Fatal("connect succeeded, want denial: allow pattern is pinned to port 5433, connection is on 5432")
+	}
+}
+
+// TestPostgresPolicyExplicitCorrectPortAllowed proves an explicit ":5432"
+// pattern keeps working exactly as before the fix.
+func TestPostgresPolicyExplicitCorrectPortAllowed(t *testing.T) {
+	fake := startFakePostgres(t, "ep-foo.aws.neon.tech", "app_rw", "real-password")
+
+	ca, err := generateCA()
+	if err != nil {
+		t.Fatalf("generateCA: %v", err)
+	}
+	p := NewProxy()
+	p.SetCA(ca)
+	p.SetUpstreamCAs(fake.certPool)
+	p.SetAuthToken("run-token")
+	p.SetNetworkPolicy("strict", []string{"*.neon.tech:5432"}, nil)
+	p.SetPostgresResolver("*.neon.tech", NewStaticPostgresResolver("real-password"))
+
+	srv := newTestPostgresListener(t, p)
+	srv.dialUpstream = func(ctx context.Context, h string) (string, error) {
+		return fake.addr, nil
+	}
+
+	conn, err := connectThroughGatekeeper(t, srv, caTrustPool(t, ca),
+		"ep-foo.aws.neon.tech", "app_rw", "appdb", "run-token")
+	if err != nil {
+		t.Fatalf("connect through gatekeeper: %v -- want explicit *.neon.tech:5432 pattern to allow a connection on port 5432", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := conn.Close(ctx); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+}
+
+// TestCheckNetworkPolicyHTTPPortDefaultsUnchanged proves the fix for Postgres
+// data-plane matching does not touch checkNetworkPolicy, the function the
+// HTTP/CONNECT path shares with the Postgres plane's fallback (no run
+// context) case. A portless allow pattern must still mean "matches only 80
+// and 443" here -- it must not also match the Postgres port.
+func TestCheckNetworkPolicyHTTPPortDefaultsUnchanged(t *testing.T) {
+	p := NewProxy()
+	p.SetNetworkPolicy("strict", []string{"api.github.com"}, nil)
+
+	if !p.checkNetworkPolicy("api.github.com", 443) {
+		t.Error(`checkNetworkPolicy("api.github.com", 443) = false, want true (HTTPS default port)`)
+	}
+	if !p.checkNetworkPolicy("api.github.com", 80) {
+		t.Error(`checkNetworkPolicy("api.github.com", 80) = false, want true (HTTP default port)`)
+	}
+	if p.checkNetworkPolicy("api.github.com", postgresDefaultPort) {
+		t.Error(`checkNetworkPolicy("api.github.com", 5432) = true, want false -- a portless HTTP allow pattern must not match the Postgres port`)
+	}
+}
