@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -691,6 +692,233 @@ func TestPostgresRetriesAfterStalePassword(t *testing.T) {
 
 	if !flaky.invalidated.Load() {
 		t.Error("expected InvalidatePassword to be called after the stale password failed")
+	}
+}
+
+// syncBuffer is a concurrency-safe io.Writer for capturing slog output from
+// goroutines under test (each Postgres connection is handled on its own
+// goroutine).
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureSlogText redirects the default slog logger, down to DEBUG, to a
+// buffer for the duration of the test and returns it. The previous default
+// logger is restored on cleanup.
+func captureSlogText(t *testing.T) *syncBuffer {
+	t.Helper()
+	buf := &syncBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return buf
+}
+
+// waitForLogContaining polls buf until it contains want or two seconds
+// elapse (the audit/diagnostic log line is written asynchronously, after the
+// client already observes the connection failure), returning the final
+// snapshot either way.
+func waitForLogContaining(buf *syncBuffer, want string) string {
+	deadline := time.Now().Add(2 * time.Second)
+	var got string
+	for time.Now().Before(deadline) {
+		got = buf.String()
+		if strings.Contains(got, want) {
+			return got
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return got
+}
+
+// TestUpstreamErrorResponseAuthFailurePreservesSentinelAndDetail is a
+// regression guard for the errUpstreamAuthFailed sentinel: connectWithRetry
+// decides whether to invalidate the cached password and retry via
+// errors.Is(err, errUpstreamAuthFailed), so any enrichment of the error must
+// keep that check working while also carrying the upstream SQLSTATE, instead
+// of collapsing it to the bare sentinel with no detail.
+func TestUpstreamErrorResponseAuthFailurePreservesSentinelAndDetail(t *testing.T) {
+	err := upstreamErrorResponse(&pgproto3.ErrorResponse{
+		Severity: "FATAL",
+		Code:     "28P01",
+		Message:  "password authentication failed for user \"app_rw\"",
+	})
+	if !errors.Is(err, errUpstreamAuthFailed) {
+		t.Fatalf("errors.Is(err, errUpstreamAuthFailed) = false, want true; err = %v", err)
+	}
+	if !strings.Contains(err.Error(), "28P01") {
+		t.Errorf("error text = %q, want it to contain SQLSTATE 28P01", err.Error())
+	}
+}
+
+// TestPostgresLogsUpstreamErrorResponseDetail drives an upstream rejection
+// that is NOT an auth-failure SQLSTATE — the kind of thing an IP-allowlist
+// check on the real Neon endpoint would send — and asserts the server-side
+// diagnostic log carries the upstream SQLSTATE and message instead of the
+// flattened, message-less error the proxy used to log. It also asserts the
+// upstream password never reaches the log.
+func TestPostgresLogsUpstreamErrorResponseDetail(t *testing.T) {
+	buf := captureSlogText(t)
+
+	const rejectMessage = "connection rejected: IP address 203.0.113.5 is not authorized for this endpoint"
+	fake := startFakePostgres(t, "ep-foo-123.aws.neon.tech", "app_rw", "real-password",
+		withFailPostAuthMessage("08004", rejectMessage))
+
+	ca, err := generateCA()
+	if err != nil {
+		t.Fatalf("generateCA: %v", err)
+	}
+	p := NewProxy()
+	p.SetCA(ca)
+	p.SetUpstreamCAs(fake.certPool)
+	p.SetAuthToken("run-token")
+	p.SetPostgresResolver("*.neon.tech", NewStaticPostgresResolver("real-password"))
+
+	srv := newTestPostgresListener(t, p)
+	srv.dialUpstream = func(_ context.Context, _ string) (string, error) {
+		return fake.addr, nil
+	}
+
+	conn, err := connectThroughGatekeeper(t, srv, caTrustPool(t, ca),
+		"ep-foo-123.aws.neon.tech", "app_rw", "appdb", "run-token")
+	if err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn.Close(ctx)
+		t.Fatal("connect succeeded, want the simulated upstream rejection to fail it")
+	}
+
+	got := waitForLogContaining(buf, "08004")
+	if !strings.Contains(got, "08004") {
+		t.Fatalf("log output missing upstream SQLSTATE 08004; got:\n%s", got)
+	}
+	if !strings.Contains(got, rejectMessage) {
+		t.Fatalf("log output missing upstream error message %q; got:\n%s", rejectMessage, got)
+	}
+	if !strings.Contains(got, "upstream_connect") {
+		t.Errorf("log output missing stage=upstream_connect marker; got:\n%s", got)
+	}
+	if strings.Contains(got, "real-password") {
+		t.Fatalf("log output leaked the upstream password:\n%s", got)
+	}
+	if strings.Contains(got, "run-token") {
+		t.Fatalf("log output leaked the client run token:\n%s", got)
+	}
+}
+
+// TestPostgresRunTokenAuthFailureIsLogged drives a client that fails
+// run-token authentication and asserts a log line now names the boundary,
+// the client address, and the SNI host — that failure used to be completely
+// silent server-side. The run token value itself must never appear.
+func TestPostgresRunTokenAuthFailureIsLogged(t *testing.T) {
+	buf := captureSlogText(t)
+
+	p, ca := newTestProxyWithCA(t)
+	p.SetAuthToken("static-token")
+	srv := newTestPostgresListener(t, p)
+
+	msg, conn := pgClientHandshake(t, srv.Addr(), "db.test.local", caTrustPool(t, ca), "app", "appdb", "wrong-token")
+	defer conn.Close()
+
+	errResp, ok := msg.(*pgproto3.ErrorResponse)
+	if !ok {
+		t.Fatalf("expected ErrorResponse, got %T", msg)
+	}
+	if errResp.Code != "28P01" {
+		t.Errorf("ErrorResponse code = %q, want 28P01", errResp.Code)
+	}
+
+	got := waitForLogContaining(buf, "run_token_auth")
+	if !strings.Contains(got, "run_token_auth") {
+		t.Fatalf("log output missing stage=run_token_auth marker; got:\n%s", got)
+	}
+	if !strings.Contains(got, "db.test.local") {
+		t.Fatalf("log output missing SNI host db.test.local; got:\n%s", got)
+	}
+	if !strings.Contains(got, "127.0.0.1") {
+		t.Fatalf("log output missing client address; got:\n%s", got)
+	}
+	if strings.Contains(got, "wrong-token") {
+		t.Fatalf("log output leaked the client's run token:\n%s", got)
+	}
+	if strings.Contains(got, "static-token") {
+		t.Fatalf("log output leaked the configured auth token:\n%s", got)
+	}
+}
+
+// failingResolver always fails to resolve a password, standing in for a Neon
+// API resolution failure (missing project, wrong scope, upstream API error).
+// It records whether InvalidatePassword was called so a test can assert the
+// upstream-auth retry/invalidate path is NOT taken for a resolver failure.
+type failingResolver struct {
+	err         error
+	invalidated atomic.Bool
+}
+
+func (r *failingResolver) ResolvePassword(_ context.Context, _, _, _ string) (string, error) {
+	return "", r.err
+}
+
+func (r *failingResolver) InvalidatePassword(_, _, _ string) {
+	r.invalidated.Store(true)
+}
+
+// TestPostgresLogsResolveStage drives a credential-resolution failure (the
+// resolver's ResolvePassword returns an error) and asserts the diagnostic log
+// tags it stage=resolve — distinct from the upstream_connect bucket a real
+// dial/TLS/SCRAM failure lands in — so an operator can tell a Neon API
+// resolution failure apart from a network/TLS failure to the endpoint. It also
+// asserts the resolver failure does NOT trigger the upstream-auth
+// invalidate-and-retry path.
+func TestPostgresLogsResolveStage(t *testing.T) {
+	buf := captureSlogText(t)
+
+	ca, err := generateCA()
+	if err != nil {
+		t.Fatalf("generateCA: %v", err)
+	}
+	p := NewProxy()
+	p.SetCA(ca)
+	p.SetAuthToken("run-token")
+	failing := &failingResolver{err: errors.New("neon endpoint \"ep-foo-123\" not found in configured project")}
+	p.SetPostgresResolver("*.neon.tech", failing)
+
+	srv := newTestPostgresListener(t, p)
+
+	conn, err := connectThroughGatekeeper(t, srv, caTrustPool(t, ca),
+		"ep-foo-123.aws.neon.tech", "app_rw", "appdb", "run-token")
+	if err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn.Close(ctx)
+		t.Fatal("connect succeeded, want the resolver failure to fail it")
+	}
+
+	got := waitForLogContaining(buf, "stage=resolve")
+	if !strings.Contains(got, "stage=resolve") {
+		t.Fatalf("log output missing stage=resolve marker; got:\n%s", got)
+	}
+	if !strings.Contains(got, "resolving postgres password") {
+		t.Errorf("log output missing human-readable resolver context; got:\n%s", got)
+	}
+	if strings.Contains(got, "stage=upstream_connect") {
+		t.Errorf("resolver failure misclassified as stage=upstream_connect; got:\n%s", got)
+	}
+	if failing.invalidated.Load() {
+		t.Error("resolver failure must not trigger the upstream-auth invalidate-and-retry path")
 	}
 }
 

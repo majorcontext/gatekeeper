@@ -91,6 +91,10 @@ type fakePostgresServer struct {
 	// ErrorResponse with this SQLSTATE instead of AuthenticationOk after a
 	// successful SCRAM exchange. Used to exercise non-auth upstream errors.
 	failPostAuthWith string
+	// failPostAuthMessage is the ErrorResponse Message sent alongside
+	// failPostAuthWith. Defaults to a generic placeholder; tests that need to
+	// assert the message is surfaced in gatekeeper's logs set it explicitly.
+	failPostAuthMessage string
 
 	mu        sync.Mutex
 	authOK    int
@@ -110,7 +114,18 @@ func withAuthMechanisms(mechs ...string) fakePostgresOption {
 // withFailPostAuth makes the fake send a FATAL ErrorResponse with the given
 // SQLSTATE instead of AuthenticationOk once SCRAM succeeds.
 func withFailPostAuth(sqlState string) fakePostgresOption {
-	return func(f *fakePostgresServer) { f.failPostAuthWith = sqlState }
+	return withFailPostAuthMessage(sqlState, "simulated post-auth failure")
+}
+
+// withFailPostAuthMessage is like withFailPostAuth but also sets the
+// ErrorResponse Message, letting a test assert that gatekeeper surfaces the
+// upstream server's specific rejection reason (e.g. an IP-allowlist denial)
+// rather than a flattened, message-less error.
+func withFailPostAuthMessage(sqlState, message string) fakePostgresOption {
+	return func(f *fakePostgresServer) {
+		f.failPostAuthWith = sqlState
+		f.failPostAuthMessage = message
+	}
 }
 
 func (f *fakePostgresServer) counts() (authOK, authFail int) {
@@ -240,7 +255,7 @@ func (f *fakePostgresServer) handle(conn net.Conn) {
 		backend.Send(&pgproto3.ErrorResponse{
 			Severity: "FATAL",
 			Code:     f.failPostAuthWith,
-			Message:  "simulated post-auth failure",
+			Message:  f.failPostAuthMessage,
 		})
 		backend.Flush()
 		return
