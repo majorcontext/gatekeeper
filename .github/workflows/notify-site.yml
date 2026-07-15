@@ -1,0 +1,40 @@
+# Notifies majorcontext.com to rebuild immediately when gatekeeper docs
+# change on main, instead of waiting for the site's daily 09:17 UTC cron.
+#
+# Requires a secret named SITE_DISPATCH_TOKEN: a fine-grained personal
+# access token, owned by an account with write access to
+# majorcontext/majorcontext.com, scoped to that single repository, with
+# repository permission "Contents: Read and write" (this is what the
+# repos/{owner}/{repo}/dispatches endpoint requires; "Metadata: Read-only"
+# is auto-selected alongside it — no other permissions are needed).
+#
+# This job fails soft: if the secret is unset or the token has expired,
+# it logs a notice and exits 0 rather than turning every docs push red.
+# The site's daily cron already covers this case as a fallback.
+name: Notify site of docs update
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/content/**
+      - docs/README.md
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send repository_dispatch to majorcontext.com
+        env:
+          GH_TOKEN: ${{ secrets.SITE_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::notice::SITE_DISPATCH_TOKEN is not set; skipping dispatch. The site's daily cron will pick up this change instead."
+            exit 0
+          fi
+
+          if ! gh api repos/majorcontext/majorcontext.com/dispatches \
+            -f event_type=docs-updated; then
+            echo "::notice::Dispatch to majorcontext.com failed (token may be expired or missing permissions); skipping. The site's daily cron will pick up this change instead."
+            exit 0
+          fi
