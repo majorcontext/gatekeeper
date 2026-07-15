@@ -832,9 +832,11 @@ func TestServerProxyProtocol_V2(t *testing.T) {
 // own health checks and any direct probe of the port do not send one, and
 // must not be rejected.
 func TestServerProxyProtocol_FailSafeNoHeader(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "gatekeeper.log")
 	cfg := &Config{
 		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1"},
 		Network: NetworkConfig{Policy: "permissive", ProxyProtocol: true},
+		Log:     LogConfig{Level: "debug", Output: logPath},
 	}
 	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
@@ -865,6 +867,84 @@ func TestServerProxyProtocol_FailSafeNoHeader(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (fail-open when no PROXY header is present); body = %s", resp.StatusCode, body)
+	}
+
+	// The headerless path is the fail-open case, not a parse failure: it must
+	// stay quiet even at DEBUG, so a real LB health check never spams logs.
+	logData, _ := os.ReadFile(logPath)
+	if strings.Contains(string(logData), "malformed PROXY protocol header") {
+		t.Errorf("expected no malformed-header log for a connection with no PROXY header at all, got: %s", logData)
+	}
+}
+
+// TestServerProxyProtocol_MalformedHeader verifies that when
+// network.proxy_protocol is enabled, a connection that opens with something
+// that looks like a PROXY header but fails to parse (as opposed to one that
+// simply lacks a header entirely — see TestServerProxyProtocol_FailSafeNoHeader,
+// which must stay quiet) is dropped AND logged at DEBUG level with the real
+// TCP peer address. PROXY header parsing is lazy — it happens inside the
+// proxyproto.Conn on first Read, not in Accept — so without an explicit hook
+// a parse failure surfaces only as an error from Conn.Read that net/http
+// treats as a dead connection and closes silently, leaving the operator with
+// a dropped connection and zero trace.
+func TestServerProxyProtocol_MalformedHeader(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "gatekeeper.log")
+	cfg := &Config{
+		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		Network: NetworkConfig{Policy: "permissive", ProxyProtocol: true},
+		Log:     LogConfig{Level: "debug", Output: logPath},
+	}
+	srv, err := New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	conn, err := net.Dial("tcp", srv.ProxyAddr())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	// The client's own local address is, from the loopback socket pair, the
+	// exact address the server sees as the raw TCP peer — the value the
+	// malformed-header log line is expected to carry.
+	peerAddr := conn.LocalAddr().String()
+
+	malformed := "PROXY TCP4 not-an-ip garbage\r\n"
+	req := "GET /healthz HTTP/1.1\r\nHost: gatekeeper\r\nConnection: close\r\n\r\n"
+	if _, err := conn.Write([]byte(malformed + req)); err != nil {
+		t.Fatalf("write malformed PROXY header + request: %v", err)
+	}
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1)
+	if n, readErr := conn.Read(buf); readErr == nil {
+		t.Fatalf("expected the connection to be dropped with no HTTP response, got %d bytes: %q", n, buf[:n])
+	}
+
+	var logData []byte
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		logData, _ = os.ReadFile(logPath)
+		if strings.Contains(string(logData), "malformed PROXY protocol header") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for a malformed-header debug log line; log so far: %s", logData)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	logStr := string(logData)
+	if !strings.Contains(logStr, "level=DEBUG") {
+		t.Errorf("expected a DEBUG-level log line, got: %s", logStr)
+	}
+	if !strings.Contains(logStr, peerAddr) {
+		t.Errorf("expected the log line to include the real peer address %q, got: %s", peerAddr, logStr)
 	}
 }
 
