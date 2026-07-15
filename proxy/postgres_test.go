@@ -230,6 +230,25 @@ func newTestPostgresListener(t *testing.T, p *Proxy) *PostgresServer {
 	return srv
 }
 
+// newTestPostgresListenerWithProxyProtocol is newTestPostgresListener but
+// wraps the listener with WrapProxyProtocolListener first, mirroring how
+// gatekeeper.go wires postgres.proxy_protocol: true in production (bind,
+// wrap, then StartListener on the wrapped listener).
+func newTestPostgresListenerWithProxyProtocol(t *testing.T, p *Proxy) *PostgresServer {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ln = WrapProxyProtocolListener(ln)
+	srv := NewPostgresServer(p)
+	if err := srv.StartListener(ln); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Stop)
+	return srv
+}
+
 // pgClientHandshake dials the listener, does SSLRequest+TLS, sends the startup
 // message, and answers AuthenticationCleartextPassword with password. It returns
 // the message received after sending the password (the auth result or an error)
@@ -241,6 +260,16 @@ func pgClientHandshake(t *testing.T, addr, sniHost string, caPool *x509.CertPool
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
+	return pgClientHandshakeOnConn(t, raw, sniHost, caPool, user, db, password)
+}
+
+// pgClientHandshakeOnConn is pgClientHandshake but driven over an
+// already-established raw connection, letting a caller write bytes ahead of
+// the Postgres wire protocol — e.g. a PROXY protocol header — before the
+// handshake begins.
+func pgClientHandshakeOnConn(t *testing.T, raw net.Conn, sniHost string, caPool *x509.CertPool, user, db, password string) (pgproto3.BackendMessage, net.Conn) {
+	t.Helper()
+
 	_ = raw.SetDeadline(time.Now().Add(10 * time.Second))
 
 	// SSLRequest preamble.
@@ -399,6 +428,111 @@ func TestPostgresListenerAcceptsGoodTokenButNoResolver(t *testing.T) {
 	}
 	if errResp.Code != "08004" {
 		t.Errorf("ErrorResponse code = %q, want 08004", errResp.Code)
+	}
+}
+
+// TestPostgresListenerProxyProtocolV1 verifies that when the Postgres
+// listener is wrapped with WrapProxyProtocolListener (postgres.proxy_protocol:
+// true in gatekeeper.yaml), a leading PROXY protocol v1 header — sent before
+// the client's SSLRequest, since the header is always the very first bytes on
+// the wire — is honored: the logged ClientAddr reflects the header's
+// advertised source address, not the raw TCP loopback peer address the test
+// actually dialed from.
+func TestPostgresListenerProxyProtocolV1(t *testing.T) {
+	p, ca := newTestProxyWithCA(t)
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		if token == "good-token" {
+			return &RunContextData{}, true
+		}
+		return nil, false
+	})
+	cap := &logCapture{}
+	p.SetLogger(cap.log)
+	srv := newTestPostgresListenerWithProxyProtocol(t, p)
+
+	raw, err := net.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if _, err := raw.Write([]byte("PROXY TCP4 100.52.56.181 10.0.0.1 51234 5432\r\n")); err != nil {
+		raw.Close()
+		t.Fatalf("write PROXY header: %v", err)
+	}
+
+	msg, conn := pgClientHandshakeOnConn(t, raw, "db.test.local", caTrustPool(t, ca), "app", "appdb", "good-token")
+	defer conn.Close()
+
+	// Auth passed; serveAuthenticated denies for lack of a resolver, but it
+	// logs ClientAddr before that — which is all this test needs.
+	if _, ok := msg.(*pgproto3.ErrorResponse); !ok {
+		t.Fatalf("expected ErrorResponse, got %T", msg)
+	}
+
+	var entries []RequestLogData
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		entries = cap.snapshot()
+		if len(entries) >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d log entries, want exactly 1", len(entries))
+	}
+	host, _, err := net.SplitHostPort(entries[0].ClientAddr)
+	if err != nil {
+		t.Fatalf("ClientAddr = %q: SplitHostPort: %v", entries[0].ClientAddr, err)
+	}
+	if host != "100.52.56.181" {
+		t.Errorf("ClientAddr host = %q, want 100.52.56.181 (the PROXY-header source), not the raw TCP peer address", host)
+	}
+}
+
+// TestPostgresListenerProxyProtocolFailSafeNoHeader verifies that a
+// connection with no PROXY header still succeeds when the Postgres listener
+// is wrapped with WrapProxyProtocolListener: the fail-open USE policy falls
+// back to the raw TCP peer address instead of rejecting the connection, so a
+// direct probe or an LB health check that never speaks PROXY protocol still
+// gets a normal Postgres handshake.
+func TestPostgresListenerProxyProtocolFailSafeNoHeader(t *testing.T) {
+	p, ca := newTestProxyWithCA(t)
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		if token == "good-token" {
+			return &RunContextData{}, true
+		}
+		return nil, false
+	})
+	cap := &logCapture{}
+	p.SetLogger(cap.log)
+	srv := newTestPostgresListenerWithProxyProtocol(t, p)
+
+	// No PROXY header written — straight into the Postgres handshake.
+	msg, conn := pgClientHandshake(t, srv.Addr(), "db.test.local", caTrustPool(t, ca), "app", "appdb", "good-token")
+	defer conn.Close()
+
+	if _, ok := msg.(*pgproto3.ErrorResponse); !ok {
+		t.Fatalf("expected ErrorResponse, got %T", msg)
+	}
+
+	var entries []RequestLogData
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		entries = cap.snapshot()
+		if len(entries) >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d log entries, want exactly 1", len(entries))
+	}
+	host, _, err := net.SplitHostPort(entries[0].ClientAddr)
+	if err != nil {
+		t.Fatalf("ClientAddr = %q: SplitHostPort: %v", entries[0].ClientAddr, err)
+	}
+	if host != "127.0.0.1" {
+		t.Errorf("ClientAddr host = %q, want 127.0.0.1 (fail-open: no PROXY header present)", host)
 	}
 }
 

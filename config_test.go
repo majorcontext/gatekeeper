@@ -15,6 +15,7 @@ func TestParseConfig_Full(t *testing.T) {
 proxy:
   port: 8080
   host: 127.0.0.1
+  proxy_protocol: true
 tls:
   ca_cert: /tmp/ca.crt
   ca_key: /tmp/ca.key
@@ -42,7 +43,6 @@ network:
   allow:
     - "*.github.com"
     - api.anthropic.com
-  proxy_protocol: true
 log:
   level: debug
   format: json
@@ -59,6 +59,9 @@ log:
 	}
 	if cfg.Proxy.Host != "127.0.0.1" {
 		t.Errorf("Proxy.Host = %q, want 127.0.0.1", cfg.Proxy.Host)
+	}
+	if !cfg.Proxy.ProxyProtocol {
+		t.Error("Proxy.ProxyProtocol = false, want true")
 	}
 
 	// TLS
@@ -111,9 +114,6 @@ log:
 	if cfg.Network.Allow[0] != "*.github.com" {
 		t.Errorf("Network.Allow[0] = %q, want *.github.com", cfg.Network.Allow[0])
 	}
-	if !cfg.Network.ProxyProtocol {
-		t.Error("Network.ProxyProtocol = false, want true")
-	}
 	// Log
 	if cfg.Log.Level != "debug" {
 		t.Errorf("Log.Level = %q, want debug", cfg.Log.Level)
@@ -138,8 +138,11 @@ proxy:
 	if len(cfg.Credentials) != 0 {
 		t.Errorf("len(Credentials) = %d, want 0", len(cfg.Credentials))
 	}
-	if cfg.Network.ProxyProtocol {
-		t.Error("Network.ProxyProtocol = true, want false when absent from config")
+	if cfg.Proxy.ProxyProtocol {
+		t.Error("Proxy.ProxyProtocol = true, want false when absent from config")
+	}
+	if cfg.Postgres != nil && cfg.Postgres.ProxyProtocol {
+		t.Error("Postgres.ProxyProtocol = true, want false when absent from config")
 	}
 }
 
@@ -150,6 +153,7 @@ proxy:
 postgres:
   port: 5432
   host: 0.0.0.0
+  proxy_protocol: true
 credentials:
   - host: "*.neon.tech"
     postgres:
@@ -172,6 +176,9 @@ credentials:
 	}
 	if cfg.Postgres.Host != "0.0.0.0" {
 		t.Errorf("Host = %q, want 0.0.0.0", cfg.Postgres.Host)
+	}
+	if !cfg.Postgres.ProxyProtocol {
+		t.Error("Postgres.ProxyProtocol = false, want true")
 	}
 	if len(cfg.Credentials) != 1 {
 		t.Fatalf("credentials = %d, want 1", len(cfg.Credentials))

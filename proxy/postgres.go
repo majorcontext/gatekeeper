@@ -31,12 +31,28 @@ const postgresKeepAlivePeriod = 30 * time.Second
 // enableKeepAlive turns on TCP keep-alives for a relayed connection. It is a
 // no-op for non-TCP connections (e.g. test pipes).
 func enableKeepAlive(conn net.Conn) {
-	tc, ok := conn.(*net.TCPConn)
+	tc, ok := underlyingTCPConn(conn)
 	if !ok {
 		return
 	}
 	_ = tc.SetKeepAlive(true)
 	_ = tc.SetKeepAlivePeriod(postgresKeepAlivePeriod)
+}
+
+// underlyingTCPConn returns the real *net.TCPConn beneath conn, unwrapping one
+// layer through a Raw() accessor first. When the listener is wrapped with
+// WrapProxyProtocolListener, an accepted conn is not itself a *net.TCPConn —
+// it's a proxyProtoLogConn whose Raw() reaches down through the proxyproto.Conn
+// to the transport socket. Raw() never touches the PROXY header (unlike
+// RemoteAddr()/Read()), so unwrapping here is side-effect free and safe to call
+// before any protocol bytes are read. Returns (nil, false) for a non-TCP conn
+// (e.g. a test pipe) so keep-alive setup is skipped.
+func underlyingTCPConn(conn net.Conn) (*net.TCPConn, bool) {
+	if rc, ok := conn.(interface{ Raw() net.Conn }); ok {
+		conn = rc.Raw()
+	}
+	tc, ok := conn.(*net.TCPConn)
+	return tc, ok
 }
 
 // postgresDefaultPort is the port used when matching Postgres host patterns.
@@ -452,6 +468,21 @@ func (s *PostgresServer) Start(addr string) error {
 	if err != nil {
 		return fmt.Errorf("postgres listen: %w", err)
 	}
+	return s.startListener(ln)
+}
+
+// StartListener begins accepting connections on a pre-created listener
+// instead of binding one itself, so the caller can wrap it first — e.g. with
+// WrapProxyProtocolListener, to add PROXY protocol support (see
+// PostgresConfig.ProxyProtocol). It performs the same CA check as Start.
+func (s *PostgresServer) StartListener(ln net.Listener) error {
+	if s.proxy.ca == nil {
+		return errors.New("postgres listener requires a CA for TLS termination")
+	}
+	return s.startListener(ln)
+}
+
+func (s *PostgresServer) startListener(ln net.Listener) error {
 	s.listener = ln
 	go s.acceptLoop(ln)
 	return nil

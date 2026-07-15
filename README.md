@@ -53,6 +53,7 @@ cd examples && ./gen-ca.sh
 proxy:
   host: 127.0.0.1
   port: 9080
+  # proxy_protocol: true  # behind a TCP-terminating LB, recover the real client_ip
 
 tls:
   ca_cert: ca.crt
@@ -68,7 +69,6 @@ credentials:
 
 network:
   policy: permissive
-  # proxy_protocol: true  # behind a TCP-terminating LB, recover the real client_ip
 
 log:
   level: info
@@ -140,7 +140,9 @@ network:
 
 Policies: `permissive` (allow all), `strict` (deny all, allow listed).
 
-Behind a TCP-terminating load balancer (e.g. GCP's global TCP Proxy LB), every connection's peer address is the load balancer's, not the real client — `network.proxy_protocol: true` parses a PROXY protocol v1/v2 header from the LB and uses its advertised source as the `client_ip` recorded in request logs. It's fail-open (headerless connections, like LB health checks, fall back to the raw peer address) and should only be enabled when the port is reachable solely through the load balancer, since the header is otherwise forgeable by any direct client.
+## PROXY protocol (client IP behind a load balancer)
+
+Behind a TCP-terminating load balancer (e.g. GCP's global TCP Proxy LB), every connection's peer address is the load balancer's, not the real client. PROXY protocol parsing recovers the real client address, and it's configured per listener: `proxy.proxy_protocol: true` for the HTTP/CONNECT listener, and `postgres.proxy_protocol: true` for the Postgres data-plane listener. Each parses a PROXY protocol v1/v2 header from the LB and uses its advertised source as the `client_ip` recorded in request logs. Both are fail-open (headerless connections, like LB health checks, fall back to the raw peer address) and should only be enabled when that listener's port is reachable solely through the load balancer, since the header is otherwise forgeable by any direct client. See [Deploying behind a TCP load balancer](docs/content/guides/11-load-balancer-proxy-protocol.md).
 
 ## MCP relay
 
