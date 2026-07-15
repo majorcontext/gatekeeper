@@ -859,6 +859,69 @@ func TestPostgresRunTokenAuthFailureIsLogged(t *testing.T) {
 	}
 }
 
+// failingResolver always fails to resolve a password, standing in for a Neon
+// API resolution failure (missing project, wrong scope, upstream API error).
+// It records whether InvalidatePassword was called so a test can assert the
+// upstream-auth retry/invalidate path is NOT taken for a resolver failure.
+type failingResolver struct {
+	err         error
+	invalidated atomic.Bool
+}
+
+func (r *failingResolver) ResolvePassword(_ context.Context, _, _, _ string) (string, error) {
+	return "", r.err
+}
+
+func (r *failingResolver) InvalidatePassword(_, _, _ string) {
+	r.invalidated.Store(true)
+}
+
+// TestPostgresLogsResolveStage drives a credential-resolution failure (the
+// resolver's ResolvePassword returns an error) and asserts the diagnostic log
+// tags it stage=resolve — distinct from the upstream_connect bucket a real
+// dial/TLS/SCRAM failure lands in — so an operator can tell a Neon API
+// resolution failure apart from a network/TLS failure to the endpoint. It also
+// asserts the resolver failure does NOT trigger the upstream-auth
+// invalidate-and-retry path.
+func TestPostgresLogsResolveStage(t *testing.T) {
+	buf := captureSlogText(t)
+
+	ca, err := generateCA()
+	if err != nil {
+		t.Fatalf("generateCA: %v", err)
+	}
+	p := NewProxy()
+	p.SetCA(ca)
+	p.SetAuthToken("run-token")
+	failing := &failingResolver{err: errors.New("neon endpoint \"ep-foo-123\" not found in configured project")}
+	p.SetPostgresResolver("*.neon.tech", failing)
+
+	srv := newTestPostgresListener(t, p)
+
+	conn, err := connectThroughGatekeeper(t, srv, caTrustPool(t, ca),
+		"ep-foo-123.aws.neon.tech", "app_rw", "appdb", "run-token")
+	if err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn.Close(ctx)
+		t.Fatal("connect succeeded, want the resolver failure to fail it")
+	}
+
+	got := waitForLogContaining(buf, "stage=resolve")
+	if !strings.Contains(got, "stage=resolve") {
+		t.Fatalf("log output missing stage=resolve marker; got:\n%s", got)
+	}
+	if !strings.Contains(got, "resolving postgres password") {
+		t.Errorf("log output missing human-readable resolver context; got:\n%s", got)
+	}
+	if strings.Contains(got, "stage=upstream_connect") {
+		t.Errorf("resolver failure misclassified as stage=upstream_connect; got:\n%s", got)
+	}
+	if failing.invalidated.Load() {
+		t.Error("resolver failure must not trigger the upstream-auth invalidate-and-retry path")
+	}
+}
+
 func TestPostgresPolicyDeniesHost(t *testing.T) {
 	ca, err := generateCA()
 	if err != nil {

@@ -49,6 +49,14 @@ const postgresDialTimeout = 10 * time.Second
 // credentials the proxy presented (bad password or unknown role).
 var errUpstreamAuthFailed = errors.New("upstream authentication failed")
 
+// errResolvePassword indicates the credential resolver (e.g. the Neon API)
+// failed to produce an upstream password — the proxy never reached the
+// upstream server. It is deliberately distinct from errUpstreamAuthFailed so
+// the connect path can classify the failure stage in logs and, crucially, so
+// a resolution failure never triggers the invalidate-cached-password-and-retry
+// path reserved for an actual upstream credential rejection.
+var errResolvePassword = errors.New("resolve upstream password failed")
+
 // PostgresCredentialResolver resolves a Postgres password for a specific
 // upstream host, role, and database at connection time. Implementations
 // must never log password values.
@@ -771,12 +779,18 @@ func (s *PostgresServer) serveAuthenticated(ctx context.Context, clientConn net.
 		// could echo the upstream server's identifiers. The full error —
 		// including the upstream server's own ErrorResponse fields when the
 		// failure came from there (see upstreamErrorResponse) — is only logged
-		// at debug level, never with credential values. stage distinguishes a
-		// credential-resolution failure (e.g. the Neon API) from an upstream
-		// connect/SCRAM failure so the two are never conflated in the log.
+		// at debug level, never with credential values. stage names which of the
+		// three failure boundaries the error came from, so they are never
+		// conflated in the log: resolve (the credential resolver, e.g. the Neon
+		// API, failed before the proxy reached the upstream), upstream_auth (the
+		// upstream server rejected the presented credential), and upstream_connect
+		// (dial/TLS/SCRAM/protocol failure reaching the upstream).
 		stage := "upstream_connect"
-		if errors.Is(err, errUpstreamAuthFailed) {
+		switch {
+		case errors.Is(err, errUpstreamAuthFailed):
 			stage = "upstream_auth"
+		case errors.Is(err, errResolvePassword):
+			stage = "resolve"
 		}
 		slog.Debug("postgres upstream connection failed",
 			"subsystem", "proxy",
@@ -839,7 +853,11 @@ func (s *PostgresServer) connectWithRetry(ctx context.Context, resolver Postgres
 	connect := func() (*upstreamConn, error) {
 		password, err := resolver.ResolvePassword(ctx, host, user, database)
 		if err != nil {
-			return nil, fmt.Errorf("resolving postgres password: %w", err)
+			// Wrap both the errResolvePassword sentinel (so the connect path can
+			// classify this as stage=resolve via errors.Is, and so it is never
+			// mistaken for an upstream credential rejection that would invalidate
+			// and retry) and the human-readable context in one error.
+			return nil, fmt.Errorf("resolving postgres password: %w: %w", errResolvePassword, err)
 		}
 		return connectPostgresUpstream(ctx, upstreamParams{
 			dialAddr:          dialAddr,
