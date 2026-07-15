@@ -1224,3 +1224,92 @@ func TestCheckNetworkPolicyHTTPPortDefaultsUnchanged(t *testing.T) {
 		t.Error(`checkNetworkPolicy("api.github.com", 5432) = true, want false -- a portless HTTP allow pattern must not match the Postgres port`)
 	}
 }
+
+// --- accept-loop resilience to transient Accept errors ---------------------
+//
+// These are the sibling of TestDemux_AcceptLoopRetriesTransientErrors and
+// TestDemux_AcceptLoopExitsCleanlyOnClose in demux_test.go: PostgresServer's
+// own acceptLoop had the identical unconditional-exit-on-any-Accept-error bug
+// that PR #56 fixed in Demux.acceptLoop, and was intentionally left out of
+// that PR's scope. scriptedAcceptListener (defined in demux_test.go, same
+// package) is reused here rather than duplicated.
+
+// TestPostgresServer_AcceptLoopRetriesTransientErrors is the regression guard
+// for PostgresServer.acceptLoop: a transient Accept error (EMFILE/ENFILE
+// under fd exhaustion, ECONNABORTED -- realistic for a proxy holding many
+// long-lived Postgres relay connections) must not permanently kill the
+// data-plane listener. The loop must back off and retry -- mirroring
+// net/http.Server.Serve and Demux.acceptLoop -- so a good connection
+// arriving after a burst of transient errors is still dispatched.
+func TestPostgresServer_AcceptLoopRetriesTransientErrors(t *testing.T) {
+	p, _ := newTestProxyWithCA(t)
+	srv := NewPostgresServer(p)
+
+	// Three transient failures, then a real conn.
+	transient := errors.New("simulated EMFILE: too many open files")
+	l := newScriptedAcceptListener(3, transient)
+
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	l.conns <- serverConn
+
+	if err := srv.StartListener(l); err != nil {
+		t.Fatalf("StartListener: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+
+	// If the loop had exited after the first transient error (the bug), the
+	// good conn is never Accepted from the scripted listener and handleConn
+	// never runs on it, so nothing ever answers the SSLRequest below and this
+	// read times out. The 2s bound is far above the ~35ms the three
+	// 5ms/10ms/20ms backoffs take.
+	fe := pgproto3.NewFrontend(clientConn, clientConn)
+	go func() {
+		fe.Send(&pgproto3.SSLRequest{})
+		_ = fe.Flush()
+	}()
+
+	_ = clientConn.SetDeadline(time.Now().Add(2 * time.Second))
+	var resp [1]byte
+	if _, err := clientConn.Read(resp[:]); err != nil {
+		t.Fatalf("read SSLRequest response (proves the post-burst conn reached handleConn): %v", err)
+	}
+	if resp[0] != 'S' {
+		t.Errorf("SSLRequest response = %q, want 'S'", resp[0])
+	}
+}
+
+// TestPostgresServer_AcceptLoopExitsCleanlyOnStop guards the other half of
+// the fix: the retry path must not swallow shutdown. When Stop calls
+// beginClose, which sets closed before closing the listener, the resulting
+// Accept error is gatekeeper's own doing -- the loop must return immediately
+// without logging and without spin-retrying the closed-listener error.
+func TestPostgresServer_AcceptLoopExitsCleanlyOnStop(t *testing.T) {
+	logBuf := captureSlogText(t)
+	p, _ := newTestProxyWithCA(t)
+	srv := NewPostgresServer(p)
+
+	l := newScriptedAcceptListener(0, nil)
+	if err := srv.StartListener(l); err != nil {
+		t.Fatalf("StartListener: %v", err)
+	}
+
+	// Let the accept loop reach its blocking Accept before shutting down.
+	time.Sleep(20 * time.Millisecond)
+
+	srv.Stop()
+
+	// Give the loop time to observe the close and return. A correct loop
+	// calls Accept exactly once more (getting net.ErrClosed), sees closed,
+	// and returns; a loop that treated the closed-listener error as
+	// transient would keep calling Accept on a ~5ms backoff, so the
+	// post-close count would climb past 1 within this window.
+	time.Sleep(80 * time.Millisecond)
+
+	if got := l.acceptsAfterCloseCount(); got != 1 {
+		t.Errorf("Accept called %d times after close, want exactly 1: >1 means the loop spin-retried the closed-listener error instead of exiting on shutdown", got)
+	}
+	if s := logBuf.String(); strings.Contains(s, "transient accept error") || strings.Contains(s, "accept loop exited") {
+		t.Errorf("clean shutdown logged an accept error/retry line, want none: %q", s)
+	}
+}

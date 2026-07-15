@@ -563,7 +563,21 @@ func (s *PostgresServer) closeActiveConns() {
 	s.mu.Unlock()
 }
 
+// acceptLoop accepts connections on ln and dispatches each to handleConn. It
+// mirrors Demux.acceptLoop's accept-error handling (demux.go), which in turn
+// mirrors net/http.Server.Serve: a transient Accept error is retried after a
+// capped exponential backoff rather than tearing down the listener, and only
+// an intentional shutdown (s.closed set by beginClose before the listener is
+// closed) exits the loop. Without this, a transient error (EMFILE/ENFILE
+// under fd exhaustion, ECONNABORTED -- realistic for a proxy holding many
+// long-lived Postgres relay connections) permanently kills the data-plane
+// listener until process restart.
+//
+// Like Demux.acceptLoop, this does not gate the retry on the deprecated and
+// unreliable net.Error.Temporary(): any error while the listener is still
+// live is treated as transient and retried.
 func (s *PostgresServer) acceptLoop(ln net.Listener) {
+	var backoff time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -571,11 +585,22 @@ func (s *PostgresServer) acceptLoop(ln net.Listener) {
 				// Intentional shutdown: the listener was closed.
 				return
 			}
-			slog.Error("postgres accept loop exited",
+			if backoff == 0 {
+				backoff = demuxAcceptRetryBaseDelay
+			} else {
+				backoff *= 2
+			}
+			if backoff > demuxAcceptRetryMaxDelay {
+				backoff = demuxAcceptRetryMaxDelay
+			}
+			slog.Warn("postgres: transient accept error; retrying",
 				"subsystem", "proxy",
-				"error", err)
-			return
+				"error", err,
+				"retry_in", backoff)
+			time.Sleep(backoff)
+			continue
 		}
+		backoff = 0
 		// Register the connection under the same lock that Shutdown uses to set
 		// closed. This makes the closed check and wg.Add atomic with respect to
 		// shutdown: either we add to the WaitGroup before Shutdown observes the
