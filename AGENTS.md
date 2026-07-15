@@ -147,6 +147,7 @@ This module (`github.com/majorcontext/gatekeeper`) was extracted from moat's `in
 
 ## Responding to Review Feedback
 
+- **After opening a PR, watch it and converge to zero.** Always read the top-level comments posted by Claude (the repo's reviewer), not just inline threads. Address every comment and observation — verify the claim, fix what's real, reply to what isn't — and repeat after each push until the reviewer posts no new findings. A PR isn't done while an observation stands unanswered.
 - **Resolve a review thread once its finding is addressed.** Reply explaining what changed (or why nothing did), then resolve it. A thread left open after the fix has landed reads as unaddressed.
 - Resolving requires GraphQL — `gh pr review` cannot do it:
 
