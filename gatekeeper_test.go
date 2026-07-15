@@ -1,6 +1,7 @@
 package gatekeeper
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -32,6 +33,7 @@ import (
 	"github.com/majorcontext/gatekeeper/proxy"
 
 	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/pires/go-proxyproto"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -675,6 +677,332 @@ func TestHTTPSCustomHeaderInjection(t *testing.T) {
 	mu.Unlock()
 	if got != "sk-ant-test123" {
 		t.Errorf("backend got x-api-key = %q, want %q", got, "sk-ant-test123")
+	}
+}
+
+// captureServerLog installs a logger directly on the server's internal
+// proxy, overriding the slog-wiring logger installed in New(), so tests can
+// inspect RequestLogData (notably ClientAddr) without parsing log output.
+func captureServerLog(t *testing.T, srv *Server) func() proxy.RequestLogData {
+	t.Helper()
+	ch := make(chan proxy.RequestLogData, 8)
+	srv.proxy.SetLogger(func(d proxy.RequestLogData) { ch <- d })
+	return func() proxy.RequestLogData {
+		t.Helper()
+		select {
+		case d := <-ch:
+			return d
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for canonical log line")
+			return proxy.RequestLogData{}
+		}
+	}
+}
+
+// TestServerProxyProtocol_V1 reproduces the GCE deployment scenario: gatekeeper
+// runs behind a GCP global TCP Proxy load balancer, which terminates the
+// client TCP connection and dials gatekeeper from its own front-end IP
+// (35.191.0.0/16), prepending a PROXY protocol v1 header naming the real
+// client. With network.proxy_protocol enabled, the canonical log line's
+// ClientAddr must reflect that real client — here a spoofed Modal egress IP,
+// 100.52.56.181 — not the load balancer's peer address.
+func TestServerProxyProtocol_V1(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+	backendURL, _ := url.Parse(backend.URL)
+
+	cfg := &Config{
+		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		Network: NetworkConfig{Policy: "permissive", ProxyProtocol: true},
+	}
+	srv, err := New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	waitLog := captureServerLog(t, srv)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	conn, err := net.Dial("tcp", srv.ProxyAddr())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write([]byte("PROXY TCP4 100.52.56.181 10.0.0.1 51234 8080\r\n")); err != nil {
+		t.Fatalf("write PROXY header: %v", err)
+	}
+
+	req := fmt.Sprintf("GET %s/some/path HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", backend.URL, backendURL.Host)
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	logged := waitLog()
+	host, _, err := net.SplitHostPort(logged.ClientAddr)
+	if err != nil {
+		t.Fatalf("ClientAddr = %q: SplitHostPort: %v", logged.ClientAddr, err)
+	}
+	if host != "100.52.56.181" {
+		t.Errorf("ClientAddr host = %q, want 100.52.56.181 (the PROXY-header source), not the LB's own peer address", host)
+	}
+}
+
+// TestServerProxyProtocol_V2 is the binary-header counterpart to
+// TestServerProxyProtocol_V1: the GCP LB (like most modern proxies) may send
+// PROXY protocol v2 instead of the text v1 format.
+func TestServerProxyProtocol_V2(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+	backendURL, _ := url.Parse(backend.URL)
+
+	cfg := &Config{
+		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		Network: NetworkConfig{Policy: "permissive", ProxyProtocol: true},
+	}
+	srv, err := New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	waitLog := captureServerLog(t, srv)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	conn, err := net.Dial("tcp", srv.ProxyAddr())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	header := proxyproto.HeaderProxyFromAddrs(2,
+		&net.TCPAddr{IP: net.ParseIP("100.52.56.181"), Port: 51234},
+		&net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 8080},
+	)
+	if _, err := header.WriteTo(conn); err != nil {
+		t.Fatalf("write PROXY v2 header: %v", err)
+	}
+
+	req := fmt.Sprintf("GET %s/v2/path HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", backend.URL, backendURL.Host)
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	logged := waitLog()
+	host, _, err := net.SplitHostPort(logged.ClientAddr)
+	if err != nil {
+		t.Fatalf("ClientAddr = %q: SplitHostPort: %v", logged.ClientAddr, err)
+	}
+	if host != "100.52.56.181" {
+		t.Errorf("ClientAddr host = %q, want 100.52.56.181 (the PROXY v2-header source)", host)
+	}
+}
+
+// TestServerProxyProtocol_FailSafeNoHeader verifies that a connection with no
+// PROXY header still succeeds when network.proxy_protocol is enabled — the LB's
+// own health checks and any direct probe of the port do not send one, and
+// must not be rejected.
+func TestServerProxyProtocol_FailSafeNoHeader(t *testing.T) {
+	cfg := &Config{
+		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		Network: NetworkConfig{Policy: "permissive", ProxyProtocol: true},
+	}
+	srv, err := New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	conn, err := net.Dial("tcp", srv.ProxyAddr())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	req := "GET /healthz HTTP/1.1\r\nHost: gatekeeper\r\nConnection: close\r\n\r\n"
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (fail-open when no PROXY header is present); body = %s", resp.StatusCode, body)
+	}
+}
+
+// TestServerProxyProtocol_DisabledDefault verifies that behavior is
+// unchanged when network.proxy_protocol is left unset (the default): the
+// canonical log line's ClientAddr is the raw TCP peer address, exactly as
+// before this feature existed.
+func TestServerProxyProtocol_DisabledDefault(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		Network: NetworkConfig{Policy: "permissive"}, // proxy_protocol left unset
+	}
+	srv, err := New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	waitLog := captureServerLog(t, srv)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	proxyURL, _ := url.Parse("http://" + srv.ProxyAddr())
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+	}
+	resp, err := client.Get(backend.URL + "/plain")
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	logged := waitLog()
+	host, _, err := net.SplitHostPort(logged.ClientAddr)
+	if err != nil {
+		t.Fatalf("ClientAddr = %q: SplitHostPort: %v", logged.ClientAddr, err)
+	}
+	if host != "127.0.0.1" {
+		t.Errorf("ClientAddr host = %q, want 127.0.0.1 (peer address; proxy_protocol disabled)", host)
+	}
+}
+
+// TestServerProxyProtocol_ConnectIntercepted verifies PROXY protocol parsing
+// also covers CONNECT-intercepted HTTPS traffic. Every request path
+// (including intercepted inner requests) logs from the outer, tunnel-opening
+// request's RemoteAddr (see proxy/proxy.go:191-196), so rewriting the
+// accepted net.Conn's RemoteAddr at the listener is sufficient here too: the
+// inner request's canonical log line must carry the PROXY header's source
+// address.
+func TestServerProxyProtocol_ConnectIntercepted(t *testing.T) {
+	caDir := t.TempDir()
+	ca, err := proxy.NewCA(caDir)
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+
+	_, backendPort, caCertPool := startTLSBackend(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		TLS: TLSConfig{
+			CACert: filepath.Join(caDir, "ca.crt"),
+			CAKey:  filepath.Join(caDir, "ca.key"),
+		},
+		Network: NetworkConfig{Policy: "permissive", ProxyProtocol: true},
+	}
+	srv, err := New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.proxy.SetUpstreamCAs(caCertPool)
+	waitLog := captureServerLog(t, srv)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	conn, err := net.Dial("tcp", srv.ProxyAddr())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write([]byte("PROXY TCP4 100.52.56.181 10.0.0.1 51234 8080\r\n")); err != nil {
+		t.Fatalf("write PROXY header: %v", err)
+	}
+
+	backendAddr := "127.0.0.1:" + backendPort
+	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", backendAddr, backendAddr)
+	connectResp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	if connectResp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT status = %d, want 200", connectResp.StatusCode)
+	}
+
+	tlsConn := tls.Client(conn, &tls.Config{
+		RootCAs:    caCertPool,
+		ServerName: "127.0.0.1",
+		MinVersion: tls.VersionTLS12,
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	defer tlsConn.Close()
+
+	fmt.Fprintf(tlsConn, "GET /inner HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", backendAddr)
+	innerResp, err := http.ReadResponse(bufio.NewReader(tlsConn), nil)
+	if err != nil {
+		t.Fatalf("read inner response: %v", err)
+	}
+	io.ReadAll(innerResp.Body)
+	innerResp.Body.Close()
+	if innerResp.StatusCode != http.StatusOK {
+		t.Fatalf("inner status = %d, want 200", innerResp.StatusCode)
+	}
+
+	logged := waitLog()
+	if logged.RequestType != "connect" {
+		t.Fatalf("RequestType = %q, want connect", logged.RequestType)
+	}
+	host, _, err := net.SplitHostPort(logged.ClientAddr)
+	if err != nil {
+		t.Fatalf("ClientAddr = %q: SplitHostPort: %v", logged.ClientAddr, err)
+	}
+	if host != "100.52.56.181" {
+		t.Errorf("ClientAddr host = %q, want 100.52.56.181 (PROXY-header source, carried through TLS interception)", host)
 	}
 }
 

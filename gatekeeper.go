@@ -29,6 +29,7 @@ import (
 	"github.com/majorcontext/gatekeeper/credentialsource"
 	"github.com/majorcontext/gatekeeper/proxy"
 
+	"github.com/pires/go-proxyproto"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -757,6 +758,30 @@ func (s *Server) Start(ctx context.Context) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("starting proxy listener: %w", err)
+	}
+
+	// GCE deployments sit behind a GCP global TCP Proxy load balancer, which
+	// terminates the client TCP connection and dials gatekeeper from its own
+	// front-end IP (35.191.0.0/16) — so without this, the client_ip request-log
+	// attribute always shows the LB, never the real client. When enabled, the
+	// LB prepends a PROXY protocol v1/v2 header naming the real source
+	// address; wrapping the listener here rewrites each accepted conn's
+	// RemoteAddr() to that address before http.Server (and therefore every
+	// request-logging path, including CONNECT-intercepted inner requests,
+	// which all log from the outer request's RemoteAddr) ever sees it.
+	//
+	// The policy is pinned to USE (rather than left at the library default)
+	// so a connection without a PROXY header still passes through using its
+	// real TCP peer address instead of being rejected — fail-open, so LB
+	// health checks and direct probes of the port keep working.
+	if s.cfg.Network.ProxyProtocol {
+		ln = &proxyproto.Listener{
+			Listener:          ln,
+			ReadHeaderTimeout: 10 * time.Second,
+			ConnPolicy: func(proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) {
+				return proxyproto.USE, nil
+			},
+		}
 	}
 
 	slog.Info("gatekeeper listening", "addr", ln.Addr().String(), "version", s.version)

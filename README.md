@@ -57,6 +57,7 @@ credentials:
 
 network:
   policy: permissive
+  # proxy_protocol: true  # behind a TCP-terminating LB, recover the real client_ip
 
 log:
   level: info
@@ -127,6 +128,8 @@ network:
 ```
 
 Policies: `permissive` (allow all), `strict` (deny all, allow listed).
+
+Behind a TCP-terminating load balancer (e.g. GCP's global TCP Proxy LB), every connection's peer address is the load balancer's, not the real client — `network.proxy_protocol: true` parses a PROXY protocol v1/v2 header from the LB and uses its advertised source as the `client_ip` recorded in request logs. It's fail-open (headerless connections, like LB health checks, fall back to the raw peer address) and should only be enabled when the port is reachable solely through the load balancer, since the header is otherwise forgeable by any direct client.
 
 ## Postgres data plane
 
