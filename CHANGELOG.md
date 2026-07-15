@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.17.2 — 2026-07-15
+
+### Fixed
+
+- **Gatekeeper's own OTel diagnostics no longer feed back into the failing OTel log-export pipeline** — `configureLogging` fans every slog record out to `otelslog.NewHandler("gatekeeper")` unconditionally: the bridge's `Enabled` defers entirely to the OTel logger, not the console handler's configured level, so nothing before v0.17.0's DEBUG demotion (and nothing since) kept the bridge from seeing a record just because it was noisy. That meant `logOTelError` ([#47](https://github.com/majorcontext/gatekeeper/pull/47))'s own DEBUG record on a failed export was itself enqueued right back into the OTel log-export pipeline that had just failed: failed export → DEBUG diagnostic → diagnostic fanned out to the bridge → re-enqueued for the next export → that export fails too, now carrying the diagnostic → another diagnostic logged → re-enqueued again, and so on for as long as the collector stays unreachable. Bounded — one record per export attempt, and the batch queue drops on overflow rather than growing without limit — but a genuine feedback loop, not merely repeated independent failures. `gatekeeper.OTelDiagnosticKey` is a new exported marker attribute; `logOTelError` tags its DEBUG record with it, and `configureLogging`'s otelslog bridge handler is now wrapped in a filter that drops any record carrying the marker before forwarding — the console/file handler is unaffected and still logs every record, marked or not, at its configured level. Diagnostics about the OTel pipeline itself are now visible locally but never re-enter the pipeline they're reporting on ([#48](https://github.com/majorcontext/gatekeeper/issues/48))
+
 ## v0.17.1 — 2026-07-15
 
 ### Fixed

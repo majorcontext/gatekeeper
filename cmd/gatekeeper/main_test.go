@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 	"testing"
+
+	"github.com/majorcontext/gatekeeper"
 )
 
 // TestOtelSDKDisabled pins the OTEL_SDK_DISABLED semantics: per the
@@ -89,4 +92,54 @@ func TestLogOTelError_DemotesToDebug(t *testing.T) {
 			t.Errorf("logOTelError did not include the underlying error; got %q", got)
 		}
 	})
+}
+
+// recordingHandler is a minimal slog.Handler that captures every record
+// passed to it, for inspecting the attributes a call site attached.
+type recordingHandler struct {
+	records []slog.Record
+}
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.records = append(h.records, r)
+	return nil
+}
+
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+// TestLogOTelError_MarksAsOTelDiagnostic encodes the fix for #48: gatekeeper.go's
+// configureLogging fans every slog record out to the otelslog bridge
+// unconditionally, so logOTelError's own DEBUG record on a failed OTel
+// export was itself re-enqueued into the same failing OTel log-export
+// pipeline — failed export -> DEBUG diagnostic -> re-enqueued -> next
+// export fails carrying it -> another diagnostic, indefinitely while the
+// collector is unreachable. logOTelError must mark its record with
+// gatekeeper.OTelDiagnosticKey so configureLogging's bridge filter can keep
+// it out of that pipeline.
+func TestLogOTelError_MarksAsOTelDiagnostic(t *testing.T) {
+	var handler recordingHandler
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(&handler))
+
+	logOTelError(errors.New(`Post "https://localhost:4318/v1/logs": dial tcp [::1]:4318: connect: connection refused`))
+
+	if len(handler.records) != 1 {
+		t.Fatalf("got %d records, want 1", len(handler.records))
+	}
+
+	marked := false
+	handler.records[0].Attrs(func(a slog.Attr) bool {
+		if a.Key == gatekeeper.OTelDiagnosticKey && a.Value.Kind() == slog.KindBool && a.Value.Bool() {
+			marked = true
+			return false
+		}
+		return true
+	})
+	if !marked {
+		t.Errorf("logOTelError record missing %s=true attribute, so configureLogging's bridge filter can't exclude it from the OTel log-export pipeline", gatekeeper.OTelDiagnosticKey)
+	}
 }

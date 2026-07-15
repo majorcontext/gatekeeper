@@ -2935,6 +2935,48 @@ func TestMultiHandler_WithGroup(t *testing.T) {
 	}
 }
 
+// fakeSlogHandler is a minimal slog.Handler that records every record it
+// receives, for observing what actually reaches a handler in tests.
+type fakeSlogHandler struct {
+	records []slog.Record
+}
+
+func (f *fakeSlogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (f *fakeSlogHandler) Handle(_ context.Context, r slog.Record) error {
+	f.records = append(f.records, r)
+	return nil
+}
+
+func (f *fakeSlogHandler) WithAttrs([]slog.Attr) slog.Handler { return f }
+func (f *fakeSlogHandler) WithGroup(string) slog.Handler      { return f }
+
+// TestOTelDiagnosticFilter_KeepsBridgeOutOfLoop encodes the fix for #48:
+// gatekeeper's own OTel diagnostics (logOTelError's DEBUG record on a
+// failed export) must never reach the otelslog bridge handler, or the
+// diagnostic itself gets enqueued into the same failing OTel log-export
+// pipeline — producing another diagnostic on the next failed attempt, and
+// so on indefinitely while a collector is unreachable. The console handler
+// must still see every record, marked or not.
+func TestOTelDiagnosticFilter_KeepsBridgeOutOfLoop(t *testing.T) {
+	var console, bridge fakeSlogHandler
+	handler := newMultiHandler(&console, newOTelDiagnosticFilter(&bridge))
+	logger := slog.New(handler)
+
+	logger.Debug("otel error", "error", "dial tcp [::1]:4318: connect: connection refused", OTelDiagnosticKey, true)
+	logger.Info("normal request", "host", "example.com")
+
+	if got := len(console.records); got != 2 {
+		t.Fatalf("console handler received %d records, want 2 (both records)", got)
+	}
+	if got := len(bridge.records); got != 1 {
+		t.Fatalf("bridge handler received %d records, want 1 (the marked diagnostic must be filtered out)", got)
+	}
+	if got := bridge.records[0].Message; got != "normal request" {
+		t.Errorf("bridge handler's surviving record = %q, want %q (the unmarked one)", got, "normal request")
+	}
+}
+
 func TestHTTPSTokenExchangeOutrankedByStatic(t *testing.T) {
 	// End-to-end wiring check for outranked resolvers: a token-exchange
 	// credential under a wildcard host is outranked by a static credential
