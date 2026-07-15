@@ -4,13 +4,13 @@ description: "How Gatekeeper proxies the Postgres wire protocol, authenticating 
 keywords: ["gatekeeper", "postgres", "neon", "SCRAM", "credential injection", "database proxy"]
 ---
 
-# Postgres Data Plane
+# Postgres data plane
 
 Gatekeeper runs a second listener that speaks the Postgres wire protocol. A client connects to it with the real database hostname and an authentication token in place of the database password. Gatekeeper resolves the real password, authenticates upstream, and relays the connection. The database password never reaches the client.
 
 This mirrors the HTTP credential-injection plane: the client presents a weak identity (its run token), and Gatekeeper substitutes the real credential before talking to the upstream. The two planes share configuration, network policy, per-run context scoping, and audit logging.
 
-## What It Solves
+## What it solves
 
 A client that connects to a managed Postgres database directly holds a connection string with an embedded password. A process that reads its own environment can copy that string and connect from anywhere; a network allowlist is the only remaining control.
 
@@ -24,7 +24,7 @@ The target endpoint travels in the connection's TLS Server Name Indication (SNI)
 
 Routing by SNI is what allows a single listener to reach arbitrary endpoints — including database branches created after Gatekeeper started — without enumerating them in configuration. The embedder arranges DNS so the database hostname resolves to Gatekeeper inside the client's environment; that DNS configuration is outside Gatekeeper's scope.
 
-## Connection Lifecycle
+## Connection lifecycle
 
 1. The client sends an `SSLRequest`. Gatekeeper replies `S` and completes a TLS handshake using a certificate minted from the configured CA for the SNI hostname. A client that skips the `SSLRequest` is refused before any credential is requested, so the run token never crosses the wire unencrypted.
 2. The client sends a `StartupMessage` carrying the user (role) and database.
@@ -46,7 +46,7 @@ A credential with a `postgres` block selects how the upstream password is resolv
 
 The API key is itself a credential source, so it can come from an environment variable, AWS Secrets Manager, or GCP Secret Manager. See [Credential Sources](./03-credential-sources.md).
 
-## Security Properties
+## Security properties
 
 - Run-token comparison uses the same constant-time path as the HTTP plane.
 - The client's token is read only inside Gatekeeper's TLS tunnel.

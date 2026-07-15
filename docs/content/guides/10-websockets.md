@@ -4,11 +4,11 @@ description: "WebSocket connections work through Gatekeeper with credential inje
 keywords: ["gatekeeper", "WebSocket", "upgrade request", "bidirectional tunneling"]
 ---
 
-# WebSocket Support
+# WebSocket support
 
 WebSocket connections work through gatekeeper with no special configuration. The proxy intercepts the TLS connection, injects credentials on the HTTP upgrade request, and then tunnels the bidirectional WebSocket frames transparently.
 
-## How It Works
+## How it works
 
 1. The client sends `CONNECT host:443` through the proxy.
 2. Gatekeeper terminates TLS and reads the plaintext HTTP request.
@@ -70,7 +70,7 @@ After the upgrade completes, the proxy tunnels frames bidirectionally until eith
 - The proxy does not inspect or modify WebSocket frame content.
 - Connection lifetime is bounded by the proxy's idle timeout and the underlying TCP keepalive settings.
 
-## Next Steps
+## Next steps
 
-- [Network Lockdown](./07-network-lockdown.md) — restrict which WebSocket hosts the proxy can reach
+- [Network Lockdown](./07-network-lockdown.md) — restrict which WebSocket hosts the proxy reaches
 - [OpenTelemetry](./08-opentelemetry.md) — trace WebSocket CONNECT tunnels

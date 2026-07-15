@@ -4,7 +4,7 @@ description: "Generate a Certificate Authority for TLS interception and configur
 keywords: ["gatekeeper", "CA certificate", "TLS setup", "certificate trust"]
 ---
 
-# CA Certificate Setup
+# CA certificate setup
 
 Generate a Certificate Authority for TLS interception and trust it on your system. Gatekeeper uses this CA to sign per-host certificates dynamically, enabling credential injection into HTTPS requests.
 
@@ -56,7 +56,7 @@ sudo cp ca.crt /etc/pki/ca-trust/source/anchors/gatekeeper-ca.crt
 sudo update-ca-trust
 ```
 
-## Per-Tool Trust
+## Per-tool trust
 
 Some tools require explicit CA configuration instead of using the system store.
 
@@ -97,6 +97,6 @@ curl --cacert ca.crt --proxy http://127.0.0.1:9080 -v https://example.com 2>&1 |
 
 The output should show the CN of your CA certificate as the issuer.
 
-## Next Steps
+## Next steps
 
 - [Environment Credentials](./02-environment-credentials.md) — inject your first credential through the proxy

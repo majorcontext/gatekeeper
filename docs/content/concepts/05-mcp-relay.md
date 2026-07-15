@@ -4,18 +4,18 @@ description: "How Gatekeeper relays Model Context Protocol requests to remote MC
 keywords: ["gatekeeper", "MCP relay", "model context protocol", "SSE streaming"]
 ---
 
-# MCP Relay
+# MCP relay
 
 Gatekeeper relays Model Context Protocol (MCP) requests to remote MCP servers with credential injection. MCP clients that cannot route traffic through an HTTP proxy connect to gatekeeper's relay endpoint directly, and gatekeeper forwards requests to the real MCP server with authentication headers attached.
 
-## What MCP Relay Does
+## What MCP relay does
 
 MCP servers often require authentication — an API key, OAuth token, or other credential. The MCP relay solves two problems:
 
 1. **Credential injection for MCP.** The client sends requests to gatekeeper without credentials. Gatekeeper looks up the configured grant for the target MCP server and injects the real credential before forwarding.
 2. **Proxy bypass.** Some MCP clients do not respect `HTTP_PROXY` settings. The relay endpoint (`/mcp/{server-name}`) accepts direct HTTP connections, eliminating the need for proxy-aware clients.
 
-## Request Flow
+## Request flow
 
 A relay request follows this path:
 
@@ -36,17 +36,17 @@ A relay request follows this path:
 
 A request to `/mcp/context7/v1/endpoint` forwards to `https://mcp.context7.com/mcp/v1/endpoint` with the `Authorization` header set to the resolved credential.
 
-## Daemon-Mode Token-Embedded Path
+## Daemon-mode token-embedded path
 
 The relay path above (`/mcp/{server-name}`) relies on `Proxy-Authorization` to resolve run context, which requires the request to go through the proxy mechanism. When gatekeeper runs with a `ContextResolver` (daemon mode — moat's per-run registration, not standalone `gatekeeper.yaml` mode) and a request arrives directly rather than proxied, gatekeeper also serves `/mcp/{token}/{server-name}[/path]`: the run's proxy auth token is embedded in the URL itself, since a direct request carries no `Proxy-Authorization` header. Gatekeeper extracts the token, resolves it to run context, strips the token from the path, and dispatches to the same relay handling described above. This form only exists in daemon mode — standalone gatekeeper has no `ContextResolver` and does not serve it.
 
-## SSE Streaming
+## SSE streaming
 
 MCP uses Server-Sent Events (SSE) for streaming responses. Gatekeeper supports this with a per-chunk flush loop (`streamResponseBody`), not `io.Copy`'s buffered copy: it reads the upstream body in 4096-byte chunks and, after writing each chunk to the client, calls `Flush()` on the `http.ResponseWriter` if it implements `http.Flusher` — so events reach the client as they arrive rather than waiting for a larger buffer to fill.
 
 The relay HTTP client has no client-level timeout — MCP SSE streams are long-lived connections that may remain open indefinitely.
 
-## Credential Injection Modes
+## Credential injection modes
 
 MCP credential injection works in two modes:
 
@@ -56,7 +56,7 @@ MCP credential injection works in two modes:
 
 For OAuth grants (grant names starting with `oauth:`), the credential value is automatically prefixed with `Bearer `.
 
-## Keep Policy Evaluation
+## Keep policy evaluation
 
 When a Keep policy engine is configured for an MCP server (keyed as `mcp-{server-name}`), gatekeeper evaluates `tools/call` requests before forwarding:
 
@@ -65,7 +65,7 @@ When a Keep policy engine is configured for an MCP server (keyed as `mcp-{server
 - If the engine returns `Redact`, tool arguments are mutated according to the policy's mutation rules, and the modified request is forwarded.
 - Non-JSON request bodies are denied (fail-closed) when a policy is configured.
 
-## Error Handling
+## Error handling
 
 - Unknown server name: `404` with a message listing available server count.
 - Credential resolution failure: `500` with the grant name and a suggested `moat grant` command.

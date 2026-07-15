@@ -4,7 +4,7 @@ description: "Read a credential from an environment variable and inject it into 
 keywords: ["gatekeeper", "environment variables", "credential injection", "env source"]
 ---
 
-# Environment Variable Credentials
+# Environment variable credentials
 
 Read a credential from an environment variable and inject it into HTTPS requests. This is the simplest credential source.
 
@@ -44,7 +44,7 @@ log:
 
 The `env` source reads the credential from the environment variable named in `var`. The variable must be set when the proxy starts.
 
-## Start the Proxy
+## Start the proxy
 
 Set the token and start gatekeeper:
 
@@ -63,7 +63,7 @@ Gatekeeper resolves the credential at startup. For `Authorization` headers, the 
 
 Override with the `prefix` field if needed.
 
-## Make a Request
+## Make a request
 
 In another terminal:
 
@@ -81,7 +81,7 @@ Check the proxy log output. A successful injection produces a line like:
 level=INFO msg=request http_method=GET http_host=api.github.com http_status=200 credential_injected=true injected_headers=authorization grants=github
 ```
 
-## Next Steps
+## Next steps
 
 - [AWS Secrets Manager](./03-aws-secrets-manager.md) — fetch credentials from AWS instead of environment variables
-- [Network Lockdown](./07-network-lockdown.md) — restrict which hosts the proxy can reach
+- [Network Lockdown](./07-network-lockdown.md) — restrict which hosts the proxy reaches

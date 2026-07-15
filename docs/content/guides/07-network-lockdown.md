@@ -4,7 +4,7 @@ description: "Restrict which hosts the proxy forwards traffic to using strict ne
 keywords: ["gatekeeper", "network lockdown", "strict policy", "allow list"]
 ---
 
-# Network Lockdown
+# Network lockdown
 
 Restrict which hosts the proxy forwards traffic to. By default, gatekeeper operates in `permissive` mode -- it proxies requests to any host. Switch to `strict` mode to deny all traffic except explicitly allowed hosts.
 
@@ -13,7 +13,7 @@ Restrict which hosts the proxy forwards traffic to. By default, gatekeeper opera
 - CA certificate generated ([CA Setup](./01-ca-setup.md))
 - A working gatekeeper configuration with at least one credential
 
-## Permissive Mode (Default)
+## Permissive mode (default)
 
 The default configuration allows traffic to all hosts:
 
@@ -24,7 +24,7 @@ network:
 
 All CONNECT and HTTP requests pass through. Credentials are injected only for matching hosts; all other traffic is forwarded without modification.
 
-## Strict Mode
+## Strict mode
 
 Switch to `strict` to deny all traffic except listed hosts:
 
@@ -38,7 +38,7 @@ network:
 
 Requests to unlisted hosts receive an HTTP `407` response with a `Proxy-Authenticate: Moat-Policy` header.
 
-## Glob Patterns
+## Glob patterns
 
 The `allow` list supports glob patterns for flexible matching:
 
@@ -50,7 +50,7 @@ The `allow` list supports glob patterns for flexible matching:
 
 Port numbers are stripped before matching -- `api.github.com:443` matches a rule for `api.github.com`.
 
-## Combined Configuration
+## Combined configuration
 
 Combine credential injection with network lockdown:
 
@@ -103,6 +103,6 @@ Confirm allowed requests still work:
 curl --cacert ca.crt --proxy http://127.0.0.1:9080 https://api.github.com/user
 ```
 
-## Next Steps
+## Next steps
 
 - [OpenTelemetry](./08-opentelemetry.md) — monitor denied requests with metrics and traces

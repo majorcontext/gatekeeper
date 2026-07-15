@@ -4,7 +4,7 @@ description: "Fetch a credential from Google Cloud Secret Manager at proxy start
 keywords: ["gatekeeper", "GCP Secret Manager", "credential source", "cloud secrets"]
 ---
 
-# GCP Secret Manager Credentials
+# GCP Secret Manager credentials
 
 Fetch a credential from Google Cloud Secret Manager at proxy startup and inject it into HTTPS requests.
 
@@ -14,7 +14,7 @@ Fetch a credential from Google Cloud Secret Manager at proxy startup and inject 
 - GCP Application Default Credentials configured (`gcloud auth application-default login` or a service account key)
 - A secret stored in GCP Secret Manager containing the credential value
 
-## IAM Permissions
+## IAM permissions
 
 The service account or principal running gatekeeper needs the `Secret Manager Secret Accessor` role (`roles/secretmanager.secretAccessor`) on the target secret.
 
@@ -56,7 +56,7 @@ log:
 
 Gatekeeper constructs the resource name `projects/{project}/secrets/{secret}/versions/{version}` and fetches the payload at startup with a 10-second timeout.
 
-## Pin a Specific Version
+## Pin a specific version
 
 To pin to a specific secret version instead of `latest`:
 
@@ -68,7 +68,7 @@ source:
   version: "3"
 ```
 
-## Start the Proxy
+## Start the proxy
 
 ```bash
 gatekeeper --config gatekeeper.yaml
@@ -90,7 +90,7 @@ level=INFO msg=request http_host=api.github.com credential_injected=true grants=
 
 > **Note:** Gatekeeper fetches the secret once at startup. To pick up a rotated secret, restart the proxy.
 
-## Next Steps
+## Next steps
 
 - [GitHub App Tokens](./05-github-app-tokens.md) — auto-refreshing short-lived tokens
 - [Network Lockdown](./07-network-lockdown.md) — restrict proxy traffic to specific hosts

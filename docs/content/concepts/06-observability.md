@@ -8,7 +8,7 @@ keywords: ["gatekeeper", "observability", "OpenTelemetry", "metrics", "logging"]
 
 Gatekeeper produces structured logs, distributed traces, and request metrics via OpenTelemetry. The proxy core has no direct OTel dependency — instrumentation is layered on externally through callbacks and HTTP middleware.
 
-## Callback-Based Architecture
+## Callback-based architecture
 
 The `proxy` package defines two callback types for instrumentation:
 
@@ -17,7 +17,7 @@ The `proxy` package defines two callback types for instrumentation:
 
 The `gatekeeper` package (standalone server wiring) sets these callbacks at startup. The callbacks write canonical log lines, enrich OTel spans, and record metrics. This design keeps `proxy/proxy.go` free of OTel imports.
 
-## OTelHandler Middleware
+## OTelHandler middleware
 
 `proxy.OTelHandler` wraps the proxy's `http.Handler` with OpenTelemetry tracing and metrics:
 
@@ -39,7 +39,7 @@ The `statusRecorder` implements `http.Hijacker` by delegating to the underlying 
 
 `OTelHandler` wraps only the HTTP proxy listener. The Postgres data-plane listener (see [Postgres Data Plane](./08-postgres-data-plane.md)) is a separate `net.Listener` that this middleware never sees, so it produces no `proxy.request`-family spans or `proxy.request.duration`/`proxy.request.count` metrics — `postgres` connections are observable only through the canonical log line below.
 
-## Canonical Log Lines
+## Canonical log lines
 
 Gatekeeper emits one wide structured log entry per request at completion. Each log line contains all request context in a single record:
 
@@ -67,7 +67,7 @@ Gatekeeper emits one wide structured log entry per request at completion. Each l
 
 Log level is determined by outcome: `ERROR` for server errors or transport failures, `WARN` for policy denials or client errors, `INFO` for successful requests.
 
-## Client IP Attribution Behind a Load Balancer
+## Client IP attribution behind a load balancer
 
 By default, `client_ip` comes from the raw TCP peer address of the proxy listener's accepted connection. That's accurate for a directly-exposed listener, but not for one that sits behind a TCP-terminating load balancer (e.g. GCP's global TCP Proxy load balancer) — every connection appears to originate from the load balancer's own front-end range (`35.191.0.0/16` for GCP), not the real client.
 
@@ -75,7 +75,7 @@ Setting `network.proxy_protocol: true` wraps the proxy listener with PROXY proto
 
 Because the header is honored from any peer that can reach the listener, only enable `proxy_protocol` when the port is reachable solely through the load balancer, and never use `client_ip` for security decisions — it's a logging convenience, not an authenticated identity.
 
-## Request ID Tracking
+## Request ID tracking
 
 Every request receives a unique identifier. Gatekeeper checks for an `X-Request-Id` header from the caller. If present, it is reused. Otherwise, gatekeeper generates a TypeID with a `req` prefix (e.g., `req_01h455vb4pex5vsknk084sn02q`).
 
@@ -86,7 +86,7 @@ The request ID is:
 - Stored in the request context for extraction by loggers and span enrichment.
 - Included in canonical log lines and OTel span events.
 
-## slog-to-OTel Bridge
+## slog-to-OTel bridge
 
 Gatekeeper uses a `multiHandler` to fan out every slog record to two destinations:
 
