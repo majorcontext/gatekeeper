@@ -64,6 +64,7 @@ Gatekeeper emits one wide structured log entry per request at completion. Each l
 | `error` | Error message, when the request ended in an error |
 | `run_id` | Per-run identifier (daemon mode) |
 | `user_id` | User ID from proxy auth username |
+| `application_name` | Postgres connections only: the client's `application_name` startup parameter, sanitized and length-bounded. A correlation slug the client sets, not a trusted identity — see [Postgres Data Plane](./08-postgres-data-plane.md#tracing-a-connection-to-its-origin). Omitted when the client didn't set one. |
 
 Log level is determined by outcome: `ERROR` for server errors or transport failures, `WARN` for policy denials or client errors, `INFO` for successful requests.
 

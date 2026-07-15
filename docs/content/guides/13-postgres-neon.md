@@ -114,6 +114,18 @@ PGPASSWORD=local-test-token psql \
 
 `host` never touches DNS here — it only sets SNI — so this works even for endpoint hostnames that don't resolve from your machine at all.
 
+## Tracing a connection to its origin
+
+Set `application_name` to identify which caller opened a given connection in gatekeeper's logs:
+
+```bash
+PGAPPNAME=box-abc123 PGPASSWORD=local-test-token psql \
+  "host=ep-cool-darkness-123456.us-east-2.aws.neon.tech \
+   dbname=neondb user=neondb_owner sslmode=require"
+```
+
+Gatekeeper captures it (sanitized) as `application_name` on the canonical log line, alongside the authenticated `run_id`. It's forwarded upstream unchanged too, so it also shows up in Neon's `pg_stat_activity` — but unlike `run_id`, it's client-set and not authenticated. See [Tracing a connection to its origin](../concepts/08-postgres-data-plane.md#tracing-a-connection-to-its-origin).
+
 ## Static resolver alternative
 
 For a non-Neon Postgres server, or to pin a single fixed password instead of calling the Neon API, use `resolver: static`. The source supplies the password directly and gatekeeper fetches it once at startup:

@@ -96,10 +96,11 @@ type fakePostgresServer struct {
 	// assert the message is surfaced in gatekeeper's logs set it explicitly.
 	failPostAuthMessage string
 
-	mu        sync.Mutex
-	authOK    int
-	authFail  int
-	lastQuery string
+	mu                sync.Mutex
+	authOK            int
+	authFail          int
+	lastQuery         string
+	lastStartupParams map[string]string
 }
 
 // fakePostgresOption customizes a fakePostgresServer before it starts serving.
@@ -138,6 +139,16 @@ func (f *fakePostgresServer) queriedLast() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lastQuery
+}
+
+// lastApplicationName returns the "application_name" startup parameter the
+// proxy forwarded upstream on the most recent connection, letting a test
+// verify that capturing application_name for the request log does not
+// mutate what actually gets forwarded to the real database.
+func (f *fakePostgresServer) lastApplicationName() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastStartupParams["application_name"]
 }
 
 // startFakePostgres starts a fake Postgres server on 127.0.0.1:0. The listener
@@ -231,6 +242,9 @@ func (f *fakePostgresServer) handle(conn net.Conn) {
 	if !ok {
 		return
 	}
+	f.mu.Lock()
+	f.lastStartupParams = sm.Parameters
+	f.mu.Unlock()
 	if sm.Parameters["user"] != f.user {
 		// 28000 invalid_authorization_specification: what real Postgres sends
 		// for an unknown role.

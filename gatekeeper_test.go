@@ -2929,6 +2929,162 @@ func TestServerPostgresProxyProtocol(t *testing.T) {
 	}
 }
 
+// TestServerPostgresLogsApplicationName verifies gatekeeper's canonical
+// "request" log line -- the slog attrs wired in New()'s p.SetLogger callback,
+// not just the RequestLogData the proxy package hands it -- carries an
+// application_name attribute for a client-set Postgres application_name
+// startup parameter (the Postgres analogue of the HTTP capture_headers
+// feature), and that the attribute is entirely absent, not merely empty,
+// when the client never set one -- the same non-empty gating run_id and
+// client_ip already get.
+func TestServerPostgresLogsApplicationName(t *testing.T) {
+	tests := []struct {
+		name            string
+		applicationName string
+		wantSubstring   string
+		wantAbsent      string
+	}{
+		{
+			name:            "present",
+			applicationName: "box-abc123",
+			wantSubstring:   "application_name=box-abc123",
+		},
+		{
+			name:       "absent when the client does not set it",
+			wantAbsent: "application_name=",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			caDir := t.TempDir()
+			ca, err := proxy.NewCA(caDir)
+			if err != nil {
+				t.Fatalf("NewCA: %v", err)
+			}
+			caPool := x509.NewCertPool()
+			if !caPool.AppendCertsFromPEM(ca.CertPEM()) {
+				t.Fatal("failed to add CA cert to pool")
+			}
+
+			cfg := &Config{
+				Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+				TLS: TLSConfig{
+					CACert: filepath.Join(caDir, "ca.crt"),
+					CAKey:  filepath.Join(caDir, "ca.key"),
+				},
+				Postgres: &PostgresConfig{Port: 0},
+				Credentials: []CredentialConfig{
+					{
+						Host:     "*.neon.tech",
+						Postgres: &PostgresCredentialConfig{Resolver: "static"},
+						Source:   SourceConfig{Type: "static", Value: "pw"},
+					},
+				},
+			}
+
+			srv, err := New(context.Background(), cfg, "")
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			// Deliberately do NOT override SetLogger here (unlike
+			// captureServerLog elsewhere in this file): this test exercises the
+			// real slog-emitting logger New() installs.
+			logBuf := captureDefaultSlog(t)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() { _ = srv.Start(ctx) }()
+
+			deadline := time.Now().Add(2 * time.Second)
+			var pgAddr string
+			for {
+				pgAddr = srv.PostgresAddr()
+				if pgAddr != "" {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("postgres listener did not start in time")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+
+			conn, err := net.DialTimeout("tcp", pgAddr, time.Second)
+			if err != nil {
+				t.Fatalf("dial postgres listener: %v", err)
+			}
+			defer conn.Close()
+			conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+			frontend := pgproto3.NewFrontend(conn, conn)
+			frontend.Send(&pgproto3.SSLRequest{})
+			if err := frontend.Flush(); err != nil {
+				t.Fatalf("send SSLRequest: %v", err)
+			}
+			buf := make([]byte, 1)
+			if _, err := io.ReadFull(conn, buf); err != nil {
+				t.Fatalf("read SSLRequest response: %v", err)
+			}
+			if buf[0] != 'S' {
+				t.Fatalf("SSLRequest response = %q, want 'S'", buf[0])
+			}
+
+			// db.test.local matches no configured credential host, so the
+			// connection is denied for lack of a resolver -- but only after the
+			// deny path logs the canonical "request" line, which is all this
+			// test needs (see TestServerPostgresProxyProtocol for the same
+			// pattern).
+			tlsConn := tls.Client(conn, &tls.Config{ServerName: "db.test.local", RootCAs: caPool})
+			if err := tlsConn.Handshake(); err != nil {
+				t.Fatalf("TLS handshake: %v", err)
+			}
+			defer tlsConn.Close()
+
+			params := map[string]string{"user": "app", "database": "appdb"}
+			if tt.applicationName != "" {
+				params["application_name"] = tt.applicationName
+			}
+			fe := pgproto3.NewFrontend(tlsConn, tlsConn)
+			fe.Send(&pgproto3.StartupMessage{
+				ProtocolVersion: pgproto3.ProtocolVersionNumber,
+				Parameters:      params,
+			})
+			if err := fe.Flush(); err != nil {
+				t.Fatalf("send startup: %v", err)
+			}
+			if _, err := fe.Receive(); err != nil {
+				t.Fatalf("receive auth request: %v", err)
+			}
+			fe.Send(&pgproto3.PasswordMessage{Password: "any-token"})
+			if err := fe.Flush(); err != nil {
+				t.Fatalf("send password: %v", err)
+			}
+			if _, err := fe.Receive(); err != nil {
+				t.Fatalf("receive auth result: %v", err)
+			}
+
+			// The log line is written by a goroutine handling the connection,
+			// racing this one; poll briefly for it to land.
+			var text string
+			logDeadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(logDeadline) {
+				text = logBuf.String()
+				if strings.Contains(text, "proxy_type=postgres") {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+
+			if tt.wantSubstring != "" && !strings.Contains(text, tt.wantSubstring) {
+				t.Errorf("log output does not contain %q; got:\n%s", tt.wantSubstring, text)
+			}
+			if tt.wantAbsent != "" && strings.Contains(text, tt.wantAbsent) {
+				t.Errorf("log output unexpectedly contains %q; got:\n%s", tt.wantAbsent, text)
+			}
+		})
+	}
+}
+
 func TestServerPostgresStartFailureCleansUpHTTP(t *testing.T) {
 	// Occupy a port so the postgres listener fails to bind to it.
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")

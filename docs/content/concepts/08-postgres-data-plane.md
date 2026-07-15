@@ -48,6 +48,14 @@ A credential with a `postgres` block selects how the upstream password is resolv
 
 The API key is itself a credential source, so it can come from an environment variable, AWS Secrets Manager, or GCP Secret Manager. See [Credential Sources](./03-credential-sources.md).
 
+## Tracing a connection to its origin
+
+The audit entry's `run_id` is the trusted identity: it comes from the authenticated run token, so a client cannot forge it. But `run_id` alone doesn't say *which* connection within a run produced a given log line — a single run can open many Postgres connections over its lifetime.
+
+Clients can additionally set the standard Postgres `application_name` startup parameter (via `PGAPPNAME`, a driver's `application_name=` connection option, or `libpq`'s `application_name` keyword) to a short slug identifying the connection's origin, e.g. a box or worker ID. Gatekeeper captures it into the canonical log line as `application_name` (see [Canonical log lines](./06-observability.md#canonical-log-lines)) — sanitized (control characters stripped) and length-bounded before logging, the Postgres analogue of the HTTP [`capture_headers`](./06-observability.md#canonical-log-lines) feature. The raw value is still forwarded upstream unchanged, so it also surfaces in Neon's own `pg_stat_activity`, giving the same slug on both sides of the proxy.
+
+Unlike `run_id`, `application_name` is not authenticated: the client sets it, so treat it as a correlation hint for debugging, not as proof of origin.
+
 ## Security properties
 
 - Run-token comparison uses the same constant-time path as the HTTP plane.
