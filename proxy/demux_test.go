@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -592,6 +593,153 @@ func TestDemux_StopAcceptingLeavesVirtualListenersOpen(t *testing.T) {
 	}
 	if got != net.Conn(c) {
 		t.Error("Accept returned a different conn than was pushed")
+	}
+
+	d.HTTPListener().Close()
+	d.PostgresListener().Close()
+}
+
+// --- accept-loop resilience to transient Accept errors --------------------
+
+// scriptedAcceptListener is a fake net.Listener whose Accept returns a
+// transient error its first failN times, then hands out conns from a
+// channel, and otherwise blocks until Close. It records how many times
+// Accept is called after Close so a test can prove the demux accept loop
+// exits cleanly on shutdown (exactly one post-close Accept) rather than
+// spin-retrying the closed-listener error.
+type scriptedAcceptListener struct {
+	mu                sync.Mutex
+	failsRemaining    int
+	transientErr      error
+	acceptsAfterClose int
+
+	conns  chan net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newScriptedAcceptListener(failN int, transientErr error) *scriptedAcceptListener {
+	return &scriptedAcceptListener{
+		failsRemaining: failN,
+		transientErr:   transientErr,
+		conns:          make(chan net.Conn, 1),
+		closed:         make(chan struct{}),
+	}
+}
+
+func (l *scriptedAcceptListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	select {
+	case <-l.closed:
+		l.acceptsAfterClose++
+		l.mu.Unlock()
+		return nil, net.ErrClosed
+	default:
+	}
+	if l.failsRemaining > 0 {
+		l.failsRemaining--
+		l.mu.Unlock()
+		return nil, l.transientErr
+	}
+	l.mu.Unlock()
+
+	select {
+	case c := <-l.conns:
+		return c, nil
+	case <-l.closed:
+		l.mu.Lock()
+		l.acceptsAfterClose++
+		l.mu.Unlock()
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *scriptedAcceptListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *scriptedAcceptListener) Addr() net.Addr { return &net.TCPAddr{} }
+
+func (l *scriptedAcceptListener) acceptsAfterCloseCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.acceptsAfterClose
+}
+
+// TestDemux_AcceptLoopRetriesTransientErrors is the regression guard for the
+// availability bug PR #56's review surfaced: Demux.acceptLoop is the SOLE
+// caller of Accept on the real socket in multiplex mode (http.Server only
+// ever sees the virtual listener, which never surfaces OS-level errors), so
+// if the loop exits on the first transient Accept error — EMFILE/ENFILE
+// under fd exhaustion, ECONNABORTED — accept dies for BOTH planes until
+// process restart, silently removing the resilience http.Server.Serve's own
+// accept-retry loop gave the HTTP plane before it was multiplexed. The loop
+// must instead back off and retry (mirroring net/http.Server.Serve) while
+// the listener is live, so a good connection arriving after a burst of
+// transient errors is still dispatched.
+func TestDemux_AcceptLoopRetriesTransientErrors(t *testing.T) {
+	// Three transient failures, then a real, HTTP-classifiable connection.
+	transient := errors.New("simulated EMFILE: too many open files")
+	l := newScriptedAcceptListener(3, transient)
+
+	serverConn, clientConn := net.Pipe()
+	// Exactly demuxSniffLen bytes so sniffProtocol's ReadFull completes and
+	// the pipe writer isn't left blocked: "GET /xxx" classifies as HTTP.
+	go func() { _, _ = clientConn.Write([]byte("GET /xxx")) }()
+	l.conns <- serverConn
+
+	d := NewDemux(l)
+	t.Cleanup(func() { d.Close() })
+
+	// If the loop had exited after the first transient error (the bug), the
+	// good conn is never Accepted from the scripted listener and never
+	// dispatched, so this Accept times out. The 2s bound is far above the
+	// ~35ms the three 5ms/10ms/20ms backoffs take.
+	accepted := acceptWithTimeout(t, d.HTTPListener(), 2*time.Second)
+	defer accepted.Close()
+
+	// The dispatched conn replays the sniffed prefix: prove it's the good
+	// connection that survived the transient-error burst.
+	buf := make([]byte, len("GET /xxx"))
+	if _, err := io.ReadFull(accepted, buf); err != nil {
+		t.Fatalf("read replayed bytes: %v", err)
+	}
+	if string(buf) != "GET /xxx" {
+		t.Errorf("replayed bytes = %q, want %q", buf, "GET /xxx")
+	}
+}
+
+// TestDemux_AcceptLoopExitsCleanlyOnClose guards the other half of the fix:
+// the retry path must not swallow shutdown. When the demux's own close sets
+// closed before closing the real listener, the resulting Accept error is
+// gatekeeper's intentional shutdown, not a transient failure — the loop must
+// return immediately without logging and without spin-retrying the
+// closed-listener error.
+func TestDemux_AcceptLoopExitsCleanlyOnClose(t *testing.T) {
+	logBuf := captureSlogText(t)
+	l := newScriptedAcceptListener(0, nil)
+	d := NewDemux(l)
+
+	// Let the accept loop reach its blocking Accept before shutting down.
+	time.Sleep(20 * time.Millisecond)
+
+	if err := d.StopAccepting(); err != nil {
+		t.Fatalf("StopAccepting: %v", err)
+	}
+
+	// Give the loop time to observe the close and return. A correct loop
+	// calls Accept exactly once more (getting net.ErrClosed), sees closed,
+	// and returns; a loop that treated the closed-listener error as transient
+	// would keep calling Accept on a ~5ms backoff, so the post-close count
+	// would climb past 1 within this window.
+	time.Sleep(80 * time.Millisecond)
+
+	if got := l.acceptsAfterCloseCount(); got != 1 {
+		t.Errorf("Accept called %d times after close, want exactly 1: >1 means the loop spin-retried the closed-listener error instead of exiting on shutdown", got)
+	}
+	if s := logBuf.String(); strings.Contains(s, "transient accept error") || strings.Contains(s, "accept loop exited") {
+		t.Errorf("clean shutdown logged an accept error/retry line, want none: %q", s)
 	}
 
 	d.HTTPListener().Close()

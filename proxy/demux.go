@@ -55,6 +55,15 @@ const demuxSniffDeadline = 10 * time.Second
 // that's classifying other connections.
 const demuxBacklog = 64
 
+// demuxAcceptRetryBaseDelay and demuxAcceptRetryMaxDelay bound the
+// exponential backoff acceptLoop applies after a transient Accept error,
+// mirroring net/http.Server.Serve's own accept-retry delays (5ms doubling
+// to a 1s cap). See acceptLoop.
+const (
+	demuxAcceptRetryBaseDelay = 5 * time.Millisecond
+	demuxAcceptRetryMaxDelay  = 1 * time.Second
+)
+
 // demuxProtocol identifies which plane a connection belongs to.
 type demuxProtocol int
 
@@ -275,15 +284,54 @@ func (d *Demux) StopAccepting() error {
 	return d.ln.Close()
 }
 
+// acceptLoop accepts connections on the real listener and dispatches each to
+// classification. It mirrors net/http.Server.Serve's accept-error handling:
+// a transient Accept error is retried after a capped exponential backoff
+// rather than tearing down the listener, and only an intentional shutdown
+// (d.closed set) exits the loop.
+//
+// This resilience is load-bearing precisely because acceptLoop is the SOLE
+// caller of Accept on the real socket in multiplex mode: http.Server.Serve
+// runs against the virtual listener (see virtualListener), which never
+// surfaces an OS-level Accept error, so http.Server's own accept-retry loop
+// can no longer see — let alone recover from — a transient failure on the
+// real socket. Returning here on the first transient error (EMFILE/ENFILE
+// under fd exhaustion, ECONNABORTED — realistic for a proxy holding many
+// long-lived CONNECT tunnels and Postgres relays) would kill accept for BOTH
+// planes until process restart, silently dropping the resilience the HTTP
+// plane had before it was multiplexed.
+//
+// Unlike net/http, this does not gate the retry on the deprecated and
+// unreliable net.Error.Temporary(): any error while the listener is still
+// live is treated as transient and retried. On a genuinely dead-but-unclosed
+// listener that means retrying once per second forever, each attempt logged
+// at WARN — the same acceptable, visible pathological case net/http tolerates
+// via its own capped backoff, not a tight zero-delay spin.
 func (d *Demux) acceptLoop() {
+	var backoff time.Duration
 	for {
 		conn, err := d.ln.Accept()
 		if err != nil {
-			if !d.closed.Load() {
-				slog.Error("demux accept loop exited", "subsystem", "proxy", "error", err)
+			if d.closed.Load() {
+				// Intentional shutdown: StopAccepting sets closed before
+				// closing the listener, so this error is our own doing. Exit
+				// cleanly and silently.
+				return
 			}
-			return
+			if backoff == 0 {
+				backoff = demuxAcceptRetryBaseDelay
+			} else {
+				backoff *= 2
+			}
+			if backoff > demuxAcceptRetryMaxDelay {
+				backoff = demuxAcceptRetryMaxDelay
+			}
+			slog.Warn("demux: transient accept error; retrying",
+				"subsystem", "proxy", "error", err, "retry_in", backoff)
+			time.Sleep(backoff)
+			continue
 		}
+		backoff = 0
 		go d.classifyAndDispatch(conn)
 	}
 }
