@@ -351,13 +351,21 @@ func collectPostAuthFrames(frontend *pgproto3.Frontend) ([][]byte, error) {
 }
 
 // upstreamErrorResponse maps an upstream ErrorResponse to a proxy error.
-// Authentication-failure SQLSTATEs map to errUpstreamAuthFailed; everything
-// else reports the SQLSTATE code only (the message could echo identifiers).
+// Authentication-failure SQLSTATEs wrap errUpstreamAuthFailed (so
+// connectWithRetry's errors.Is check and its invalidate-and-retry-once
+// behavior keep working) with the upstream's severity, SQLSTATE, and
+// message attached; other SQLSTATEs get the same detail without the
+// sentinel. These are the UPSTREAM SERVER's own error fields — safe to log,
+// never a credential — and this is the only place gatekeeper preserves them
+// instead of discarding them, so the resulting error is never returned to
+// the client (see serveAuthenticated's sanitized "could not authenticate to
+// upstream database" reply) but is logged in full server-side.
 func upstreamErrorResponse(e *pgproto3.ErrorResponse) error {
+	detail := fmt.Sprintf("upstream error %s %s: %s", e.Severity, e.Code, e.Message)
 	if isAuthFailureCode(e.Code) {
-		return errUpstreamAuthFailed
+		return fmt.Errorf("%w: %s", errUpstreamAuthFailed, detail)
 	}
-	return fmt.Errorf("upstream error (SQLSTATE %s)", e.Code)
+	return errors.New(detail)
 }
 
 // isAuthFailureCode reports whether code is a SQLSTATE that indicates an
@@ -637,6 +645,13 @@ func (s *PostgresServer) handleConn(conn net.Conn) {
 
 	rc, ok := s.authenticate(pw.Password)
 	if !ok {
+		// The run token itself must never be logged, not even a prefix — only
+		// that authentication at this boundary failed, and where from.
+		slog.Warn("postgres run-token authentication failed",
+			"subsystem", "proxy",
+			"stage", "run_token_auth",
+			"client_addr", conn.RemoteAddr().String(),
+			"host", sniHost)
 		sendPGError(backend, "28P01", "password authentication failed")
 		return
 	}
@@ -753,10 +768,19 @@ func (s *PostgresServer) serveAuthenticated(ctx context.Context, clientConn net.
 	up, grants, err := s.connectWithRetry(ctx, resolver, sniHost, user, database, startupParams)
 	if err != nil {
 		// Never include the underlying error in the client-facing message: it
-		// could echo the upstream server's identifiers. The full error is only
-		// logged at debug level, never with credential values.
+		// could echo the upstream server's identifiers. The full error —
+		// including the upstream server's own ErrorResponse fields when the
+		// failure came from there (see upstreamErrorResponse) — is only logged
+		// at debug level, never with credential values. stage distinguishes a
+		// credential-resolution failure (e.g. the Neon API) from an upstream
+		// connect/SCRAM failure so the two are never conflated in the log.
+		stage := "upstream_connect"
+		if errors.Is(err, errUpstreamAuthFailed) {
+			stage = "upstream_auth"
+		}
 		slog.Debug("postgres upstream connection failed",
 			"subsystem", "proxy",
+			"stage", stage,
 			"host", sniHost,
 			"user", user,
 			"error", err)
