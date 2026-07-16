@@ -48,6 +48,39 @@ A credential with a `postgres` block selects how the upstream password is resolv
 
 The API key is itself a credential source, so it can come from an environment variable, AWS Secrets Manager, or GCP Secret Manager. See [Credential Sources](./03-credential-sources.md).
 
+## Using a non-Neon Postgres server
+
+Only the dynamic, per-branch password minting described above is specific to Neon. Any Postgres server reachable over TLS works with the data plane through `resolver: static`: the credential source supplies one fixed password — from an environment variable, a static value, AWS Secrets Manager, GCP Secret Manager, or any other [credential source](./03-credential-sources.md) — and gatekeeper presents it to the upstream server the same way it presents a Neon-minted password. This covers Amazon RDS, Google Cloud SQL, Supabase, and self-hosted Postgres, in addition to local testing.
+
+```yaml
+postgres:
+  port: 5432
+
+tls:
+  ca_cert: ca.pem
+  ca_key: ca-key.pem
+
+credentials:
+  - host: db.example.com
+    grant: prod-db
+    postgres:
+      resolver: static
+    source:
+      type: env
+      var: DB_PASSWORD
+
+network:
+  policy: strict
+  allow:
+    - db.example.com
+```
+
+The `static` resolver fetches the password once at startup and does not re-check it. Rotating the password requires a restart — the same limitation as the `env`, `static`, and secret-manager sources on the HTTP plane.
+
+### Upstream authentication compatibility
+
+Gatekeeper authenticates to the upstream server with SCRAM-SHA-256 only, regardless of resolver. If the upstream requests any other method — MD5, cleartext password, or no password (trust) — gatekeeper closes the connection with a generic upstream-authentication error to the client; the requested method is logged server-side, never the client-facing message. Postgres 10 and later, and every major managed Postgres offering (RDS, Cloud SQL, Supabase, Neon), default to SCRAM-SHA-256. A server configured for MD5-only or trust authentication is not supported.
+
 ## Tracing a connection to its origin
 
 The audit entry's `run_id` is the trusted identity: it comes from the authenticated run token, so a client cannot forge it. But `run_id` alone doesn't say *which* connection within a run produced a given log line — a single run can open many Postgres connections over its lifetime.

@@ -8,6 +8,8 @@ keywords: ["gatekeeper", "postgres", "neon", "database proxy", "credential injec
 
 Run gatekeeper's Postgres listener against a Neon project. Clients connect with their run token in place of the database password; gatekeeper resolves the real per-branch password from the Neon API and completes the upstream connection.
 
+This guide is Neon-specific. For any other Postgres server — RDS, Cloud SQL, Supabase, or self-hosted — use `resolver: static` instead; see [Using a non-Neon Postgres server](../concepts/08-postgres-data-plane.md#using-a-non-neon-postgres-server).
+
 See [Postgres Data Plane](../concepts/08-postgres-data-plane.md) for how the listener works internally.
 
 ## Prerequisites
