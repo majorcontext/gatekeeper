@@ -11,6 +11,8 @@ Key capabilities:
 - **Credential injection** — Resolve credentials from environment variables, static values, host command output, AWS Secrets Manager, GCP Secret Manager, GCP service account keys, GitHub App keys, or RFC 8693 token exchange, then inject them as HTTP headers for matching hosts
 - **Postgres data plane** — Credential-injecting Postgres proxy on a second listener: routes by TLS SNI, authenticates clients with their run token (sent as the Postgres password inside gatekeeper's TLS), and resolves per-branch Neon passwords (or a static password) on the fly so no database secret lives in the sandbox
 - **TLS interception** — MITM proxy with per-host certificate generation from a configured CA
+- **PROXY protocol** — Per-listener v1/v2 header parsing (`proxy.proxy_protocol`, `postgres.proxy_protocol`) recovers the real client IP behind a TCP-terminating load balancer, fail-open on headerless connections
+- **Single-port multiplexing** — When `postgres.port` equals `proxy.port` (same host), gatekeeper serves the HTTP/CONNECT and Postgres planes on one shared listener, classifying each connection by its first bytes; no config flag, the matching ports are the trigger
 - **MCP relay** — Forward Model Context Protocol requests with credential injection and SSE streaming
 - **Network policy** — Allow/deny traffic by host pattern
 - **LLM policy** — Evaluate Anthropic API responses against Keep policy rules
@@ -29,6 +31,8 @@ proxy/              Core TLS-intercepting proxy engine
   relay.go           HTTP relay for non-CONNECT requests
   stream.go          Chunked, per-write-flushed response streaming (SSE and other incremental bodies)
   postgres.go        Postgres data-plane listener (TLS termination, run-token auth, SCRAM upstream, message relay)
+  proxyproto.go      Shared PROXY protocol v1/v2 listener wrapping (fail-open, malformed-header logging) for both listeners
+  demux.go           Single-port HTTP+Postgres demultiplexer: classifies connections by first bytes when proxy.port == postgres.port
   otel.go            OpenTelemetry handler wrapper, metrics instruments, span helpers
   server.go          Proxy server lifecycle (start/stop/listen)
 
