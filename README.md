@@ -144,6 +144,8 @@ Policies: `permissive` (allow all), `strict` (deny all, allow listed).
 
 Behind a TCP-terminating load balancer (e.g. GCP's global TCP Proxy LB), every connection's peer address is the load balancer's, not the real client. PROXY protocol parsing recovers the real client address, and it's configured per listener: `proxy.proxy_protocol: true` for the HTTP/CONNECT listener, and `postgres.proxy_protocol: true` for the Postgres data-plane listener. Each parses a PROXY protocol v1/v2 header from the LB and uses its advertised source as the `client_ip` recorded in request logs. Both are fail-open (headerless connections, like LB health checks, fall back to the raw peer address) and should only be enabled when that listener's port is reachable solely through the load balancer, since the header is otherwise forgeable by any direct client. See [Deploying behind a TCP load balancer](docs/content/guides/11-load-balancer-proxy-protocol.md).
 
+**Single-port multiplexing:** if `postgres.port` equals `proxy.port` (same host), gatekeeper serves both planes on one shared listener instead of binding two, classifying each connection by its first bytes (Postgres startup signatures vs. everything else). There's no flag — the matching ports are the trigger. This lets one load balancer front both planes with a single backend service and health check. See [Single load balancer, one shared port](docs/content/guides/11-load-balancer-proxy-protocol.md#single-load-balancer-one-shared-port).
+
 ## MCP relay
 
 For MCP clients that can't route through `HTTP_PROXY`, Gatekeeper relays Model Context Protocol requests directly, injecting credentials and streaming SSE responses:
@@ -215,6 +217,8 @@ PGPASSWORD=<run-token> psql \
 ```
 
 Moat sets `PGPASSWORD` in the container so the token never appears in the agent's command line. See [`examples/gatekeeper-postgres.yaml`](examples/gatekeeper-postgres.yaml) for a complete example.
+
+**Tracing a connection:** the Postgres request log records the authenticated `run_id` alongside the client-set `application_name` startup parameter (set via `PGAPPNAME` or a driver's connection option), sanitized and length-bounded. `run_id` is the trusted identity; `application_name` is a correlation slug for telling apart multiple connections within one run, and it's forwarded upstream unchanged so it also shows up in Neon's own `pg_stat_activity`.
 
 ## Observability
 
