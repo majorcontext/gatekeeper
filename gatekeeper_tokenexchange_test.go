@@ -164,6 +164,306 @@ func decodeBasic(t *testing.T, headerValue string) string {
 	return string(decoded)
 }
 
+// TestNewTokenExchangeResolver_BotSubjectFallsThrough proves a configured
+// bot_subject sentinel gets exactly the same (nil, nil) fallthrough
+// treatment as an empty proxy-auth subject: getCredentialsForRequest
+// (proxy/proxy.go) reads that as "try the next credential for this host",
+// which is how a per-host github-app (bot) credential rule is expected to
+// take over -- see the boxes configmap's "per-user token-exchange, then
+// github-app bot fallback" credential-rule ordering. The STS must never be
+// called for the sentinel: it is not a real subject to exchange, and
+// calling out for it would leak the sentinel to an external service and
+// burn a round trip for no reason.
+func TestNewTokenExchangeResolver_BotSubjectFallsThrough(t *testing.T) {
+	var stsCalled atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stsCalled.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "gho_should_not_be_used",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	resolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
+		Endpoint:     srv.URL,
+		ClientID:     "gk",
+		ClientSecret: "secret",
+		SubjectFrom:  "proxy-auth",
+		BotSubject:   "-",
+		Grant:        "github",
+		Header:       "Authorization",
+		Prefix:       "Bearer",
+	})
+
+	proxyReq, _ := http.NewRequest("CONNECT", "http://api.github.com:443", nil)
+	proxyReq.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("-:ak_bot_proxy_token")))
+	innerReq := httptest.NewRequest("GET", "https://api.github.com/user", nil)
+
+	creds, err := resolver(context.Background(), proxyReq, innerReq, "api.github.com")
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	if len(creds) != 0 {
+		t.Errorf("got %d creds, want 0 (sentinel subject must fall through to the next credential, like an empty subject)", len(creds))
+	}
+	if stsCalled.Load() {
+		t.Error("STS must not be called for the bot_subject sentinel")
+	}
+}
+
+// TestNewTokenExchangeResolver_BotSubjectUnconfigured_NoSpecialCasing proves
+// back-compat: with no bot_subject configured (the zero value, matching
+// every config written before this field existed), a subject that happens
+// to equal a plausible sentinel string is not special-cased -- it is
+// exchanged with the STS exactly like any other subject.
+func TestNewTokenExchangeResolver_BotSubjectUnconfigured_NoSpecialCasing(t *testing.T) {
+	var stsCalled atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stsCalled.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "gho_resolved",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	resolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
+		Endpoint:      srv.URL,
+		ClientID:      "gk",
+		ClientSecret:  "secret",
+		SubjectHeader: "X-Gatekeeper-Subject",
+		// BotSubject deliberately left unset.
+		Grant:  "github",
+		Header: "Authorization",
+		Prefix: "Bearer",
+	})
+
+	req := httptest.NewRequest("GET", "https://api.github.com/user", nil)
+	req.Header.Set("X-Gatekeeper-Subject", "-")
+
+	creds, err := resolver(context.Background(), req, req, "api.github.com")
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	if len(creds) != 1 {
+		t.Fatalf("got %d creds, want 1 (no bot_subject configured, so \"-\" is an ordinary subject)", len(creds))
+	}
+	if !stsCalled.Load() {
+		t.Error("STS should have been called: with no bot_subject configured, \"-\" is not special")
+	}
+}
+
+// TestResolveTokenExchange_BotSubjectWiring proves resolveTokenExchange
+// plumbs Source.BotSubject (the credential config's bot_subject field)
+// through to the resolver it builds, end to end from CredentialConfig.
+func TestResolveTokenExchange_BotSubjectWiring(t *testing.T) {
+	var stsCalled atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stsCalled.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "gho_resolved",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	resolver, err := resolveTokenExchange(CredentialConfig{
+		Host: "api.github.com",
+		Source: SourceConfig{
+			Type:         "token-exchange",
+			Endpoint:     srv.URL,
+			ClientID:     "gk",
+			ClientSecret: "secret",
+			SubjectFrom:  "proxy-auth",
+			BotSubject:   "-",
+		},
+		Grant: "github-bot",
+	})
+	if err != nil {
+		t.Fatalf("resolveTokenExchange: %v", err)
+	}
+
+	proxyReq, _ := http.NewRequest("CONNECT", "http://api.github.com:443", nil)
+	proxyReq.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("-:ak_bot_proxy_token")))
+	innerReq := httptest.NewRequest("GET", "https://api.github.com/user", nil)
+
+	creds, err := resolver(context.Background(), proxyReq, innerReq, "api.github.com")
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	if len(creds) != 0 {
+		t.Errorf("got %d creds, want 0 (bot_subject from CredentialConfig.Source must fall through)", len(creds))
+	}
+	if stsCalled.Load() {
+		t.Error("STS must not be called for the bot_subject sentinel")
+	}
+}
+
+// TestNewTokenExchangeResolver_BotSubjectIgnoredOutsideProxyAuthMode is the
+// defense-in-depth regression guard for a claude[bot] review finding on
+// this PR (gatekeeper_tokenexchange.go:76, comment 3804897191): the
+// fallthrough check originally ran after the cfg.SubjectFrom switch
+// unconditionally, so subject_header mode (a header ANY caller controls --
+// self-asserted, not proxy-auth) combined with a configured bot_subject let
+// a caller simply send the sentinel value in the header to skip the STS
+// entirely and fall through to the broader credential rule below it (e.g.
+// a github-app bot credential), bypassing per-subject authentication for
+// that host. This test constructs the resolver directly -- bypassing
+// resolveTokenExchange's own config-level rejection of this combination
+// (TestResolveTokenExchange_BotSubjectRequiresProxyAuth below) -- to prove
+// the runtime gate on cfg.SubjectFrom == "proxy-auth" holds even if a
+// caller reaches newTokenExchangeResolver some other way. bot_subject must
+// be inert entirely outside proxy-auth mode: sending the configured
+// sentinel value in the subject header must still reach the STS like any
+// other subject, never fall through.
+func TestNewTokenExchangeResolver_BotSubjectIgnoredOutsideProxyAuthMode(t *testing.T) {
+	var stsCalled atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stsCalled.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "gho_resolved",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	resolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
+		Endpoint:      srv.URL,
+		ClientID:      "gk",
+		ClientSecret:  "secret",
+		SubjectHeader: "X-Gatekeeper-Subject",
+		BotSubject:    "-",
+		Grant:         "github",
+		Header:        "Authorization",
+		Prefix:        "Bearer",
+	})
+
+	req := httptest.NewRequest("GET", "https://api.github.com/user", nil)
+	req.Header.Set("X-Gatekeeper-Subject", "-")
+
+	creds, err := resolver(context.Background(), req, req, "api.github.com")
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	if len(creds) != 1 {
+		t.Fatalf("got %d creds, want 1 (subject_header mode must exchange the sentinel value with the STS like any other subject, never fall through)", len(creds))
+	}
+	if !stsCalled.Load() {
+		t.Error("STS should have been called: bot_subject must be inert in subject_header mode")
+	}
+}
+
+// TestResolveTokenExchange_BotSubjectRequiresProxyAuth is the config-level
+// half of the fix for the same finding: reject bot_subject combined with
+// anything other than subject_from: proxy-auth at config-load time,
+// mirroring the existing actor_token_from/subject_from mutual-exclusion
+// check just above resolveTokenExchange in this file. Belt (this
+// validation) and suspenders (the runtime gate proven by
+// TestNewTokenExchangeResolver_BotSubjectIgnoredOutsideProxyAuthMode
+// above) for a credential-injection code path.
+func TestResolveTokenExchange_BotSubjectRequiresProxyAuth(t *testing.T) {
+	_, err := resolveTokenExchange(CredentialConfig{
+		Host: "api.github.com",
+		Source: SourceConfig{
+			Type:          "token-exchange",
+			Endpoint:      "https://sts.example.com/token",
+			ClientID:      "gk",
+			ClientSecret:  "secret",
+			SubjectHeader: "X-Gatekeeper-Subject",
+			BotSubject:    "-",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error: bot_subject with subject_header mode must be rejected at config load")
+	}
+	if !strings.Contains(err.Error(), "bot_subject") || !strings.Contains(err.Error(), "proxy-auth") {
+		t.Errorf("error = %q, want it to name both bot_subject and proxy-auth", err)
+	}
+}
+
+// TestNewTokenExchangeResolver_BotSubjectActorTokenParityWithEmptySubject
+// tests the premise behind a claude[bot] review comment on this PR
+// (gatekeeper_tokenexchange.go:89, comment 3805148031): with
+// actor_token_from: proxy-auth-password AND bot_subject both configured,
+// a caller sending the sentinel with an EMPTY proxy-auth password hits the
+// "requires a proxy auth password" error (lines 53-58) before ever
+// reaching the bot_subject fallthrough check (line 89) -- the bot read
+// that as a bug and suggested reordering the fallthrough ahead of the
+// actor-token validation.
+//
+// That reordering would be wrong: this error fires unconditionally inside
+// the "proxy-auth" case of the cfg.SubjectFrom switch, for ANY subject
+// value the switch produces -- including a genuinely empty subject, which
+// predates bot_subject entirely (this exact check shipped with actor-token
+// forwarding, long before this PR). This test proves that by exercising
+// BOTH subjects side by side, with the SAME actor_token_from config: an
+// empty proxy-auth username and the configured bot_subject sentinel both
+// hit the identical hard error, never the fallthrough. That is exact
+// parity with pre-existing empty-subject treatment, not a new asymmetry
+// bot_subject introduced -- reordering here would be a behavior change to
+// that pre-existing empty-subject semantics, out of scope for this PR.
+func TestNewTokenExchangeResolver_BotSubjectActorTokenParityWithEmptySubject(t *testing.T) {
+	resolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
+		Endpoint:       "http://unused",
+		ClientID:       "gk",
+		ClientSecret:   "secret",
+		SubjectFrom:    "proxy-auth",
+		ActorTokenFrom: "proxy-auth-password",
+		BotSubject:     "-",
+		Grant:          "github",
+		Header:         "Authorization",
+		Prefix:         "Bearer",
+	})
+
+	newReqWithProxyAuth := func(username string) *http.Request {
+		req, _ := http.NewRequest("CONNECT", "http://api.github.com:443", nil)
+		// Empty password: base64("username:") -- extractProxyAuthCredentials
+		// splits on the first colon, so this decodes to (username, "").
+		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(username+":")))
+		return req
+	}
+	innerReq := httptest.NewRequest("GET", "https://api.github.com/user", nil)
+
+	wantErrSubstr := `actor_token_from "proxy-auth-password" requires a proxy auth password`
+
+	t.Run("empty subject, empty password", func(t *testing.T) {
+		proxyReq := newReqWithProxyAuth("")
+		creds, err := resolver(context.Background(), proxyReq, innerReq, "api.github.com")
+		if err == nil {
+			t.Fatalf("resolver returned (creds=%v, err=nil), want the actor-token-password error", creds)
+		}
+		if !strings.Contains(err.Error(), wantErrSubstr) {
+			t.Errorf("error = %q, want it to contain %q", err, wantErrSubstr)
+		}
+		if creds != nil {
+			t.Errorf("creds = %v, want nil alongside the error", creds)
+		}
+	})
+
+	t.Run("bot_subject sentinel, empty password", func(t *testing.T) {
+		proxyReq := newReqWithProxyAuth("-")
+		creds, err := resolver(context.Background(), proxyReq, innerReq, "api.github.com")
+		if err == nil {
+			t.Fatalf("resolver returned (creds=%v, err=nil), want the SAME actor-token-password error the empty-subject case gets", creds)
+		}
+		if !strings.Contains(err.Error(), wantErrSubstr) {
+			t.Errorf("error = %q, want it to contain %q -- exact parity with the empty-subject case, not a new fallthrough path", err, wantErrSubstr)
+		}
+		if creds != nil {
+			t.Errorf("creds = %v, want nil alongside the error", creds)
+		}
+	})
+}
+
 func TestNewTokenExchangeResolver_NoSubjectHeader(t *testing.T) {
 	resolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
 		Endpoint:      "http://unused",

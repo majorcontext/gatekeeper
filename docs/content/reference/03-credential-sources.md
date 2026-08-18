@@ -450,6 +450,16 @@ OAuth token type URI for the actor token.
 - **Required:** No
 - **Default:** `"urn:ietf:params:oauth:token-type:access_token"`
 
+### bot_subject
+
+A sentinel subject value that skips the STS exchange and falls through to the next matching credential rule for the host — the same `(nil, nil)` fallthrough an empty subject already gets. See [Token Exchange: Bot/service fallback](../guides/06-token-exchange.md#botservice-fallback) for the full pattern and rationale.
+
+- **Type:** `string`
+- **Required:** No
+- **Default:** `""` (disabled — no subject is special-cased)
+
+Requires `subject_from: proxy-auth` -- enforced, not just documented: setting `bot_subject` alongside `subject_header` is a config-load error. `subject_header` mode reads a caller-controlled, self-asserted header with nothing authenticating it, so allowing `bot_subject` there would let any caller send the sentinel value in that header to skip the STS and fall through to the credential below, bypassing per-subject authentication for the host. Pick a value that cannot collide with a real subject your deployment could see — `"-"` is a safe default.
+
 Exchanged tokens are cached per subject (and actor, if present) using the TTL from the STS `expires_in` response field, but the cached TTL is always capped at 1 minute regardless of what the STS advertises — a longer `expires_in` only means the token may remain valid that long, not that it stays valid, since the upstream credential behind the exchange can be revoked or rotated without gatekeeper's knowledge. If the STS does not return `expires_in` (or returns a non-positive value), the same 1-minute cap is used as the TTL. Concurrent requests for the same subject are coalesced into a single STS call via singleflight, so the 1-minute cap does not translate into an STS call per request.
 
 See [Credential invalidation](#credential-invalidation) below for how gatekeeper evicts a cached token before its TTL expires.

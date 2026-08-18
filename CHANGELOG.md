@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.21.0 — 2026-08-18
+
+### Added
+
+- **`token-exchange` credential sources can now name a `bot_subject` sentinel** (`gatekeeper_tokenexchange.go`, `config.go`) — a `subject_from: proxy-auth` resolver already fell through to the next matching credential rule for a host (typically a `github-app`/bot rule) when the proxy-auth subject was the empty string, skipping the STS entirely; that fallthrough had no non-empty spelling. Some callers cannot send an empty proxy-auth username at all — Node.js's `undici` `ProxyAgent` only sends `Proxy-Authorization` when the configured proxy URL's username is non-empty (`username && password`, no password-only branch), so an empty-username proxy URL silently sends no proxy auth, breaking the fallthrough for any deployment that requires it. Setting `bot_subject: "-"` (or any sentinel value that can't collide with a real subject) on the `token-exchange` source gives the identical fallthrough treatment to that one non-empty value: the STS is never called, and `getCredentialsForRequest` moves on to the next credential rule. Unset by default (`""`), so every existing config keeps exchanging every non-empty subject exactly as before. `bot_subject` requires `subject_from: proxy-auth` and gatekeeper enforces that at config load AND at request time, not just documents it — `subject_header` mode reads a caller-controlled, self-asserted header with nothing authenticating it, so allowing `bot_subject` there would let any caller send the sentinel value in that header to skip the STS and fall through to the credential below, bypassing per-subject authentication for the host. The sentinel subject also shows up verbatim as `user_id` on the canonical log line, which is a readability improvement over the empty-subject case: `user_id="-"` reads as "bot/service traffic" where an absent `user_id` gives no positive signal at all. Documented in the [Token Exchange guide](docs/content/guides/06-token-exchange.md#botservice-fallback), the [credential sources reference](docs/content/reference/03-credential-sources.md#bot_subject), the [STS endpoint contract](docs/token-exchange-endpoint.md), and the [observability guide](docs/content/concepts/06-observability.md)'s `user_id` field description.
+
 ## v0.20.0 — 2026-07-15
 
 ### Added
