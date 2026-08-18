@@ -191,7 +191,7 @@ func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, erro
 	}
 	// Reject extraneous fields from other source types
 	if cfg.Var != "" || cfg.Value != "" || cfg.Command != "" || cfg.TTL != "" || cfg.Secret != "" || cfg.Region != "" || cfg.Project != "" || cfg.Version != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Scopes != "" {
-		return nil, fmt.Errorf("token-exchange source only uses 'endpoint', 'client_id', 'client_secret'/'client_secret_env', 'subject_header'/'subject_from', 'actor_token_from', 'actor_token_type', 'subject_token_type', and 'resource'; found extraneous fields")
+		return nil, fmt.Errorf("token-exchange source only uses 'endpoint', 'client_id', 'client_secret'/'client_secret_env', 'subject_header'/'subject_from', 'bot_subject', 'actor_token_from', 'actor_token_type', 'subject_token_type', and 'resource'; found extraneous fields")
 	}
 
 	clientSecret := cfg.ClientSecret
