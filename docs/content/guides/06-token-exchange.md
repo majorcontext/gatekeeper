@@ -93,6 +93,51 @@ curl --cacert ca.crt https://api.github.com/user
 | `resource`           | No             | --                                                     | Target resource URI sent to the STS                      |
 | `actor_token_from`   | No             | --                                                     | Set to `proxy-auth-password` to forward the proxy auth password as actor token |
 | `actor_token_type`   | No             | `urn:ietf:params:oauth:token-type:access_token`        | Token type URI for the actor token                       |
+| `bot_subject`        | No             | `""` (disabled)                                        | A sentinel subject value that falls through to the next credential rule instead of an STS exchange -- see [Bot/service fallback](#botservice-fallback) below |
+
+## Bot/service fallback
+
+An empty subject already falls through to the next matching credential rule for a host instead of calling the STS -- `getCredentialsForRequest` (`proxy/proxy.go`) treats a resolver's `(nil, nil)` return as "try the next rule," which is how a per-host `github-app` (bot) credential is meant to take over when there is no per-user identity for the STS to exchange. This is what makes the common two-rule pattern work: a `token-exchange` rule for real users, then a `github-app` rule beneath it as the bot fallback.
+
+A caller building the proxy-auth URL with `undici`'s `ProxyAgent` (Node.js) cannot express that fallback cleanly: undici only sends `Proxy-Authorization` when the proxy URL's username is non-empty (`username && password`, no password-only branch) -- an empty-username proxy URL, the natural way to say "no subject, use the bot," silently sends no proxy auth at all, which most gatekeeper deployments require.
+
+`bot_subject` gives the same fallthrough behavior a **non-empty**, dedicated sentinel value, so a caller can encode "use the bot" as an ordinary (non-empty) proxy-auth username:
+
+```yaml
+credentials:
+  - host: api.github.com
+    grant: github-user
+    source:
+      type: token-exchange
+      endpoint: https://sts.example.com/token
+      client_id: gk-client
+      client_secret_env: STS_CLIENT_SECRET
+      subject_from: proxy-auth
+      bot_subject: "-"
+      resource: https://api.github.com
+
+  - host: api.github.com
+    grant: github-bot
+    source:
+      type: github-app
+      app_id: "123456"
+      installation_id: "789012"
+      private_key_env: GITHUB_APP_PRIVATE_KEY
+```
+
+```bash
+# Real user: subject_from proxy-auth reads "alice@example.com" and exchanges it.
+HTTP_PROXY="http://alice%40example.com:ak_alice_xxxxx@127.0.0.1:9080"
+
+# Bot/service traffic: the sentinel subject skips the STS and falls through
+# to the github-app rule above, with a non-empty proxy-auth username the
+# whole way -- undici's Proxy-Authorization check passes.
+HTTP_PROXY="http://-:proxy-token@127.0.0.1:9080"
+```
+
+`bot_subject` is unset by default, so this is opt-in and fully backward compatible: a config written before this field existed keeps exchanging every non-empty subject exactly as before. When set, pick a value that can never collide with a real subject your deployment could see -- `"-"` is a safe default because no CF-Access email, GitHub username, or similar identity string is ever a bare hyphen. It applies only to `subject_from: proxy-auth`; a `subject_header`-mode resolver reads a different value entirely.
+
+The sentinel subject is exactly what shows up as `user_id` on the [canonical log line](../concepts/06-observability.md#canonical-log-lines), since `user_id` is populated from the same proxy-auth username the resolver reads. That's a strict readability improvement over the empty-subject case: `user_id="-"` reads unambiguously as "bot/service traffic," where an absent `user_id` field (the empty-subject case) gives no positive signal at all.
 
 ## Actor token forwarding
 

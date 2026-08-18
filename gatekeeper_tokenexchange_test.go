@@ -164,6 +164,148 @@ func decodeBasic(t *testing.T, headerValue string) string {
 	return string(decoded)
 }
 
+// TestNewTokenExchangeResolver_BotSubjectFallsThrough proves a configured
+// bot_subject sentinel gets exactly the same (nil, nil) fallthrough
+// treatment as an empty proxy-auth subject: getCredentialsForRequest
+// (proxy/proxy.go) reads that as "try the next credential for this host",
+// which is how a per-host github-app (bot) credential rule is expected to
+// take over -- see the boxes configmap's "per-user token-exchange, then
+// github-app bot fallback" credential-rule ordering. The STS must never be
+// called for the sentinel: it is not a real subject to exchange, and
+// calling out for it would leak the sentinel to an external service and
+// burn a round trip for no reason.
+func TestNewTokenExchangeResolver_BotSubjectFallsThrough(t *testing.T) {
+	var stsCalled atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stsCalled.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "gho_should_not_be_used",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	resolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
+		Endpoint:     srv.URL,
+		ClientID:     "gk",
+		ClientSecret: "secret",
+		SubjectFrom:  "proxy-auth",
+		BotSubject:   "-",
+		Grant:        "github",
+		Header:       "Authorization",
+		Prefix:       "Bearer",
+	})
+
+	proxyReq, _ := http.NewRequest("CONNECT", "http://api.github.com:443", nil)
+	proxyReq.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("-:ak_bot_proxy_token")))
+	innerReq := httptest.NewRequest("GET", "https://api.github.com/user", nil)
+
+	creds, err := resolver(context.Background(), proxyReq, innerReq, "api.github.com")
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	if len(creds) != 0 {
+		t.Errorf("got %d creds, want 0 (sentinel subject must fall through to the next credential, like an empty subject)", len(creds))
+	}
+	if stsCalled.Load() {
+		t.Error("STS must not be called for the bot_subject sentinel")
+	}
+}
+
+// TestNewTokenExchangeResolver_BotSubjectUnconfigured_NoSpecialCasing proves
+// back-compat: with no bot_subject configured (the zero value, matching
+// every config written before this field existed), a subject that happens
+// to equal a plausible sentinel string is not special-cased -- it is
+// exchanged with the STS exactly like any other subject.
+func TestNewTokenExchangeResolver_BotSubjectUnconfigured_NoSpecialCasing(t *testing.T) {
+	var stsCalled atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stsCalled.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "gho_resolved",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	resolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
+		Endpoint:      srv.URL,
+		ClientID:      "gk",
+		ClientSecret:  "secret",
+		SubjectHeader: "X-Gatekeeper-Subject",
+		// BotSubject deliberately left unset.
+		Grant:  "github",
+		Header: "Authorization",
+		Prefix: "Bearer",
+	})
+
+	req := httptest.NewRequest("GET", "https://api.github.com/user", nil)
+	req.Header.Set("X-Gatekeeper-Subject", "-")
+
+	creds, err := resolver(context.Background(), req, req, "api.github.com")
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	if len(creds) != 1 {
+		t.Fatalf("got %d creds, want 1 (no bot_subject configured, so \"-\" is an ordinary subject)", len(creds))
+	}
+	if !stsCalled.Load() {
+		t.Error("STS should have been called: with no bot_subject configured, \"-\" is not special")
+	}
+}
+
+// TestResolveTokenExchange_BotSubjectWiring proves resolveTokenExchange
+// plumbs Source.BotSubject (the credential config's bot_subject field)
+// through to the resolver it builds, end to end from CredentialConfig.
+func TestResolveTokenExchange_BotSubjectWiring(t *testing.T) {
+	var stsCalled atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stsCalled.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "gho_resolved",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	resolver, err := resolveTokenExchange(CredentialConfig{
+		Host: "api.github.com",
+		Source: SourceConfig{
+			Type:         "token-exchange",
+			Endpoint:     srv.URL,
+			ClientID:     "gk",
+			ClientSecret: "secret",
+			SubjectFrom:  "proxy-auth",
+			BotSubject:   "-",
+		},
+		Grant: "github-bot",
+	})
+	if err != nil {
+		t.Fatalf("resolveTokenExchange: %v", err)
+	}
+
+	proxyReq, _ := http.NewRequest("CONNECT", "http://api.github.com:443", nil)
+	proxyReq.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("-:ak_bot_proxy_token")))
+	innerReq := httptest.NewRequest("GET", "https://api.github.com/user", nil)
+
+	creds, err := resolver(context.Background(), proxyReq, innerReq, "api.github.com")
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	if len(creds) != 0 {
+		t.Errorf("got %d creds, want 0 (bot_subject from CredentialConfig.Source must fall through)", len(creds))
+	}
+	if stsCalled.Load() {
+		t.Error("STS must not be called for the bot_subject sentinel")
+	}
+}
+
 func TestNewTokenExchangeResolver_NoSubjectHeader(t *testing.T) {
 	resolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
 		Endpoint:      "http://unused",

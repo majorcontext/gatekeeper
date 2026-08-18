@@ -22,6 +22,7 @@ type tokenExchangeResolverConfig struct {
 	SubjectHeader    string
 	SubjectFrom      string
 	ActorTokenFrom   string
+	BotSubject       string
 	Grant            string
 	Header           string
 	Prefix           string
@@ -64,7 +65,15 @@ func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialR
 			}
 		}
 
-		if subject == "" {
+		// A configured bot_subject sentinel gets the exact same treatment as
+		// an empty subject: skip the STS round trip entirely and let
+		// getCredentialsForRequest (proxy/proxy.go) fall through to the next
+		// matching credential for this host -- typically a github-app (bot)
+		// rule. The cfg.BotSubject != "" guard keeps this inert when
+		// unconfigured (the zero value, every config written before this
+		// field existed) -- an empty BotSubject must never match subject,
+		// since subject == "" is already handled by the first clause.
+		if subject == "" || (cfg.BotSubject != "" && subject == cfg.BotSubject) {
 			return nil, nil
 		}
 
@@ -181,6 +190,7 @@ func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, erro
 		SubjectHeader:    cfg.SubjectHeader,
 		SubjectFrom:      cfg.SubjectFrom,
 		ActorTokenFrom:   cfg.ActorTokenFrom,
+		BotSubject:       cfg.BotSubject,
 		Grant:            cred.Grant,
 		Header:           header,
 		Prefix:           cred.Prefix,

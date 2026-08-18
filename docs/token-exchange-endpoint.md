@@ -135,6 +135,8 @@ credentials:
 
 The two options are mutually exclusive — set one or the other, not both.
 
+With `subject_from: proxy-auth`, a config may also set `bot_subject` to a sentinel value (e.g. `"-"`) that never reaches this endpoint at all — gatekeeper matches it before ever building the exchange request and falls through to the next credential rule for the host instead. Your STS implementation never sees that value as a `subject_token`; see [Token Exchange: Bot/service fallback](content/guides/06-token-exchange.md#botservice-fallback) for the client-side config.
+
 ## Preventing Subject Impersonation
 
 By default, subject identities are self-asserted — any caller can claim to be any user via the subject header or proxy auth username. This is acceptable when callers are isolated (separate containers with pre-configured `HTTP_PROXY` values), but in shared environments you may want the STS to verify the caller's identity.

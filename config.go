@@ -139,6 +139,17 @@ type SourceConfig struct {
 	Resource         string `yaml:"resource,omitempty"`
 	ActorTokenFrom   string `yaml:"actor_token_from,omitempty"`
 	ActorTokenType   string `yaml:"actor_token_type,omitempty"`
+	// BotSubject designates one sentinel subject value that resolves to the
+	// next credential rule for this host (typically a github-app/bot
+	// fallback) instead of an STS exchange -- exactly like the empty-string
+	// subject already does. Optional; the zero value ("") disables it, so
+	// every config written before this field existed keeps its current
+	// behavior unchanged. Set it to a value that can never collide with a
+	// real subject (e.g. "-": no CF-Access email or similar identity is
+	// ever a bare hyphen) to give bot/service traffic a deliberate,
+	// non-empty identity that still reaches the bot fallback -- see
+	// docs/content/guides/06-token-exchange.md.
+	BotSubject string `yaml:"bot_subject,omitempty"`
 }
 
 // NetworkConfig configures network policy.
