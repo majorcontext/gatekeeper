@@ -428,6 +428,53 @@ func TestResolveSourceScopesExtraneousOnOtherTypes(t *testing.T) {
 	}
 }
 
+// TestResolveSourceBotSubjectExtraneousOnAllTypes proves bot_subject
+// (token-exchange-only, gatekeeper_tokenexchange.go's fallthrough sentinel)
+// is rejected as extraneous by every one of the seven non-token-exchange
+// source types -- one case per type, covering all seven. Regression guard
+// for a review finding on this PR: BotSubject was added to config.go's
+// SourceConfig but not to any of ResolveSource's seven "only uses ...;
+// found extraneous fields" checks, so a bot_subject accidentally attached
+// to, say, the github-app rule sitting directly beneath a token-exchange
+// rule (the exact credential-rule pattern majorcontext/gatekeeper#61's own
+// docs recommend, and what meetneptune/boxes's gatekeeper-configmap.yaml
+// renders) was silently ignored at config load. The only symptom would
+// have surfaced much later and much worse: an operator believing
+// bot_subject took effect on the github-app rule, when it silently did
+// nothing there at all -- config-time rejection here is the loud failure
+// that replaces that silent one.
+func TestResolveSourceBotSubjectExtraneousOnAllTypes(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  SourceConfig
+	}{
+		{"env with bot_subject", SourceConfig{Type: "env", Var: "X", BotSubject: "-"}},
+		{"process with bot_subject", SourceConfig{Type: "process", Command: "echo hi", BotSubject: "-"}},
+		{"static with bot_subject", SourceConfig{Type: "static", Value: "v", BotSubject: "-"}},
+		{"aws-secretsmanager with bot_subject", SourceConfig{Type: "aws-secretsmanager", Secret: "s", BotSubject: "-"}},
+		{"gcp-secretmanager with bot_subject", SourceConfig{Type: "gcp-secretmanager", Secret: "s", Project: "p", BotSubject: "-"}},
+		{"github-app with bot_subject", SourceConfig{Type: "github-app", AppID: "1", InstallationID: "2", PrivateKeyEnv: "X", BotSubject: "-"}},
+		{"gcp-service-account with bot_subject", SourceConfig{Type: "gcp-service-account", PrivateKeyEnv: "X", BotSubject: "-"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ResolveSource(tt.cfg)
+			if err == nil {
+				t.Fatalf("ResolveSource(%+v) = nil error, want an error for extraneous bot_subject", tt.cfg)
+			}
+			// Must fail specifically on the extraneous-fields check, not
+			// incidentally on something else (e.g. github-app/
+			// gcp-service-account would also error trying to read
+			// PrivateKeyEnv "X", an unset env var, if the extraneous check
+			// did NOT fire first -- that would be a false pass that
+			// doesn't actually prove bot_subject is rejected).
+			if !strings.Contains(err.Error(), "extraneous") {
+				t.Errorf("ResolveSource(%+v) error = %q, want it to mention 'extraneous' (must be rejected by the extraneous-fields check itself, not some other validation)", tt.cfg, err)
+			}
+		})
+	}
+}
+
 func TestResolveSourceTokenExchangeScopesExtraneous(t *testing.T) {
 	_, _, err := ResolveCredentialSource(CredentialConfig{
 		Host: "api.github.com",
