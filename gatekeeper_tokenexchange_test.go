@@ -306,6 +306,90 @@ func TestResolveTokenExchange_BotSubjectWiring(t *testing.T) {
 	}
 }
 
+// TestNewTokenExchangeResolver_BotSubjectIgnoredOutsideProxyAuthMode is the
+// defense-in-depth regression guard for a claude[bot] review finding on
+// this PR (gatekeeper_tokenexchange.go:76, comment 3804897191): the
+// fallthrough check originally ran after the cfg.SubjectFrom switch
+// unconditionally, so subject_header mode (a header ANY caller controls --
+// self-asserted, not proxy-auth) combined with a configured bot_subject let
+// a caller simply send the sentinel value in the header to skip the STS
+// entirely and fall through to the broader credential rule below it (e.g.
+// a github-app bot credential), bypassing per-subject authentication for
+// that host. This test constructs the resolver directly -- bypassing
+// resolveTokenExchange's own config-level rejection of this combination
+// (TestResolveTokenExchange_BotSubjectRequiresProxyAuth below) -- to prove
+// the runtime gate on cfg.SubjectFrom == "proxy-auth" holds even if a
+// caller reaches newTokenExchangeResolver some other way. bot_subject must
+// be inert entirely outside proxy-auth mode: sending the configured
+// sentinel value in the subject header must still reach the STS like any
+// other subject, never fall through.
+func TestNewTokenExchangeResolver_BotSubjectIgnoredOutsideProxyAuthMode(t *testing.T) {
+	var stsCalled atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stsCalled.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "gho_resolved",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	resolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
+		Endpoint:      srv.URL,
+		ClientID:      "gk",
+		ClientSecret:  "secret",
+		SubjectHeader: "X-Gatekeeper-Subject",
+		BotSubject:    "-",
+		Grant:         "github",
+		Header:        "Authorization",
+		Prefix:        "Bearer",
+	})
+
+	req := httptest.NewRequest("GET", "https://api.github.com/user", nil)
+	req.Header.Set("X-Gatekeeper-Subject", "-")
+
+	creds, err := resolver(context.Background(), req, req, "api.github.com")
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	if len(creds) != 1 {
+		t.Fatalf("got %d creds, want 1 (subject_header mode must exchange the sentinel value with the STS like any other subject, never fall through)", len(creds))
+	}
+	if !stsCalled.Load() {
+		t.Error("STS should have been called: bot_subject must be inert in subject_header mode")
+	}
+}
+
+// TestResolveTokenExchange_BotSubjectRequiresProxyAuth is the config-level
+// half of the fix for the same finding: reject bot_subject combined with
+// anything other than subject_from: proxy-auth at config-load time,
+// mirroring the existing actor_token_from/subject_from mutual-exclusion
+// check just above resolveTokenExchange in this file. Belt (this
+// validation) and suspenders (the runtime gate proven by
+// TestNewTokenExchangeResolver_BotSubjectIgnoredOutsideProxyAuthMode
+// above) for a credential-injection code path.
+func TestResolveTokenExchange_BotSubjectRequiresProxyAuth(t *testing.T) {
+	_, err := resolveTokenExchange(CredentialConfig{
+		Host: "api.github.com",
+		Source: SourceConfig{
+			Type:          "token-exchange",
+			Endpoint:      "https://sts.example.com/token",
+			ClientID:      "gk",
+			ClientSecret:  "secret",
+			SubjectHeader: "X-Gatekeeper-Subject",
+			BotSubject:    "-",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error: bot_subject with subject_header mode must be rejected at config load")
+	}
+	if !strings.Contains(err.Error(), "bot_subject") || !strings.Contains(err.Error(), "proxy-auth") {
+		t.Errorf("error = %q, want it to name both bot_subject and proxy-auth", err)
+	}
+}
+
 func TestNewTokenExchangeResolver_NoSubjectHeader(t *testing.T) {
 	resolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
 		Endpoint:      "http://unused",

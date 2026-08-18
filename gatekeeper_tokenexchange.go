@@ -73,7 +73,20 @@ func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialR
 		// unconfigured (the zero value, every config written before this
 		// field existed) -- an empty BotSubject must never match subject,
 		// since subject == "" is already handled by the first clause.
-		if subject == "" || (cfg.BotSubject != "" && subject == cfg.BotSubject) {
+		//
+		// cfg.SubjectFrom == "proxy-auth" is load-bearing, not incidental:
+		// without it, subject_header mode -- a header ANY caller sets
+		// (self-asserted, no authentication of its own) -- would let a
+		// caller simply send the configured sentinel value in that header
+		// to skip the STS and fall through to the (typically broader)
+		// credential below, bypassing per-subject authentication for the
+		// host entirely. resolveTokenExchange additionally rejects
+		// bot_subject configured outside subject_from: proxy-auth at
+		// config-load time (belt and suspenders for a credential-injection
+		// path); this runtime check is the second layer, so the property
+		// holds even for a resolver built some other way. See
+		// TestNewTokenExchangeResolver_BotSubjectIgnoredOutsideProxyAuthMode.
+		if subject == "" || (cfg.SubjectFrom == "proxy-auth" && cfg.BotSubject != "" && subject == cfg.BotSubject) {
 			return nil, nil
 		}
 
@@ -155,6 +168,20 @@ func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, erro
 	}
 	if cfg.ActorTokenFrom == "proxy-auth-password" && cfg.SubjectFrom != "proxy-auth" {
 		return nil, fmt.Errorf("token-exchange source: actor_token_from 'proxy-auth-password' requires subject_from 'proxy-auth'")
+	}
+	if cfg.BotSubject != "" && cfg.SubjectFrom != "proxy-auth" {
+		// subject_header mode reads a caller-controlled, self-asserted
+		// header -- unlike subject_from: proxy-auth, nothing authenticates
+		// it. Allowing bot_subject there would let any caller send the
+		// configured sentinel value in that header to skip the STS and
+		// fall through to the credential below (typically broader, e.g. a
+		// github-app bot rule), bypassing per-subject authentication for
+		// the host entirely. Config-time rejection here is the first of
+		// two layers; newTokenExchangeResolver's own runtime check on
+		// cfg.SubjectFrom == "proxy-auth" is the second, so the property
+		// holds even for a resolver built some other way than through this
+		// function.
+		return nil, fmt.Errorf("token-exchange source: bot_subject requires subject_from 'proxy-auth'")
 	}
 	if cfg.ClientSecret == "" && cfg.ClientSecretEnv == "" {
 		return nil, fmt.Errorf("token-exchange source requires 'client_secret' or 'client_secret_env' field")
