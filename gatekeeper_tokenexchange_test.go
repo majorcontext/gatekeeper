@@ -390,6 +390,80 @@ func TestResolveTokenExchange_BotSubjectRequiresProxyAuth(t *testing.T) {
 	}
 }
 
+// TestNewTokenExchangeResolver_BotSubjectActorTokenParityWithEmptySubject
+// tests the premise behind a claude[bot] review comment on this PR
+// (gatekeeper_tokenexchange.go:89, comment 3805148031): with
+// actor_token_from: proxy-auth-password AND bot_subject both configured,
+// a caller sending the sentinel with an EMPTY proxy-auth password hits the
+// "requires a proxy auth password" error (lines 53-58) before ever
+// reaching the bot_subject fallthrough check (line 89) -- the bot read
+// that as a bug and suggested reordering the fallthrough ahead of the
+// actor-token validation.
+//
+// That reordering would be wrong: this error fires unconditionally inside
+// the "proxy-auth" case of the cfg.SubjectFrom switch, for ANY subject
+// value the switch produces -- including a genuinely empty subject, which
+// predates bot_subject entirely (this exact check shipped with actor-token
+// forwarding, long before this PR). This test proves that by exercising
+// BOTH subjects side by side, with the SAME actor_token_from config: an
+// empty proxy-auth username and the configured bot_subject sentinel both
+// hit the identical hard error, never the fallthrough. That is exact
+// parity with pre-existing empty-subject treatment, not a new asymmetry
+// bot_subject introduced -- reordering here would be a behavior change to
+// that pre-existing empty-subject semantics, out of scope for this PR.
+func TestNewTokenExchangeResolver_BotSubjectActorTokenParityWithEmptySubject(t *testing.T) {
+	resolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
+		Endpoint:       "http://unused",
+		ClientID:       "gk",
+		ClientSecret:   "secret",
+		SubjectFrom:    "proxy-auth",
+		ActorTokenFrom: "proxy-auth-password",
+		BotSubject:     "-",
+		Grant:          "github",
+		Header:         "Authorization",
+		Prefix:         "Bearer",
+	})
+
+	newReqWithProxyAuth := func(username string) *http.Request {
+		req, _ := http.NewRequest("CONNECT", "http://api.github.com:443", nil)
+		// Empty password: base64("username:") -- extractProxyAuthCredentials
+		// splits on the first colon, so this decodes to (username, "").
+		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(username+":")))
+		return req
+	}
+	innerReq := httptest.NewRequest("GET", "https://api.github.com/user", nil)
+
+	wantErrSubstr := `actor_token_from "proxy-auth-password" requires a proxy auth password`
+
+	t.Run("empty subject, empty password", func(t *testing.T) {
+		proxyReq := newReqWithProxyAuth("")
+		creds, err := resolver(context.Background(), proxyReq, innerReq, "api.github.com")
+		if err == nil {
+			t.Fatalf("resolver returned (creds=%v, err=nil), want the actor-token-password error", creds)
+		}
+		if !strings.Contains(err.Error(), wantErrSubstr) {
+			t.Errorf("error = %q, want it to contain %q", err, wantErrSubstr)
+		}
+		if creds != nil {
+			t.Errorf("creds = %v, want nil alongside the error", creds)
+		}
+	})
+
+	t.Run("bot_subject sentinel, empty password", func(t *testing.T) {
+		proxyReq := newReqWithProxyAuth("-")
+		creds, err := resolver(context.Background(), proxyReq, innerReq, "api.github.com")
+		if err == nil {
+			t.Fatalf("resolver returned (creds=%v, err=nil), want the SAME actor-token-password error the empty-subject case gets", creds)
+		}
+		if !strings.Contains(err.Error(), wantErrSubstr) {
+			t.Errorf("error = %q, want it to contain %q -- exact parity with the empty-subject case, not a new fallthrough path", err, wantErrSubstr)
+		}
+		if creds != nil {
+			t.Errorf("creds = %v, want nil alongside the error", creds)
+		}
+	})
+}
+
 func TestNewTokenExchangeResolver_NoSubjectHeader(t *testing.T) {
 	resolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
 		Endpoint:      "http://unused",
