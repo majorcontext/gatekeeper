@@ -1588,11 +1588,47 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 		return nil, resolveErr
 	}
 	if len(resolved) > 0 {
-		return resolved, nil
+		// Read static credentials after the resolver has run, not before: a
+		// token refresh landing while a slow resolver was out must be seen.
+		return withUnresolvedStatics(resolved, p.getCredentials(host)), nil
 	}
-	// Read static credentials after the resolver has run, not before: a
-	// token refresh landing while a slow resolver was out must be seen.
 	return p.getCredentials(host), nil
+}
+
+// withUnresolvedStatics appends the static credentials whose header the
+// resolver did not answer for.
+//
+// A resolver owns the header it returns, so a static credential sharing that
+// name stays dropped: on api.github.com the token exchange and the GitHub App
+// key both target Authorization, and the exchange must keep winning it.
+//
+// A static credential on a DIFFERENT header is not competing at all. It serves
+// another client of the same host — an app sending x-api-key where the
+// resolver answers Authorization — and dropping it left that client's
+// placeholder on the wire to be rejected upstream. Passing both lets
+// injectCredentials pick per header, which is what it already documents.
+func withUnresolvedStatics(resolved, static []credentialHeader) []credentialHeader {
+	if len(static) == 0 {
+		return resolved
+	}
+	answered := make(map[string]bool, len(resolved))
+	for _, c := range resolved {
+		answered[strings.ToLower(c.Name)] = true
+	}
+	merged := resolved
+	for _, c := range static {
+		if answered[strings.ToLower(c.Name)] {
+			continue
+		}
+		if len(merged) == len(resolved) {
+			// Copy before the first append so a resolver's slice is never
+			// extended in place; callers may retain it.
+			merged = append(append(make([]credentialHeader, 0, len(resolved)+len(static)), resolved...), c)
+			continue
+		}
+		merged = append(merged, c)
+	}
+	return merged
 }
 
 // invalidateCredentialsOnAuthFailure drops the cached state behind each
