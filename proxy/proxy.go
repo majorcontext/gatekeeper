@@ -1535,10 +1535,12 @@ func (p *Proxy) logHeadersRedacted(h http.Header, host string) http.Header {
 // the proxy removes the declared headers itself; an outranked legacy
 // registration (no declaration) still runs for its side effects, with its
 // credentials discarded and its error non-fatal. At equal or lower static
-// rank the resolver's credentials win when it returns any; if it returns
-// nil (e.g., no subject identity found), the proxy falls through to static
-// credentials for the same host. This enables patterns like "per-user
-// OAuth via token-exchange, with a bot identity fallback."
+// rank the resolver's credentials win the headers it answers, and
+// withRequestedStatics merges in static credentials on other headers that
+// the client asked for by name; if the resolver returns nil (e.g., no
+// subject identity found), the proxy falls through to static credentials
+// for the same host. This enables patterns like "per-user OAuth via
+// token-exchange, with a bot identity fallback."
 //
 // ctxReq carries the RunContextData (the CONNECT request for intercepted
 // connections, or the same request for plain HTTP). innerReq is the actual
@@ -1590,24 +1592,25 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 	if len(resolved) > 0 {
 		// Read static credentials after the resolver has run, not before: a
 		// token refresh landing while a slow resolver was out must be seen.
-		return withUnresolvedStatics(resolved, p.getCredentials(host)), nil
+		return withRequestedStatics(innerReq, resolved, p.getCredentials(host)), nil
 	}
 	return p.getCredentials(host), nil
 }
 
-// withUnresolvedStatics appends the static credentials whose header the
-// resolver did not answer for.
+// withRequestedStatics appends the static credentials the client asked for by
+// sending their header, and that the resolver did not answer for.
 //
-// A resolver owns the header it returns, so a static credential sharing that
-// name stays dropped: on api.github.com the token exchange and the GitHub App
-// key both target Authorization, and the exchange must keep winning it.
+// Scoped to headers the client actually sent, because injectCredentials falls
+// back to auto-injecting every credential it is given when a request carries
+// none of their headers. Merging unconditionally would let that fallback
+// attach a resolver's per-user token — a Claude Code subscription, say — to a
+// request that never asked for it. A request carrying neither header still
+// sees only the resolver's credential, exactly as before.
 //
-// A static credential on a DIFFERENT header is not competing at all. It serves
-// another client of the same host — an app sending x-api-key where the
-// resolver answers Authorization — and dropping it left that client's
-// placeholder on the wire to be rejected upstream. Passing both lets
-// injectCredentials pick per header, which is what it already documents.
-func withUnresolvedStatics(resolved, static []credentialHeader) []credentialHeader {
+// A static credential sharing the resolver's header stays dropped: on
+// api.github.com the token exchange and the GitHub App key both target
+// Authorization, and the exchange must keep winning it.
+func withRequestedStatics(req *http.Request, resolved, static []credentialHeader) []credentialHeader {
 	if len(static) == 0 {
 		return resolved
 	}
@@ -1617,7 +1620,7 @@ func withUnresolvedStatics(resolved, static []credentialHeader) []credentialHead
 	}
 	merged := resolved
 	for _, c := range static {
-		if answered[strings.ToLower(c.Name)] {
+		if answered[strings.ToLower(c.Name)] || req.Header.Get(c.Name) == "" {
 			continue
 		}
 		if len(merged) == len(resolved) {

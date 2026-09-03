@@ -100,3 +100,42 @@ func TestProxy_ResolverStillWinsItsOwnHeader(t *testing.T) {
 		t.Errorf("Authorization = %q, want the resolver's credential to win its own header", gotAuth)
 	}
 }
+
+// A request carrying neither header must not collect both credentials.
+// injectCredentials auto-injects every credential it is given when a client
+// sends none of their headers, so a merge that ignored what the client asked
+// for would attach the resolver's per-user token to requests that never
+// wanted it.
+func TestProxy_NoPlaceholderDoesNotFanOutCredentials(t *testing.T) {
+	var gotAuth, gotAPIKey string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotAPIKey = r.Header.Get("x-api-key")
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	p.SetCredentialWithGrant("127.0.0.1", "x-api-key", "real-api-key", "app")
+	p.SetCredentialResolverWithStripHeaders("127.0.0.1",
+		func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+			return []credentialHeader{{Name: "Authorization", Value: "Bearer resolved", Grant: "subscription"}}, nil
+		})
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxyServer.URL))}}
+	resp, err := client.Get(backend.URL)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if gotAPIKey != "" {
+		t.Errorf("x-api-key = %q, want none: the client asked for no credential", gotAPIKey)
+	}
+	if gotAuth != "Bearer resolved" {
+		t.Errorf("Authorization = %q, want the resolver's credential, matching the behaviour before static merging", gotAuth)
+	}
+}
