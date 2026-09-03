@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.22.0 — 2026-09-03
+
+### Fixed
+
+- **A host's static credentials on other headers now survive a successful credential resolver** (`proxy/proxy.go`) — `getCredentialsForRequest` returned a resolver's credentials alone whenever it resolved anything, so a host carrying both a `token-exchange` rule on `Authorization` and a static API key on `x-api-key` could never serve the second client: the static credential never reached `injectCredentials`, the client's placeholder went upstream unreplaced, and the upstream rejected it while the canonical log line recorded a successful injection — of the *other* header (`credential_injected=true injected_headers=authorization`). This made `injectCredentials`' own documented placeholder selection ("a client picks which grant to use when several target the same host") unreachable on any host with a resolver. Static credentials are now merged into a resolver's result when the client asked for them, where asked for means the client sent the credential's header **and** the resolver left it in place. Both halves are load-bearing and each was chosen by measuring its alternative: merging unconditionally fed the statics into `injectCredentials`' auto-inject fallback, so a request carrying *no* placeholder collected every distinct-header credential for the host — attaching a resolver's per-user token to a request that never asked for it — and sampling the headers at a single point breaks under resolver mutation in opposite directions, since a resolver may strip a header (leaving `injectCredentials` no client header to select on, auto-injecting both) or set one (making a static credential look requested). A static credential sharing the resolver's header stays dropped, so the token-exchange-then-`github-app` pattern on `api.github.com` is unchanged, and a rejected request that carried several placeholders still evicts every injected credential — recorded as a deliberate tradeoff, since the upstream does not say which credential it rejected and leaving a revoked one cached costs more than one extra resolve. End-to-end tests in `proxy/resolver_static_merge_test.go` pin each of these behaviors, and the placeholder-passthrough failure was reproduced against an unpatched binary before the fix ([#64](https://github.com/majorcontext/gatekeeper/pull/64))
+
 ## v0.21.0 — 2026-08-18
 
 ### Added
