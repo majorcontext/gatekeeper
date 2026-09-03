@@ -1649,6 +1649,12 @@ func withRequestedStatics(req *http.Request, resolved, static []credentialHeader
 // since sources rate-limit evictions per key, could suppress a loser's own
 // legitimate eviction later.
 //
+// A request carrying several placeholders injects one credential per header,
+// so a single rejection evicts all of them — a resolver's token included, when
+// a static key may have been the one revoked. Upstream does not say which
+// credential it rejected, and leaving a genuinely bad one cached costs more
+// than one extra resolve.
+//
 // A 401 or 403 is the
 // only signal gatekeeper gets that a credential resolved from a cache has gone
 // stale — the upstream credential behind it was rotated or re-authorized while
