@@ -1535,10 +1535,12 @@ func (p *Proxy) logHeadersRedacted(h http.Header, host string) http.Header {
 // the proxy removes the declared headers itself; an outranked legacy
 // registration (no declaration) still runs for its side effects, with its
 // credentials discarded and its error non-fatal. At equal or lower static
-// rank the resolver's credentials win when it returns any; if it returns
-// nil (e.g., no subject identity found), the proxy falls through to static
-// credentials for the same host. This enables patterns like "per-user
-// OAuth via token-exchange, with a bot identity fallback."
+// rank the resolver's credentials win the headers it answers, and
+// withRequestedStatics merges in static credentials on other headers that
+// the client asked for by name; if the resolver returns nil (e.g., no
+// subject identity found), the proxy falls through to static credentials
+// for the same host. This enables patterns like "per-user OAuth via
+// token-exchange, with a bot identity fallback."
 //
 // ctxReq carries the RunContextData (the CONNECT request for intercepted
 // connections, or the same request for plain HTTP). innerReq is the actual
@@ -1583,16 +1585,70 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 		// seen, or the request injects a credential that's already stale.
 		return p.getCredentials(host), nil
 	}
+	// A resolver is handed innerReq and may mutate it, so which headers the
+	// client sent is only knowable before it runs.
+	sentBefore := make(map[string]bool, len(innerReq.Header))
+	for name := range innerReq.Header {
+		if innerReq.Header.Get(name) != "" {
+			sentBefore[strings.ToLower(name)] = true
+		}
+	}
+
 	resolved, resolveErr := entry.resolve(innerReq.Context(), ctxReq, innerReq, host)
 	if resolveErr != nil {
 		return nil, resolveErr
 	}
 	if len(resolved) > 0 {
-		return resolved, nil
+		// Read static credentials after the resolver has run, not before: a
+		// token refresh landing while a slow resolver was out must be seen.
+		return withRequestedStatics(sentBefore, innerReq, resolved, p.getCredentials(host)), nil
 	}
-	// Read static credentials after the resolver has run, not before: a
-	// token refresh landing while a slow resolver was out must be seen.
 	return p.getCredentials(host), nil
+}
+
+// withRequestedStatics appends the static credentials the client asked for by
+// sending their header, and that the resolver did not answer for.
+//
+// Scoped to headers the client actually sent, because injectCredentials falls
+// back to auto-injecting every credential it is given when a request carries
+// none of their headers. Merging unconditionally would let that fallback
+// attach a resolver's per-user token — a Claude Code subscription, say — to a
+// request that never asked for it. A request carrying neither header still
+// sees only the resolver's credential, exactly as before.
+//
+// A static credential sharing the resolver's header stays dropped: on
+// api.github.com the token exchange and the GitHub App key both target
+// Authorization, and the exchange must keep winning it.
+//
+// A header counts as asked for only if the client sent it AND the resolver left
+// it in place. Both halves matter, because a resolver is given the request to
+// mutate: one that strips a header would otherwise leave injectCredentials no
+// client header to select on, sending it down the auto-inject path with both
+// credentials attached, and one that sets a header would otherwise merge a
+// static credential the client never asked for. Either way the request ends up
+// carrying a credential nobody requested.
+func withRequestedStatics(sentBefore map[string]bool, req *http.Request, resolved, static []credentialHeader) []credentialHeader {
+	if len(static) == 0 {
+		return resolved
+	}
+	answered := make(map[string]bool, len(resolved))
+	for _, c := range resolved {
+		answered[strings.ToLower(c.Name)] = true
+	}
+	merged := resolved
+	for _, c := range static {
+		if answered[strings.ToLower(c.Name)] || !sentBefore[strings.ToLower(c.Name)] || req.Header.Get(c.Name) == "" {
+			continue
+		}
+		if len(merged) == len(resolved) {
+			// Copy before the first append so a resolver's slice is never
+			// extended in place; callers may retain it.
+			merged = append(append(make([]credentialHeader, 0, len(resolved)+len(static)), resolved...), c)
+			continue
+		}
+		merged = append(merged, c)
+	}
+	return merged
 }
 
 // invalidateCredentialsOnAuthFailure drops the cached state behind each
@@ -1602,6 +1658,12 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 // the losers would drop cache entries that had no part in this request — and,
 // since sources rate-limit evictions per key, could suppress a loser's own
 // legitimate eviction later.
+//
+// A request carrying several placeholders injects one credential per header,
+// so a single rejection evicts all of them — a resolver's token included, when
+// a static key may have been the one revoked. Upstream does not say which
+// credential it rejected, and leaving a genuinely bad one cached costs more
+// than one extra resolve.
 //
 // A 401 or 403 is the
 // only signal gatekeeper gets that a credential resolved from a cache has gone
