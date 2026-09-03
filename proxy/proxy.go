@@ -1610,6 +1610,13 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 // A static credential sharing the resolver's header stays dropped: on
 // api.github.com the token exchange and the GitHub App key both target
 // Authorization, and the exchange must keep winning it.
+//
+// The headers are read after the resolver has run, so a resolver that strips
+// the header a static credential targets — a subject_header colliding with a
+// credential header — drops that credential. Reading them beforehand instead
+// leaves injectCredentials seeing no client header at all, which sends it down
+// the auto-inject path and attaches both credentials; a dropped credential
+// beats handing out the resolver's token unasked.
 func withRequestedStatics(req *http.Request, resolved, static []credentialHeader) []credentialHeader {
 	if len(static) == 0 {
 		return resolved
