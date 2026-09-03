@@ -186,7 +186,7 @@ services:
       GITHUB_TOKEN: ${GITHUB_TOKEN}
       OTEL_SDK_DISABLED: "true"
     # Your host uid:gid, so the container can read the 0600 ca.key it
-    # bind-mounts -- see the note below.
+    # bind-mounts -- see the note above.
     user: "1000:1000"
     restart: unless-stopped
 ```
