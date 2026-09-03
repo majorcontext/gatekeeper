@@ -1585,6 +1585,15 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 		// seen, or the request injects a credential that's already stale.
 		return p.getCredentials(host), nil
 	}
+	// A resolver is handed innerReq and may mutate it, so which headers the
+	// client sent is only knowable before it runs.
+	sentBefore := make(map[string]bool, len(innerReq.Header))
+	for name := range innerReq.Header {
+		if innerReq.Header.Get(name) != "" {
+			sentBefore[strings.ToLower(name)] = true
+		}
+	}
+
 	resolved, resolveErr := entry.resolve(innerReq.Context(), ctxReq, innerReq, host)
 	if resolveErr != nil {
 		return nil, resolveErr
@@ -1592,7 +1601,7 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 	if len(resolved) > 0 {
 		// Read static credentials after the resolver has run, not before: a
 		// token refresh landing while a slow resolver was out must be seen.
-		return withRequestedStatics(innerReq, resolved, p.getCredentials(host)), nil
+		return withRequestedStatics(sentBefore, innerReq, resolved, p.getCredentials(host)), nil
 	}
 	return p.getCredentials(host), nil
 }
@@ -1611,13 +1620,14 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 // api.github.com the token exchange and the GitHub App key both target
 // Authorization, and the exchange must keep winning it.
 //
-// The headers are read after the resolver has run, so a resolver that strips
-// the header a static credential targets — a subject_header colliding with a
-// credential header — drops that credential. Reading them beforehand instead
-// leaves injectCredentials seeing no client header at all, which sends it down
-// the auto-inject path and attaches both credentials; a dropped credential
-// beats handing out the resolver's token unasked.
-func withRequestedStatics(req *http.Request, resolved, static []credentialHeader) []credentialHeader {
+// A header counts as asked for only if the client sent it AND the resolver left
+// it in place. Both halves matter, because a resolver is given the request to
+// mutate: one that strips a header would otherwise leave injectCredentials no
+// client header to select on, sending it down the auto-inject path with both
+// credentials attached, and one that sets a header would otherwise merge a
+// static credential the client never asked for. Either way the request ends up
+// carrying a credential nobody requested.
+func withRequestedStatics(sentBefore map[string]bool, req *http.Request, resolved, static []credentialHeader) []credentialHeader {
 	if len(static) == 0 {
 		return resolved
 	}
@@ -1627,7 +1637,7 @@ func withRequestedStatics(req *http.Request, resolved, static []credentialHeader
 	}
 	merged := resolved
 	for _, c := range static {
-		if answered[strings.ToLower(c.Name)] || req.Header.Get(c.Name) == "" {
+		if answered[strings.ToLower(c.Name)] || !sentBefore[strings.ToLower(c.Name)] || req.Header.Get(c.Name) == "" {
 			continue
 		}
 		if len(merged) == len(resolved) {
