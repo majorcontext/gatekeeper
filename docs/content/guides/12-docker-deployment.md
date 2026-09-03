@@ -64,6 +64,7 @@ log:
 
 ```bash
 docker run -d --name gatekeeper \
+  --user "$(id -u):$(id -g)" \
   -p 127.0.0.1:9080:9080 \
   -v "$(pwd)/gatekeeper.yaml:/etc/gatekeeper/gatekeeper.yaml:ro" \
   -v "$(pwd)/ca.crt:/etc/gatekeeper/ca.crt:ro" \
@@ -72,6 +73,8 @@ docker run -d --name gatekeeper \
   -e GITHUB_TOKEN \
   ghcr.io/majorcontext/gatekeeper:0.17.0
 ```
+
+`--user "$(id -u):$(id -g)"` runs the container as *your* user. The image defaults to distroless's `nonroot` (UID 65532), which cannot read the `0600` `ca.key` that `gen-ca.sh` generates under your ownership — bind mounts keep host ownership and permission bits. Running as the key's owner keeps the key private and the container non-root; loosening the key's mode instead would work but leaves the interception CA readable to every local user.
 
 `-p 127.0.0.1:9080:9080` publishes the proxy port to the host's loopback interface only. Widen this (or route it through a load balancer — see [Deploying Behind a TCP Load Balancer](./11-load-balancer-proxy-protocol.md)) only once the port's exposure is deliberate.
 
@@ -143,6 +146,7 @@ postgres:
 
 ```bash
 docker run -d --name gatekeeper \
+  --user "$(id -u):$(id -g)" \
   -p 127.0.0.1:9080:9080 \
   -p 127.0.0.1:5432:5432 \
   -v "$(pwd)/gatekeeper.yaml:/etc/gatekeeper/gatekeeper.yaml:ro" \
@@ -181,6 +185,9 @@ services:
       GATEKEEPER_CONFIG: /etc/gatekeeper/gatekeeper.yaml
       GITHUB_TOKEN: ${GITHUB_TOKEN}
       OTEL_SDK_DISABLED: "true"
+    # Your host uid:gid, so the container can read the 0600 ca.key it
+    # bind-mounts -- see the note below.
+    user: "1000:1000"
     restart: unless-stopped
 ```
 
