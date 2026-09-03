@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.22.1 — 2026-09-03
+
+### Changed
+
+- **The release image now runs as a non-root user by default** (`cmd/gatekeeper/Dockerfile`) — the final stage moves from `gcr.io/distroless/static-debian12` to its `:nonroot` variant, so the container starts as distroless's `nonroot` user (UID/GID 65532) instead of root. Gatekeeper needs no root privilege: it binds a high port, reads its config and key material from mounts, and writes nothing to the image filesystem. The change matters most under orchestrators that enforce `runAsNonRoot` — a pod-level policy rejected the previous image at start unless the deployment pinned an explicit `runAsUser`, and an image-level default is the right place for an invariant every consumer wants. Deployments that already pin UID 65532 keep working unchanged, since that is the same identity the image now declares
+
 ## v0.22.0 — 2026-09-03
 
 ### Fixed

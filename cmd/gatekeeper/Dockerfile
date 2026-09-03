@@ -8,7 +8,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-X main.version=${VERSION}" -o /gatekeeper ./cmd/gatekeeper
 
-FROM gcr.io/distroless/static-debian12
+FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /gatekeeper /gatekeeper
 EXPOSE 9080
 ENTRYPOINT ["/gatekeeper"]
