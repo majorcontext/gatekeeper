@@ -607,7 +607,7 @@ func MatchesHostPattern(pattern HostPattern, host string, port int) bool {
 type RunContextData struct {
 	RunID                string
 	Credentials          map[string][]credentialHeader
-	CredentialBundles    map[string][]CredentialBundle
+	CredentialBundles    []CredentialBundle
 	ExtraHeaders         map[string][]extraHeader
 	RemoveHeaders        map[string][]string
 	TokenSubstitutions   map[string]*tokenSubstitution
@@ -1609,8 +1609,7 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 
 func (p *Proxy) getCredentialBundlesForRequest(ctxReq *http.Request, host string) []CredentialBundle {
 	if rc := getRunContext(ctxReq); rc != nil {
-		bundles, _ := lookupHostKeyed(rc.CredentialBundles, host, nonEmptySlice)
-		return bundles
+		return rc.CredentialBundles
 	}
 	return nil
 }

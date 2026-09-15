@@ -74,7 +74,7 @@ func injectCredentialBundles(req *http.Request, bundles []CredentialBundle, sche
 	for _, bundle := range bundles {
 		requested := false
 		for _, replacement := range bundle.Replacements {
-			if _, ok := req.Header[http.CanonicalHeaderKey(replacement.Name)]; ok {
+			if req.Header.Get(replacement.Name) == replacement.Placeholder {
 				requested = true
 				candidate = true
 				break
