@@ -61,6 +61,7 @@ func TestInjectCredentialBundles_FailsClosedWithoutMutating(t *testing.T) {
 		{name: "wrong origin", method: "POST", url: "https://evil.example/backend-api/codex/responses", scheme: "https", host: "evil.example", auth: "Bearer fake-access", account: "fake-account"},
 		{name: "wrong method", method: "GET", url: "https://chatgpt.com/backend-api/codex/responses", scheme: "https", host: "chatgpt.com", auth: "Bearer fake-access", account: "fake-account"},
 		{name: "wrong path", method: "POST", url: "https://chatgpt.com/other", scheme: "https", host: "chatgpt.com", auth: "Bearer fake-access", account: "fake-account"},
+		{name: "adjacent prefix", method: "POST", url: "https://chatgpt.com/backend-api/codexevil", scheme: "https", host: "chatgpt.com", auth: "Bearer fake-access", account: "fake-account"},
 		{name: "encoded traversal", method: "POST", url: "https://chatgpt.com/backend-api/codex/%2e%2e/other", scheme: "https", host: "chatgpt.com", auth: "Bearer fake-access", account: "fake-account"},
 		{name: "missing account", method: "POST", url: "https://chatgpt.com/backend-api/codex/responses", scheme: "https", host: "chatgpt.com", auth: "Bearer fake-access"},
 		{name: "wrong placeholder", method: "POST", url: "https://chatgpt.com/backend-api/codex/responses", scheme: "https", host: "chatgpt.com", auth: "Bearer attacker-value", account: "fake-account"},
