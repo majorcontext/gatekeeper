@@ -144,7 +144,16 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	credResult := injectCredentials(proxyReq, creds, host, r.Method, rest)
+	bundleResult := injectCredentialBundles(proxyReq, p.getCredentialBundlesForRequest(r, host), targetURL.Scheme, targetURL.Host)
+	if bundleResult.Denied {
+		p.logExit(r, logBase, start, http.StatusForbidden, func(d *RequestLogData) {
+			d.Denied = true
+			d.DenyReason = bundleResult.Reason
+		})
+		http.Error(w, "credential bundle rejected", http.StatusForbidden)
+		return
+	}
+	credResult := mergeCredentialInjectionResults(bundleResult.credentialInjectionResult, injectCredentials(proxyReq, creds, host, r.Method, rest))
 	mergeExtraHeaders(proxyReq, host, p.getExtraHeadersForRequest(r, host))
 	for _, headerName := range p.getRemoveHeadersForRequest(r, host) {
 		if credResult.InjectedHeaders[strings.ToLower(headerName)] {

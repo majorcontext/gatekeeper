@@ -607,6 +607,7 @@ func MatchesHostPattern(pattern HostPattern, host string, port int) bool {
 type RunContextData struct {
 	RunID                string
 	Credentials          map[string][]credentialHeader
+	CredentialBundles    map[string][]CredentialBundle
 	ExtraHeaders         map[string][]extraHeader
 	RemoveHeaders        map[string][]string
 	TokenSubstitutions   map[string]*tokenSubstitution
@@ -1606,6 +1607,14 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 	return p.getCredentials(host), nil
 }
 
+func (p *Proxy) getCredentialBundlesForRequest(ctxReq *http.Request, host string) []CredentialBundle {
+	if rc := getRunContext(ctxReq); rc != nil {
+		bundles, _ := lookupHostKeyed(rc.CredentialBundles, host, nonEmptySlice)
+		return bundles
+	}
+	return nil
+}
+
 // withRequestedStatics appends the static credentials the client asked for by
 // sending their header, and that the resolver did not answer for.
 //
@@ -2333,7 +2342,12 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			outReq.Header.Add(key, value)
 		}
 	}
-	credResult := injectCredentials(outReq, creds, host, r.Method, r.URL.Path)
+	bundleResult := injectCredentialBundles(outReq, p.getCredentialBundlesForRequest(r, lookupHost), r.URL.Scheme, lookupHost)
+	if bundleResult.Denied {
+		http.Error(w, "credential bundle rejected", http.StatusForbidden)
+		return
+	}
+	credResult := mergeCredentialInjectionResults(bundleResult.credentialInjectionResult, injectCredentials(outReq, creds, host, r.Method, r.URL.Path))
 
 	// Inject any additional headers configured for this host.
 	// Merges with existing values (comma-separated) to preserve client
@@ -2562,6 +2576,7 @@ func (p *Proxy) handleConnectTunnel(w http.ResponseWriter, r *http.Request) {
 // Context keys for passing data between ReverseProxy hooks in the interception path.
 type interceptCredResultKey struct{}
 type interceptCredsKey struct{}
+type interceptBundleResultKey struct{}
 type interceptReqStartKey struct{}
 type interceptLogURLKey struct{}
 type interceptPreInjHeadersKey struct{}
@@ -2802,9 +2817,13 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 
 			// Snapshot headers before credential injection so logs don't
 			// contain raw credential values (CLAUDE.md: never log credential values).
-			preInjectionHeaders := pr.Out.Header.Clone()
+			preInjectionHeaders, _ := pr.Out.Context().Value(interceptPreInjHeadersKey{}).(http.Header)
+			if preInjectionHeaders == nil {
+				preInjectionHeaders = pr.Out.Header.Clone()
+			}
 
-			credResult := injectCredentials(pr.Out, creds, host, pr.Out.Method, pr.Out.URL.Path)
+			bundleResult, _ := pr.Out.Context().Value(interceptBundleResultKey{}).(credentialInjectionResult)
+			credResult := mergeCredentialInjectionResults(bundleResult, injectCredentials(pr.Out, creds, host, pr.Out.Method, pr.Out.URL.Path))
 
 			// Store credential result and pre-injection headers in context.
 			ctx := pr.Out.Context()
@@ -3133,6 +3152,35 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			return
 		}
 
+		// Credential bundles are validated and applied before ReverseProxy so
+		// a mismatch can be denied without ever constructing an upstream request.
+		// Snapshot first: logs must retain only the client-sent placeholders.
+		preBundleHeaders := req.Header.Clone()
+		bundleResult := injectCredentialBundles(req, p.getCredentialBundlesForRequest(r, r.Host), "https", r.Host)
+		if bundleResult.Denied {
+			w.Header().Set("X-Moat-Blocked", "credential-bundle")
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, "credential bundle rejected\n")
+			p.logRequest(r, RequestLogData{
+				RequestID:      innerReqID,
+				Method:         req.Method,
+				URL:            "https://" + r.Host + req.URL.RequestURI(),
+				Host:           host,
+				Path:           req.URL.Path,
+				RequestType:    "connect",
+				StatusCode:     http.StatusForbidden,
+				Duration:       time.Since(reqStart),
+				RequestHeaders: p.logHeadersRedacted(preBundleHeaders, r.Host),
+				RequestSize:    req.ContentLength,
+				ResponseSize:   -1,
+				ClientAddr:     r.RemoteAddr,
+				Denied:         true,
+				DenyReason:     bundleResult.Reason,
+			})
+			return
+		}
+
 		// Capture request body for logging before ReverseProxy consumes it.
 		var reqBody []byte
 		reqBody, req.Body = captureBody(req.Body, req.Header.Get("Content-Type"))
@@ -3144,6 +3192,8 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		ctx := req.Context()
 		ctx = context.WithValue(ctx, interceptReqStartKey{}, reqStart)
 		ctx = context.WithValue(ctx, interceptCredsKey{}, creds)
+		ctx = context.WithValue(ctx, interceptBundleResultKey{}, bundleResult.credentialInjectionResult)
+		ctx = context.WithValue(ctx, interceptPreInjHeadersKey{}, preBundleHeaders)
 		ctx = context.WithValue(ctx, interceptReqBodyKey{}, reqBody)
 		reverseProxy.ServeHTTP(w, req.WithContext(ctx))
 	})
