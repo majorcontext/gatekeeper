@@ -65,6 +65,19 @@ func TestInjectCredentialBundles_FailsClosedWithoutMutating(t *testing.T) {
 		{name: "encoded traversal", method: "POST", url: "https://chatgpt.com/backend-api/codex/%2e%2e/other", scheme: "https", host: "chatgpt.com", auth: "Bearer fake-access", account: "fake-account"},
 		{name: "missing account", method: "POST", url: "https://chatgpt.com/backend-api/codex/responses", scheme: "https", host: "chatgpt.com", auth: "Bearer fake-access"},
 		{name: "wrong placeholder", method: "POST", url: "https://chatgpt.com/backend-api/codex/responses", scheme: "https", host: "chatgpt.com", auth: "Bearer attacker-value", account: "fake-account"},
+		// A plain "ws" scheme is as insecure as "http" and must fail RequireTLS
+		// the same way; an upgrade is not an exemption.
+		{name: "insecure websocket", method: "GET", url: "ws://chatgpt.com/backend-api/codex/ws", scheme: "ws", host: "chatgpt.com", auth: "Bearer fake-access", account: "fake-account"},
+		// Unencoded dot segments, backslashes, and a doubled separator are all
+		// ways to write a path that does not mean what the prefix check reads.
+		{name: "dot segment", method: "POST", url: "https://chatgpt.com/backend-api/codex/../other", scheme: "https", host: "chatgpt.com", auth: "Bearer fake-access", account: "fake-account"},
+		{name: "backslash separator", method: "POST", url: "https://chatgpt.com/backend-api%5Ccodex/responses", scheme: "https", host: "chatgpt.com", auth: "Bearer fake-access", account: "fake-account"},
+		{name: "doubled separator", method: "POST", url: "https://chatgpt.com//backend-api/codex/responses", scheme: "https", host: "chatgpt.com", auth: "Bearer fake-access", account: "fake-account"},
+		// A non-default port is a different origin.
+		{name: "non-default port", method: "POST", url: "https://chatgpt.com:8443/backend-api/codex/responses", scheme: "https", host: "chatgpt.com:8443", auth: "Bearer fake-access", account: "fake-account"},
+		// Only one of the two placeholders present: RequireAll means neither is
+		// replaced, so a partial bundle can never reach upstream.
+		{name: "missing authorization", method: "POST", url: "https://chatgpt.com/backend-api/codex/responses", scheme: "https", host: "chatgpt.com", account: "fake-account"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -92,6 +105,41 @@ func TestInjectCredentialBundles_FailsClosedWithoutMutating(t *testing.T) {
 				t.Errorf("ChatGPT-Account-ID mutated on deny: %q", got)
 			}
 		})
+	}
+}
+
+// The default port is the same origin written differently, and an explicit
+// :443 must not be read as a different one. Companion to "non-default port".
+func TestInjectCredentialBundles_AcceptsExplicitDefaultPort(t *testing.T) {
+	req, err := http.NewRequest("POST", "https://chatgpt.com:443/backend-api/codex/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer fake-access")
+	req.Header.Set("ChatGPT-Account-ID", "fake-account")
+
+	res := injectCredentialBundles(req, []CredentialBundle{codexTestBundle()}, "https", "chatgpt.com:443")
+	if res.Denied {
+		t.Fatalf("https://chatgpt.com:443 was denied; it is the same origin as https://chatgpt.com")
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer real-access" {
+		t.Errorf("Authorization = %q, want the real value", got)
+	}
+}
+
+// The prefix must match the path exactly as well as its descendants, or the
+// backend's own root route would be excluded.
+func TestInjectCredentialBundles_AcceptsPrefixItself(t *testing.T) {
+	req, err := http.NewRequest("POST", "https://chatgpt.com/backend-api/codex", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer fake-access")
+	req.Header.Set("ChatGPT-Account-ID", "fake-account")
+
+	res := injectCredentialBundles(req, []CredentialBundle{codexTestBundle()}, "https", "chatgpt.com")
+	if res.Denied {
+		t.Fatal("the prefix path itself was denied")
 	}
 }
 

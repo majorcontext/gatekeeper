@@ -144,7 +144,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	bundleResult := injectCredentialBundles(proxyReq, p.getCredentialBundlesForRequest(r, host), targetURL.Scheme, targetURL.Host)
+	bundleResult := injectCredentialBundles(proxyReq, p.getCredentialBundlesForRequest(r), targetURL.Scheme, targetURL.Host)
 	if bundleResult.Denied {
 		p.logExit(r, logBase, start, http.StatusForbidden, func(d *RequestLogData) {
 			d.Denied = true

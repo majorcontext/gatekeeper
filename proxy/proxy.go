@@ -1607,7 +1607,12 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 	return p.getCredentials(host), nil
 }
 
-func (p *Proxy) getCredentialBundlesForRequest(ctxReq *http.Request, host string) []CredentialBundle {
+// getCredentialBundlesForRequest returns the caller's credential bundles.
+//
+// Unlike credentials, bundles are not keyed by host: each one carries its own
+// scope and injectCredentialBundles matches the request against it, so there is
+// nothing to look up here.
+func (p *Proxy) getCredentialBundlesForRequest(ctxReq *http.Request) []CredentialBundle {
 	if rc := getRunContext(ctxReq); rc != nil {
 		return rc.CredentialBundles
 	}
@@ -2341,9 +2346,28 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			outReq.Header.Add(key, value)
 		}
 	}
-	bundleResult := injectCredentialBundles(outReq, p.getCredentialBundlesForRequest(r, lookupHost), r.URL.Scheme, lookupHost)
+	bundleResult := injectCredentialBundles(outReq, p.getCredentialBundlesForRequest(r), r.URL.Scheme, lookupHost)
 	if bundleResult.Denied {
 		http.Error(w, "credential bundle rejected", http.StatusForbidden)
+		// Reaching here means a request carried a bundle placeholder somewhere
+		// the bundle does not permit, so it is exactly the event the request log
+		// exists to record. originalReqHeaders predates injection, so it holds
+		// the client's placeholders rather than any real credential.
+		p.logRequest(r, RequestLogData{
+			Method:         r.Method,
+			URL:            r.URL.String(),
+			Host:           host,
+			Path:           r.URL.Path,
+			RequestType:    "http",
+			StatusCode:     http.StatusForbidden,
+			Duration:       time.Since(start),
+			RequestHeaders: p.logHeadersRedacted(originalReqHeaders, lookupHost),
+			RequestSize:    r.ContentLength,
+			ResponseSize:   -1,
+			Denied:         true,
+			DenyReason:     bundleResult.Reason,
+			ClientAddr:     r.RemoteAddr,
+		})
 		return
 	}
 	credResult := mergeCredentialInjectionResults(bundleResult.credentialInjectionResult, injectCredentials(outReq, creds, host, r.Method, r.URL.Path))
@@ -3155,7 +3179,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		// a mismatch can be denied without ever constructing an upstream request.
 		// Snapshot first: logs must retain only the client-sent placeholders.
 		preBundleHeaders := req.Header.Clone()
-		bundleResult := injectCredentialBundles(req, p.getCredentialBundlesForRequest(r, r.Host), "https", r.Host)
+		bundleResult := injectCredentialBundles(req, p.getCredentialBundlesForRequest(r), "https", r.Host)
 		if bundleResult.Denied {
 			w.Header().Set("X-Moat-Blocked", "credential-bundle")
 			w.Header().Set("Content-Type", "text/plain")

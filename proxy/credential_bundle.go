@@ -50,14 +50,38 @@ func mergeCredentialInjectionResults(a, b credentialInjectionResult) credentialI
 	}
 	merged := credentialInjectionResult{
 		InjectedHeaders: make(map[string]bool, len(a.InjectedHeaders)+len(b.InjectedHeaders)),
-		Grants:          append(append([]string(nil), a.Grants...), b.Grants...),
-		Injected:        append(append([]credentialHeader(nil), a.Injected...), b.Injected...),
+		// Grants name the request log's credential sources. A bundle and a
+		// static credential can both fire for one host under the same grant,
+		// and listing it twice would misreport one injection as two.
+		Grants:   mergeGrants(a.Grants, b.Grants),
+		Injected: append(append([]credentialHeader(nil), a.Injected...), b.Injected...),
 	}
 	for key := range a.InjectedHeaders {
 		merged.InjectedHeaders[key] = true
 	}
 	for key := range b.InjectedHeaders {
 		merged.InjectedHeaders[key] = true
+	}
+	return merged
+}
+
+// mergeGrants concatenates two grant lists, keeping first-seen order and
+// dropping duplicates.
+func mergeGrants(a, b []string) []string {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[string]struct{}, len(a)+len(b))
+	merged := make([]string, 0, len(a)+len(b))
+	for _, grant := range append(append([]string(nil), a...), b...) {
+		if _, dup := seen[grant]; dup {
+			continue
+		}
+		seen[grant] = struct{}{}
+		merged = append(merged, grant)
 	}
 	return merged
 }
