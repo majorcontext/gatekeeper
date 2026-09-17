@@ -12,7 +12,10 @@ import (
 )
 
 func withBundleContext(req *http.Request, bundles ...CredentialBundle) *http.Request {
-	rc := &RunContextData{CredentialBundles: bundles}
+	return withRunContext(req, &RunContextData{CredentialBundles: bundles})
+}
+
+func withRunContext(req *http.Request, rc *RunContextData) *http.Request {
 	return req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
 }
 
@@ -317,4 +320,176 @@ func TestIntercept_CredentialBundleIsScoped(t *testing.T) {
 			t.Error("upstream was contacted for a denied request")
 		}
 	})
+}
+
+// A bundle is atomic and narrowly scoped. An ordinary host-wide credential on
+// one of its header names must not overwrite it: the request would go upstream
+// with one half of the bundle and one half of something else, and the log would
+// report both grants as injected when only the last one survived.
+func TestHandleHTTP_BundleHeaderSurvivesCollidingHostCredential(t *testing.T) {
+	var gotAuth, gotAccount string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotAccount = r.Header.Get("ChatGPT-Account-ID")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	bundle := codexTestBundle()
+	bundle.Scope = CredentialScope{
+		Origins:      []string{backend.URL},
+		Methods:      []string{"POST"},
+		PathPrefixes: []string{"/backend-api/codex"},
+	}
+	host := mustParseURL(backend.URL).Hostname()
+
+	p := NewProxy()
+	mu, logged := collectLogs(p)
+
+	req := httptest.NewRequest("POST", backend.URL+"/backend-api/codex/responses", nil)
+	req.Header.Set("Authorization", "Bearer fake-access")
+	req.Header.Set("ChatGPT-Account-ID", "fake-account")
+	rec := httptest.NewRecorder()
+	// The same host also carries an ordinary Authorization credential.
+	p.handleHTTP(rec, withRunContext(req, &RunContextData{
+		CredentialBundles: []CredentialBundle{bundle},
+		Credentials: map[string][]credentialHeader{
+			host: {{Name: "Authorization", Value: "Bearer host-wide-token", Grant: "other"}},
+		},
+	}))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%q)", rec.Code, rec.Body.String())
+	}
+	if gotAuth != "Bearer real-access" {
+		t.Errorf("Authorization = %q, want the bundle's value — a host credential overwrote an atomic replacement", gotAuth)
+	}
+	if gotAccount != "real-account" {
+		t.Errorf("ChatGPT-Account-ID = %q, want the bundle's value", gotAccount)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*logged) != 1 {
+		t.Fatalf("logged %d entries, want 1", len(*logged))
+	}
+	for _, g := range (*logged)[0].Grants {
+		if g == "other" {
+			t.Errorf("Grants = %v, want no 'other' — that credential never reached the wire", (*logged)[0].Grants)
+		}
+	}
+}
+
+// Companion: reserving the bundle's header must not disturb how the host's
+// other credentials are chosen. The client asked for a credential (the bundle's
+// placeholder), so the "client sent nothing, inject everything" fallback must
+// stay off for the remaining headers.
+func TestHandleHTTP_BundleDoesNotTriggerAutoInjectionOfOtherHeaders(t *testing.T) {
+	var gotAPIKey string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAPIKey = r.Header.Get("X-Api-Key")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	bundle := codexTestBundle()
+	bundle.Scope = CredentialScope{
+		Origins:      []string{backend.URL},
+		Methods:      []string{"POST"},
+		PathPrefixes: []string{"/backend-api/codex"},
+	}
+	host := mustParseURL(backend.URL).Hostname()
+
+	p := NewProxy()
+
+	req := httptest.NewRequest("POST", backend.URL+"/backend-api/codex/responses", nil)
+	req.Header.Set("Authorization", "Bearer fake-access")
+	req.Header.Set("ChatGPT-Account-ID", "fake-account")
+	rec := httptest.NewRecorder()
+	p.handleHTTP(rec, withRunContext(req, &RunContextData{
+		CredentialBundles: []CredentialBundle{bundle},
+		Credentials: map[string][]credentialHeader{
+			host: {
+				{Name: "Authorization", Value: "Bearer host-wide-token", Grant: "other"},
+				{Name: "X-Api-Key", Value: "host-api-key", Grant: "other"},
+			},
+		},
+	}))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%q)", rec.Code, rec.Body.String())
+	}
+	if gotAPIKey != "" {
+		t.Errorf("X-Api-Key = %q, want empty — the client sent a placeholder, so nothing should auto-inject", gotAPIKey)
+	}
+}
+
+// The MCP relay resolves its target from the registered server list, not from a
+// bundle's scope, so a bundle must neither be honored nor quietly forwarded
+// there. A request carrying a placeholder is refused, and the real value is
+// never reachable by that route.
+func TestMCPRelay_RefusesBundlePlaceholders(t *testing.T) {
+	var reached atomic.Bool
+	var gotAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached.Store(true)
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	mu, logged := collectLogs(p)
+	rc := &RunContextData{
+		CredentialBundles: []CredentialBundle{codexTestBundle()},
+		MCPServers:        []MCPServerConfig{{Name: "srv", URL: backend.URL}},
+	}
+
+	req := httptest.NewRequest("POST", "/mcp/srv", nil)
+	req.Header.Set("Authorization", "Bearer fake-access")
+	rec := httptest.NewRecorder()
+	p.handleMCPRelay(rec, withRunContext(req, rc))
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if reached.Load() {
+		t.Errorf("the MCP server was contacted; a bundle placeholder was forwarded (auth=%q)", gotAuth)
+	}
+	if strings.Contains(gotAuth, "real-access") {
+		t.Fatalf("the real bundle value reached an MCP server: %q", gotAuth)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*logged) != 1 || !(*logged)[0].Denied {
+		t.Fatalf("logged %+v, want one entry marked denied", *logged)
+	}
+}
+
+// Companion: ordinary MCP traffic is untouched by the presence of a bundle, or
+// the guard above would break every MCP server on a run that also uses one.
+func TestMCPRelay_UnrelatedRequestIsUnaffectedByBundles(t *testing.T) {
+	var reached atomic.Bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached.Store(true)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	rc := &RunContextData{
+		CredentialBundles: []CredentialBundle{codexTestBundle()},
+		MCPServers:        []MCPServerConfig{{Name: "srv", URL: backend.URL}},
+	}
+
+	req := httptest.NewRequest("POST", "/mcp/srv", nil)
+	rec := httptest.NewRecorder()
+	p.handleMCPRelay(rec, withRunContext(req, rc))
+
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("an MCP request carrying no placeholder was denied: %q", rec.Body.String())
+	}
+	if !reached.Load() {
+		t.Error("the MCP server was not contacted")
+	}
 }

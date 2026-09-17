@@ -404,6 +404,22 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 		proxyReq.Header.Set("X-Request-Id", RequestIDFromContext(r.Context()))
 	}
 
+	// A credential bundle is scoped to an origin and path on the forwarding
+	// paths. The relay picks its target from the registered server list, so a
+	// bundle's scope says nothing about where this request is going — and the
+	// relay must never become a way to obtain the real value off-scope. Refuse
+	// the request instead of evaluating the bundle.
+	if bundleID, carries := carriesBundlePlaceholder(proxyReq, p.getCredentialBundlesForRequest(r)); carries {
+		reason := "credential bundle " + bundleID + " is not available through the MCP relay"
+		p.logPolicy(r, "credential-bundle", "mcp.request", "", reason)
+		p.logExit(r, logBase, start, http.StatusForbidden, func(d *RequestLogData) {
+			d.Denied = true
+			d.DenyReason = reason
+		})
+		http.Error(w, "credential bundle rejected", http.StatusForbidden)
+		return
+	}
+
 	// Inject credentials.
 	// In daemon mode, credentials are pre-resolved in RunContextData.Credentials
 	// (keyed by host, with Grant field). Try that first, then fall back to credStore.

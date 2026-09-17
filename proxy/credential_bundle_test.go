@@ -153,3 +153,73 @@ func TestInjectCredentialBundles_IgnoresUnrelatedRequestWithoutPlaceholders(t *t
 		t.Fatalf("unrelated request should be untouched, got %+v", res)
 	}
 }
+
+// A malformed bundle must be inert, not fail-closed. Get returns "" for an
+// absent header, so an empty Placeholder compares equal on every request that
+// simply does not carry that header — one misconfigured entry would otherwise
+// deny far more traffic than the bundle was ever scoped to cover.
+func TestInjectCredentialBundles_MalformedBundleIsIgnoredNotDenied(t *testing.T) {
+	malformed := []struct {
+		name   string
+		bundle CredentialBundle
+	}{
+		{"empty placeholder", CredentialBundle{
+			ID: "b", Scope: CredentialScope{Origins: []string{"https://chatgpt.com"}},
+			Replacements: []HeaderReplacement{{Name: "X-Unset", Placeholder: "", Value: "real"}},
+		}},
+		{"empty value", CredentialBundle{
+			ID: "b", Scope: CredentialScope{Origins: []string{"https://chatgpt.com"}},
+			Replacements: []HeaderReplacement{{Name: "X-Unset", Placeholder: "p", Value: ""}},
+		}},
+		{"empty name", CredentialBundle{
+			ID: "b", Scope: CredentialScope{Origins: []string{"https://chatgpt.com"}},
+			Replacements: []HeaderReplacement{{Name: "", Placeholder: "p", Value: "real"}},
+		}},
+		{"duplicate header", CredentialBundle{
+			ID: "b", Scope: CredentialScope{Origins: []string{"https://chatgpt.com"}},
+			Replacements: []HeaderReplacement{
+				{Name: "Authorization", Placeholder: "p", Value: "a"},
+				{Name: "authorization", Placeholder: "q", Value: "b"},
+			},
+		}},
+		{"no replacements", CredentialBundle{
+			ID: "b", Scope: CredentialScope{Origins: []string{"https://chatgpt.com"}},
+		}},
+	}
+	for _, tc := range malformed {
+		t.Run(tc.name, func(t *testing.T) {
+			// An ordinary request that carries none of the bundle's headers.
+			req, err := http.NewRequest("GET", "https://chatgpt.com/anything", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res := injectCredentialBundles(req, []CredentialBundle{tc.bundle}, "https", "chatgpt.com")
+			if res.Denied {
+				t.Fatalf("a malformed bundle denied an unrelated request: %s", res.Reason)
+			}
+			if len(res.InjectedHeaders) != 0 {
+				t.Fatalf("a malformed bundle injected %v", res.InjectedHeaders)
+			}
+		})
+	}
+}
+
+// Companion: a well-formed bundle alongside a malformed one still works, so
+// ignoring the bad entry does not disable the good one.
+func TestInjectCredentialBundles_MalformedBundleDoesNotDisableValidOne(t *testing.T) {
+	req, err := http.NewRequest("POST", "https://chatgpt.com/backend-api/codex/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer fake-access")
+	req.Header.Set("ChatGPT-Account-ID", "fake-account")
+
+	broken := CredentialBundle{ID: "broken", Replacements: []HeaderReplacement{{Name: "X-Unset"}}}
+	res := injectCredentialBundles(req, []CredentialBundle{broken, codexTestBundle()}, "https", "chatgpt.com")
+	if res.Denied {
+		t.Fatalf("valid bundle denied: %s", res.Reason)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer real-access" {
+		t.Errorf("Authorization = %q, want the valid bundle's value", got)
+	}
+}

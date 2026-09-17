@@ -86,6 +86,59 @@ func mergeGrants(a, b []string) []string {
 	return merged
 }
 
+// headerKey is the canonical map key for a header name. Header lookups are
+// case-insensitive, and InjectedHeaders is consumed by callers that key on the
+// lowercase name, so every producer has to agree on one spelling.
+func headerKey(name string) string { return strings.ToLower(name) }
+
+// bundleIsWellFormed reports whether a bundle can be evaluated at all.
+//
+// A replacement missing any of its three fields cannot be matched safely: an
+// empty Placeholder compares equal to every absent header. Two replacements on
+// one header name are contradictory. Neither is a request-level decision, so a
+// bundle failing this test is ignored rather than denied.
+func bundleIsWellFormed(bundle CredentialBundle) bool {
+	if len(bundle.Replacements) == 0 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(bundle.Replacements))
+	for _, replacement := range bundle.Replacements {
+		if replacement.Name == "" || replacement.Placeholder == "" || replacement.Value == "" {
+			return false
+		}
+		key := headerKey(replacement.Name)
+		if _, duplicate := seen[key]; duplicate {
+			return false
+		}
+		seen[key] = struct{}{}
+	}
+	return true
+}
+
+// carriesBundlePlaceholder reports whether the request presents any well-formed
+// bundle's placeholder, and names the bundle if so.
+//
+// The MCP relay uses this to refuse such a request rather than to inject one.
+// A bundle is scoped to an origin and path on the forwarding paths; the relay
+// selects its target from a registered server list instead, so evaluating a
+// bundle's scope there would mean honoring it against a destination the scope
+// was never written for. Refusing keeps a placeholder from being forwarded to a
+// third party while making it impossible for the relay to hand out the real
+// value by a route the scope does not cover.
+func carriesBundlePlaceholder(req *http.Request, bundles []CredentialBundle) (string, bool) {
+	for _, bundle := range bundles {
+		if !bundleIsWellFormed(bundle) {
+			continue
+		}
+		for _, replacement := range bundle.Replacements {
+			if req.Header.Get(replacement.Name) == replacement.Placeholder {
+				return bundle.ID, true
+			}
+		}
+	}
+	return "", false
+}
+
 // injectCredentialBundles replaces an eligible bundle atomically. Bundles are
 // opt-in: a request is considered a candidate only when it carries at least
 // one header named by a bundle. Once selected, any scope or placeholder
@@ -96,6 +149,14 @@ func injectCredentialBundles(req *http.Request, bundles []CredentialBundle, sche
 	}
 	candidate := false
 	for _, bundle := range bundles {
+		if !bundleIsWellFormed(bundle) {
+			// A malformed bundle is inert rather than fail-closed. An empty
+			// placeholder would otherwise match every request that simply does
+			// not carry that header — Get returns "" for an absent header — so
+			// one misconfigured entry would deny far more traffic than it was
+			// ever scoped to cover.
+			continue
+		}
 		requested := false
 		for _, replacement := range bundle.Replacements {
 			if req.Header.Get(replacement.Name) == replacement.Placeholder {
@@ -112,19 +173,8 @@ func injectCredentialBundles(req *http.Request, bundles []CredentialBundle, sche
 		}
 
 		matched := 0
-		seenHeaders := make(map[string]struct{}, len(bundle.Replacements))
 		valid := true
 		for _, replacement := range bundle.Replacements {
-			key := strings.ToLower(http.CanonicalHeaderKey(replacement.Name))
-			if replacement.Name == "" || replacement.Placeholder == "" || replacement.Value == "" {
-				valid = false
-				break
-			}
-			if _, duplicate := seenHeaders[key]; duplicate {
-				valid = false
-				break
-			}
-			seenHeaders[key] = struct{}{}
 			if req.Header.Get(replacement.Name) == replacement.Placeholder {
 				matched++
 			} else if bundle.RequireAll {
@@ -143,7 +193,7 @@ func injectCredentialBundles(req *http.Request, bundles []CredentialBundle, sche
 				continue
 			}
 			req.Header.Set(replacement.Name, replacement.Value)
-			key := strings.ToLower(replacement.Name)
+			key := headerKey(replacement.Name)
 			injectedHeaders[key] = true
 			injected = append(injected, credentialHeader{
 				Name: replacement.Name, Value: replacement.Value, Grant: bundle.Grant,
