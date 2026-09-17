@@ -48,7 +48,7 @@ func TestInjectCredentials_PlaceholderSameHeaderPrefersClaude(t *testing.T) {
 	}
 	req := newInjectReq(t, map[string]string{"Authorization": "placeholder"})
 
-	res := injectCredentials(req, creds, "example.test", "GET", "/x")
+	res := injectCredentials(req, creds, "example.test", "GET", "/x", nil)
 
 	if got := req.Header.Get("Authorization"); got != "Bearer claude" {
 		t.Errorf("wire Authorization = %q, want %q", got, "Bearer claude")
@@ -70,7 +70,7 @@ func TestInjectCredentials_PlaceholderWinnerIndependentOfOrder(t *testing.T) {
 	}
 	req := newInjectReq(t, map[string]string{"Authorization": "placeholder"})
 
-	res := injectCredentials(req, creds, "example.test", "GET", "/x")
+	res := injectCredentials(req, creds, "example.test", "GET", "/x", nil)
 
 	if got := req.Header.Get("Authorization"); got != "Bearer claude" {
 		t.Errorf("wire Authorization = %q, want %q", got, "Bearer claude")
@@ -90,7 +90,7 @@ func TestInjectCredentials_PlaceholderDoesNotSelectUnsentHeaders(t *testing.T) {
 	}
 	req := newInjectReq(t, map[string]string{"Authorization": "placeholder"})
 
-	res := injectCredentials(req, creds, "example.test", "GET", "/x")
+	res := injectCredentials(req, creds, "example.test", "GET", "/x", nil)
 
 	if got := req.Header.Get("Authorization"); got != "Bearer auth" {
 		t.Errorf("wire Authorization = %q, want %q", got, "Bearer auth")
@@ -115,7 +115,7 @@ func TestInjectCredentials_AutoInjectPrefersNonClaude(t *testing.T) {
 	}
 	req := newInjectReq(t, nil)
 
-	res := injectCredentials(req, creds, "example.test", "GET", "/x")
+	res := injectCredentials(req, creds, "example.test", "GET", "/x", nil)
 
 	if got := req.Header.Get("Authorization"); got != "Bearer other" {
 		t.Errorf("wire Authorization = %q, want %q", got, "Bearer other")
@@ -136,7 +136,7 @@ func TestInjectCredentials_AutoInjectDistinctHeaders(t *testing.T) {
 	}
 	req := newInjectReq(t, nil)
 
-	res := injectCredentials(req, creds, "example.test", "GET", "/x")
+	res := injectCredentials(req, creds, "example.test", "GET", "/x", nil)
 
 	if got := req.Header.Get("Authorization"); got != "Bearer a" {
 		t.Errorf("Authorization = %q, want %q", got, "Bearer a")
@@ -159,7 +159,7 @@ func TestInjectCredentials_PlaceholderSuppressesAutoInject(t *testing.T) {
 	}
 	req := newInjectReq(t, map[string]string{"X-Api-Key": "placeholder"})
 
-	res := injectCredentials(req, creds, "example.test", "GET", "/x")
+	res := injectCredentials(req, creds, "example.test", "GET", "/x", nil)
 
 	if got := req.Header.Get("X-Api-Key"); got != "k" {
 		t.Errorf("X-Api-Key = %q, want %q", got, "k")
@@ -191,7 +191,7 @@ func TestInjectCredentials_GrantsNeverOverReport(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := newInjectReq(t, tc.clientHdrs)
-			res := injectCredentials(req, creds, "example.test", "GET", "/x")
+			res := injectCredentials(req, creds, "example.test", "GET", "/x", nil)
 
 			if got := grantsOf(res); !slices.Equal(got, tc.wantGrants) {
 				t.Errorf("Grants = %v, want %v", got, tc.wantGrants)
@@ -205,7 +205,7 @@ func TestInjectCredentials_GrantsNeverOverReport(t *testing.T) {
 
 func TestInjectCredentials_Empty(t *testing.T) {
 	req := newInjectReq(t, nil)
-	res := injectCredentials(req, nil, "example.test", "GET", "/x")
+	res := injectCredentials(req, nil, "example.test", "GET", "/x", nil)
 	if len(res.Injected) != 0 || len(res.Grants) != 0 || len(res.InjectedHeaders) != 0 {
 		t.Errorf("empty creds should produce an empty result, got %+v", res)
 	}
