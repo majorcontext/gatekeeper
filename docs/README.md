@@ -38,7 +38,7 @@
 - [Host Command Credentials](./content/guides/14-process-credentials.md) — inject credentials from any secret manager that has a CLI via the process source
 - [GCP Service Account Tokens](./content/guides/15-gcp-service-account.md) — mint and refresh GCP OAuth2 access tokens from a service account key
 - [MCP Relay Setup](./content/guides/16-mcp-relay.md) — configure the MCP relay end-to-end using the Go library
-- [Credential Caching, Refresh, and Invalidation](./content/guides/17-credential-lifecycle.md) — the full credential lifecycle from startup fetch through 401/403-triggered eviction
+- [Credential Caching, Refresh, and Invalidation](./content/guides/17-credential-lifecycle.md) — the full credential lifecycle from startup fetch through response-triggered eviction
 - [Keep Policy Scopes](./content/guides/18-keep-policy-scopes.md) — the http, mcp-<server>, and llm-gateway policy scopes and their denial logs
 
 ### Reference

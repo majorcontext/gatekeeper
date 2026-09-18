@@ -92,7 +92,7 @@ Gatekeeper caches tokens per `(subject_token, actor_token)` pair within each cre
 - If `expires_in` is provided, the token is cached until expiry, capped at 1 minute. No refresh is attempted — when the cache entry expires, the next request triggers a new exchange.
 - If `expires_in` is `0` or omitted, the cap is used.
 - There is no proactive refresh or sliding window. Expired entries are replaced on the next request.
-- A `401` or `403` from the destination drops the cache entry, so the next request exchanges afresh. Evictions are rate-limited to one per key per 10 seconds.
+- A `401`, `403`, or `429` from the destination drops the cache entry, so the next request exchanges afresh. A `429` may signal an exhausted backing credential even when its token remains valid. Evictions are rate-limited to one per key per 10 seconds.
 - Concurrent requests that share a cache-miss key are coalesced with `singleflight.Group` — only one exchange call reaches your endpoint per key at a time; the other callers block on the same in-flight call and share its result. You do not need your own request-level locking or idempotency handling to survive a burst of simultaneous requests for the same subject, though duplicate exchanges can still happen across separate cache keys (e.g. different actor tokens) or after a cache entry has expired and a new one hasn't populated yet.
 
 The cap bounds how long a rotated or revoked upstream credential keeps being injected. Because of it, an `expires_in` above 60 seconds does not reduce STS request volume — size the endpoint for roughly one exchange per subject per minute.

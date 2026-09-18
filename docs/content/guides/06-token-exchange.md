@@ -181,7 +181,7 @@ Gatekeeper caches tokens per `(subject_token, actor_token)` pair:
 - Concurrent requests for the same subject are coalesced into a single STS call via singleflight.
 - Expired entries are evicted lazily on the next exchange.
 - There is no proactive refresh. When a cached token expires, the next request triggers a new exchange.
-- When the destination rejects an injected credential with `401` or `403`, the cache entry is dropped so the next request exchanges afresh. The failed request is **not** retried. Evictions are rate-limited to one per key per 10 seconds.
+- When the destination returns `401`, `403`, or `429`, the cache entry is dropped so the next request exchanges afresh. A `429` may indicate that the selected backing credential exhausted its allowance even though its token remains valid. The failed request is **not** retried. Evictions are rate-limited to one per key per 10 seconds.
 
 The cap exists because a long `expires_in` only means the token *may* live that long, not that it stays valid. The upstream credential behind the exchange can be revoked, rotated, or re-authorized at any moment, and gatekeeper has no way to learn of it. Honoring a multi-hour `expires_in` meant a rotated credential kept being injected — and kept being rejected — for hours.
 
