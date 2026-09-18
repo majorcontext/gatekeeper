@@ -93,7 +93,6 @@ curl --cacert ca.crt https://api.github.com/user
 | `resource`           | No             | --                                                     | Target resource URI sent to the STS                      |
 | `actor_token_from`   | No             | --                                                     | Set to `proxy-auth-password` to forward the proxy auth password as actor token |
 | `actor_token_type`   | No             | `urn:ietf:params:oauth:token-type:access_token`        | Token type URI for the actor token                       |
-| `cache_ttl`          | No             | `1m`                                                   | Cache ceiling as a Go duration; `"0"` disables caching   |
 | `bot_subject`        | No             | `""` (disabled)                                        | A sentinel subject value that falls through to the next credential rule instead of an STS exchange -- see [Bot/service fallback](#botservice-fallback) below |
 
 ## Bot/service fallback
@@ -175,19 +174,18 @@ When `actor_token_from` is configured on any credential, gatekeeper requires all
 
 ## Caching behavior
 
-Gatekeeper caches tokens per `(subject_token, actor_token)` pair by default:
+Gatekeeper caches tokens per `(subject_token, actor_token)` pair:
 
-- `cache_ttl` sets the cache ceiling as a Go duration. It defaults to `1m`, values above `1m` are capped at `1m`, and `"0"` disables caching.
-- If `expires_in` is returned by the STS, the token is cached until the earlier of that expiry and `cache_ttl`.
-- If `expires_in` is `0` or omitted, `cache_ttl` is used.
-- Concurrent requests for the same subject are coalesced into a single STS call via singleflight, including when caching is disabled.
+- If `expires_in` is returned by the STS, the token is cached until expiry, **capped at 1 minute**.
+- If `expires_in` is `0` or omitted, the cap is used.
+- Concurrent requests for the same subject are coalesced into a single STS call via singleflight.
 - Expired entries are evicted lazily on the next exchange.
 - There is no proactive refresh. When a cached token expires, the next request triggers a new exchange.
 - When the destination rejects an injected credential with `401` or `403`, the cache entry is dropped so the next request exchanges afresh. The failed request is **not** retried. Evictions are rate-limited to one per key per 10 seconds.
 
-The default cap exists because a long `expires_in` only means the token *may* live that long, not that it stays valid. The upstream credential behind the exchange can be revoked, rotated, or re-authorized at any moment, and gatekeeper has no way to learn of it. Honoring a multi-hour `expires_in` meant a rotated credential kept being injected — and kept being rejected — for hours. Set `cache_ttl: "0"` when the STS dynamically selects mutable backing state that can change while `(subject_token, actor_token)` remains constant, such as a subscription account selected for a long-running box.
+The cap exists because a long `expires_in` only means the token *may* live that long, not that it stays valid. The upstream credential behind the exchange can be revoked, rotated, or re-authorized at any moment, and gatekeeper has no way to learn of it. Honoring a multi-hour `expires_in` meant a rotated credential kept being injected — and kept being rejected — for hours.
 
-With the default, an `expires_in` above 60 seconds does not reduce STS request volume. With caching disabled, size the STS for one exchange per request (simultaneous requests for the same key are still coalesced).
+A consequence: `expires_in` values above the cap no longer reduce STS request volume. Sizing the STS for roughly one exchange per subject per minute is the safe assumption.
 
 ## STS endpoint requirements
 
