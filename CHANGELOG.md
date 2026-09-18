@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## Unreleased
+
+### Fixed
+
+- **HTTP 429 responses now evict injected token-exchange credentials** (`proxy/proxy.go`, `proxy/relay.go`) — some upstream APIs use `429 Too Many Requests` to report that the selected backing credential exhausted its allowance. The credential itself can remain valid, so its cached token would otherwise continue selecting the same exhausted account until expiry. Gatekeeper now applies the existing response-driven invalidation path to `429` as well as `401` and `403`, causing the next request to exchange afresh. The failed request is not retried, and the existing 10-second per-key invalidation cooldown bounds repeated rate-limit responses.
+
 ## v0.23.0 — 2026-09-17
 
 ### Added

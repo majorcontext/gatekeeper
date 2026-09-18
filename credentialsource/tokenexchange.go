@@ -154,20 +154,18 @@ const maxTokenTTL = time.Minute
 
 // defaultInvalidateCooldown bounds how often one key may force a re-exchange.
 //
-// Invalidate's trigger is an upstream rejection, which gatekeeper can only see
-// as a status code — a GitHub 403 means "re-authorize the app", but equally
-// "secondary rate limit" or "no write access to this repo". A client looping on
-// a request that always fails would otherwise drive one STS exchange per
-// request, so evictions for a given key are rate-limited. The cost is bounded
-// recovery latency: at worst one cooldown passes before a genuinely rotated
-// credential is picked up.
+// Invalidate's trigger is an upstream status code that may indicate a stale or
+// exhausted backing credential. The same status can also mean resolving again
+// will return the same value. A client looping on a request that always fails
+// would otherwise drive one STS exchange per request, so evictions for a given
+// key are rate-limited. The cost is bounded recovery latency: at worst one
+// cooldown passes before a changed backing credential is picked up.
 const defaultInvalidateCooldown = 10 * time.Second
 
 // Invalidate drops the cached token for the given subject and actor, so the
 // next Resolve performs a fresh exchange. Callers invoke it when the
-// destination rejects an injected credential, which usually means the upstream
-// credential behind the exchange was rotated or re-authorized and the cached
-// token predates that change.
+// destination returns a status that may indicate the backing credential was
+// rotated, re-authorized, or exhausted after the cached token was issued.
 //
 // Evictions are rate-limited per key (see defaultInvalidateCooldown); calls
 // within the cooldown are no-ops. Invalidate is safe to call when no entry is

@@ -184,6 +184,85 @@ func TestIntercept_UpstreamAuthFailureInvalidatesCredential(t *testing.T) {
 	}
 }
 
+// A 429 can signal that the selected backing credential has exhausted its
+// allowance. The credential may remain otherwise valid, so its advertised
+// expiry does not help; evicting it lets the next request resolve a newly
+// selected backing credential. The rejected request itself must not be retried.
+func TestIntercept_TooManyRequestsInvalidatesCachedCredential(t *testing.T) {
+	var backendCalls atomic.Int32
+	var authMu sync.Mutex
+	var receivedAuth []string
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authMu.Lock()
+		receivedAuth = append(receivedAuth, r.Header.Get("Authorization"))
+		authMu.Unlock()
+		if backendCalls.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	var exchanges atomic.Int32
+	var cacheMu sync.Mutex
+	var cached string
+	setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+		cacheMu.Lock()
+		if cached == "" {
+			if exchanges.Add(1) == 1 {
+				cached = "token-for-account-a"
+			} else {
+				cached = "token-for-account-b"
+			}
+		}
+		token := cached
+		cacheMu.Unlock()
+
+		return []credentialHeader{{
+			Name:  "Authorization",
+			Value: "Bearer " + token,
+			Invalidate: func() {
+				cacheMu.Lock()
+				cached = ""
+				cacheMu.Unlock()
+			},
+		}}, nil
+	})
+
+	request := func() int {
+		resp, err := setup.Client.Get(setup.Backend.URL + "/resource")
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		defer resp.Body.Close()
+		io.ReadAll(resp.Body)
+		return resp.StatusCode
+	}
+
+	if status := request(); status != http.StatusTooManyRequests {
+		t.Fatalf("first status = %d, want 429", status)
+	}
+	if got := backendCalls.Load(); got != 1 {
+		t.Fatalf("backend calls after 429 = %d, want 1 (failed request must not be retried)", got)
+	}
+	if got := exchanges.Load(); got != 1 {
+		t.Fatalf("exchanges after first request = %d, want 1", got)
+	}
+
+	if status := request(); status != http.StatusOK {
+		t.Fatalf("second status = %d, want 200", status)
+	}
+	if got := exchanges.Load(); got != 2 {
+		t.Errorf("exchanges after next request = %d, want 2 (429 should evict cached credential)", got)
+	}
+
+	authMu.Lock()
+	defer authMu.Unlock()
+	if len(receivedAuth) != 2 || receivedAuth[0] != "Bearer token-for-account-a" || receivedAuth[1] != "Bearer token-for-account-b" {
+		t.Errorf("received Authorization headers = %q, want account A then account B tokens", receivedAuth)
+	}
+}
+
 // Only the credential actually placed on the wire may be invalidated. When two
 // credentials for a host share a header name, injectCredentials picks one
 // winner via its byHeader de-dup — evicting the loser's cache entry would drop

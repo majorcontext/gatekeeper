@@ -553,10 +553,10 @@ type credentialHeader struct {
 
 	// Invalidate, when non-nil, drops whatever cached state produced Value so
 	// the next request re-resolves it. The proxy calls it when the destination
-	// rejects the credential (401/403), which usually means the credential was
-	// rotated or re-authorized upstream and the cached copy is stale. Sources
-	// are expected to rate-limit their own evictions: a 403 does not reliably
-	// distinguish a stale credential from an authorized-but-forbidden request.
+	// rejects the credential (401/403), or reports an exhausted allowance (429).
+	// Sources are expected to rate-limit their own evictions: these statuses do
+	// not reliably distinguish a stale credential from one that will resolve to
+	// the same value again.
 	// Nil for credentials with no cache behind them (e.g. static headers).
 	Invalidate func()
 }
@@ -1678,7 +1678,7 @@ func withRequestedStatics(sentBefore map[string]bool, req *http.Request, resolve
 	return merged
 }
 
-// invalidateCredentialsOnAuthFailure drops the cached state behind each
+// invalidateCredentialsOnCredentialFailure drops the cached state behind each
 // credential that was injected into the rejected request. Pass
 // credentialInjectionResult.Injected, never the full candidate list for the
 // host: only one credential wins when several share a header name, and evicting
@@ -1692,22 +1692,22 @@ func withRequestedStatics(sentBefore map[string]bool, req *http.Request, resolve
 // credential it rejected, and leaving a genuinely bad one cached costs more
 // than one extra resolve.
 //
-// A 401 or 403 is the
-// only signal gatekeeper gets that a credential resolved from a cache has gone
-// stale — the upstream credential behind it was rotated or re-authorized while
-// the cache entry was still live. Without this, the proxy keeps injecting the
-// dead credential until the entry expires on its own, which can be hours.
+// A 401, 403, or 429 is a signal that a credential resolved from a cache may
+// have gone stale. A 401/403 says the destination rejected it; a 429 can mean
+// the selected backing account exhausted its allowance and a subsequent resolve
+// may select a different account. Without eviction, the proxy keeps injecting
+// the cached credential until it expires on its own.
 //
 // This is deliberately evict-only: the failed request is not retried. Its body
 // has already been consumed by the time the response arrives, and the requests
 // that surface this (a git push, say) are not idempotent. The next request
 // re-resolves and succeeds.
 //
-// Statuses other than 401/403 are left alone; a 5xx says nothing about the
-// credential. Sources rate-limit their own evictions, since a 403 also covers
-// rate limits and genuinely-forbidden requests.
-func invalidateCredentialsOnAuthFailure(creds []credentialHeader, statusCode int) {
-	if statusCode != http.StatusUnauthorized && statusCode != http.StatusForbidden {
+// Statuses other than 401/403/429 are left alone; a 5xx says nothing about the
+// credential. Sources rate-limit their own evictions, since these statuses also
+// cover cases where resolving again will return the same credential.
+func invalidateCredentialsOnCredentialFailure(creds []credentialHeader, statusCode int) {
+	if statusCode != http.StatusUnauthorized && statusCode != http.StatusForbidden && statusCode != http.StatusTooManyRequests {
 		return
 	}
 	for _, cred := range creds {
@@ -2459,7 +2459,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	invalidateCredentialsOnAuthFailure(credResult.Injected, resp.StatusCode)
+	invalidateCredentialsOnCredentialFailure(credResult.Injected, resp.StatusCode)
 
 	logData.StatusCode = resp.StatusCode
 	logData.ResponseHeaders = resp.Header.Clone()
@@ -2922,7 +2922,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			// credential the destination has already refused. Rewrite stored the
 			// injection result, so this evicts only what was actually sent.
 			if cr, ok := req.Context().Value(interceptCredResultKey{}).(credentialInjectionResult); ok {
-				invalidateCredentialsOnAuthFailure(cr.Injected, resp.StatusCode)
+				invalidateCredentialsOnCredentialFailure(cr.Injected, resp.StatusCode)
 			}
 
 			// Track LLM policy denials for the canonical log line.

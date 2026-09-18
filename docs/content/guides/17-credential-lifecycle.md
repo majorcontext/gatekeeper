@@ -1,6 +1,6 @@
 ---
 title: "Credential Caching, Refresh, and Invalidation"
-description: "How gatekeeper fetches, caches, refreshes, and evicts credentials across their lifecycle, from startup through 401/403-triggered invalidation."
+description: "How gatekeeper fetches, caches, refreshes, and evicts credentials across their lifecycle, from startup through response-triggered invalidation."
 keywords: ["gatekeeper", "credential refresh", "credential caching", "invalidation", "backoff", "token exchange"]
 ---
 
@@ -81,13 +81,13 @@ This distinction only matters when the key itself rotates (e.g., a new GCP servi
 
 See [Token Exchange: Caching Behavior](./06-token-exchange.md#caching-behavior) for the full mechanics and the reasoning behind the 1-minute cap.
 
-## Invalidation on 401/403
+## Invalidation on 401/403/429
 
-When the destination rejects a forwarded request with `401 Unauthorized` or `403 Forbidden`, gatekeeper evicts every credential that was injected into that specific request — not every credential configured for the host, only the ones this request actually used. The next request re-resolves rather than replaying a credential the destination just refused.
+When the destination returns `401 Unauthorized`, `403 Forbidden`, or `429 Too Many Requests`, gatekeeper evicts every credential that was injected into that specific request — not every credential configured for the host, only the ones this request actually used. A `429` can mean the selected backing credential exhausted its allowance while its token remains valid. The next request re-resolves rather than replaying the same cached credential.
 
 This is evict-only: the failed request itself is never retried. Its body may have already been consumed by the time the response arrives, and the operations that surface this (a `git push`, an API mutation) are frequently not safe to replay automatically.
 
-Only sources that expose an `Invalidate` hook participate. Concretely, that means `token-exchange` today — eviction drops the cached token for that `(subject_token, actor_token)` pair. Static sources (`env`, `static`) and sources fetched once at startup with no cache to drop have no `Invalidate` hook and are unaffected by a 401/403; the value simply stays as configured until the process restarts or a background refresh (for `RefreshingSource`s) replaces it on its own schedule.
+Only sources that expose an `Invalidate` hook participate. Concretely, that means `token-exchange` today — eviction drops the cached token for that `(subject_token, actor_token)` pair. Static sources (`env`, `static`) and sources fetched once at startup with no cache to drop have no `Invalidate` hook and are unaffected by these responses; the value simply stays as configured until the process restarts or a background refresh (for `RefreshingSource`s) replaces it on its own schedule.
 
 Evictions are rate-limited to one per cache key per 10 seconds. A client looping on a request that fails for a reason unrelated to a stale credential (a secondary rate limit, a permissions gap) triggers at most one eviction, and therefore at most one extra STS call, per 10-second window — not one per failed request. The trade-off: a genuinely rotated credential can take up to 10 seconds after the first eviction to be picked up, since evictions inside the cooldown are no-ops.
 
@@ -95,7 +95,7 @@ A `5xx` response is left alone entirely — it says nothing about whether the in
 
 ## Summary table
 
-| Source type | Startup fetch | Background refresh | Per-request cache | Participates in 401/403 invalidation |
+| Source type | Startup fetch | Background refresh | Per-request cache | Participates in 401/403/429 invalidation |
 |---|---|---|---|---|
 | `env`, `static` | Yes | No | No | No |
 | `aws-secretsmanager`, `gcp-secretmanager` | Yes | No | No | No |
