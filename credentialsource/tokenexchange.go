@@ -216,9 +216,9 @@ func (s *TokenExchangeSource) Invalidate(subjectToken, actorToken string) {
 // capped at the configured cache TTL and maxTokenTTL. A zero configured TTL
 // disables caching while retaining singleflight coalescing for concurrent
 // requests. When actorToken is non-empty, it is forwarded to the STS as the
-// forwarded to the STS as the RFC 8693 actor_token parameter and included
-// in the cache key. When requestID is non-empty, it is forwarded as
-// X-Request-Id to the STS for cross-service correlation.
+// RFC 8693 actor_token parameter and included in the cache key. When requestID
+// is non-empty, it is forwarded as X-Request-Id to the STS for cross-service
+// correlation.
 func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorToken, requestID string) (string, error) {
 	ck := tokenCacheKey{subject: subjectToken, actor: actorToken}
 	sfKey := fmt.Sprintf("%q\x00%q", subjectToken, actorToken)
