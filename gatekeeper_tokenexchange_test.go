@@ -150,19 +150,19 @@ func TestNewTokenExchangeResolver_InvalidateOnAuthFailureRecovers(t *testing.T) 
 	}
 }
 
-// Regression: a credential broker can change the subscription account backing
-// a long-running client without changing that client's token-exchange subject or
-// actor token. The STS may still advertise a positive lifetime for the old
-// account's valid token, so neither expiry nor destination 401/403 invalidation
-// detects the switch. Disabling persistent caching must make the next request
-// consult the STS for the newly selected account.
+// Regression: Boxes can change the subscription account backing a running box
+// without changing that box's proxy-auth subject or actor token. The STS still
+// advertises a positive lifetime for the old account's valid token, so neither
+// expiry nor destination 401/403 invalidation detects the switch. At 18:58:17 a
+// box switched accounts; its prompt at 18:58:23 reused the token exchanged at
+// 18:58:08 instead of consulting the STS for the newly selected account.
 func TestResolveTokenExchange_CacheTTLZeroReExchangesAfterAccountSwitch(t *testing.T) {
 	var exchanges atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := exchanges.Add(1)
-		token := "subscription_for_account_a"
+		token := "subscription_for_acct_old"
 		if n > 1 {
-			token = "subscription_for_account_b"
+			token = "subscription_for_acct_new_cv"
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
@@ -193,7 +193,7 @@ func TestResolveTokenExchange_CacheTTLZeroReExchangesAfterAccountSwitch(t *testi
 
 	resolve := func() string {
 		proxyReq := httptest.NewRequest("CONNECT", "http://api.anthropic.com:443", nil)
-		proxyReq.SetBasicAuth("same-subject", "same-actor")
+		proxyReq.SetBasicAuth("same-box-subject", "same-box-actor")
 		proxyReq.Header.Set("Proxy-Authorization", proxyReq.Header.Get("Authorization"))
 		proxyReq.Header.Del("Authorization")
 		innerReq := httptest.NewRequest("POST", "https://api.anthropic.com/v1/messages", nil)
@@ -207,10 +207,10 @@ func TestResolveTokenExchange_CacheTTLZeroReExchangesAfterAccountSwitch(t *testi
 		return creds[0].Value
 	}
 
-	if got := resolve(); got != "Bearer subscription_for_account_a" {
+	if got := resolve(); got != "Bearer subscription_for_acct_old" {
 		t.Fatalf("first credential = %q, want old account token", got)
 	}
-	if got := resolve(); got != "Bearer subscription_for_account_b" {
+	if got := resolve(); got != "Bearer subscription_for_acct_new_cv" {
 		t.Errorf("credential after account switch = %q, want new account token", got)
 	}
 	if got := exchanges.Load(); got != 2 {
