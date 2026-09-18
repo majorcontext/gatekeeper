@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/majorcontext/gatekeeper/credentialsource"
 	"github.com/majorcontext/gatekeeper/proxy"
@@ -19,6 +20,7 @@ type tokenExchangeResolverConfig struct {
 	Resource         string
 	SubjectTokenType string
 	ActorTokenType   string
+	CacheTTL         *time.Duration
 	SubjectHeader    string
 	SubjectFrom      string
 	ActorTokenFrom   string
@@ -37,6 +39,7 @@ func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialR
 		Resource:         cfg.Resource,
 		SubjectTokenType: cfg.SubjectTokenType,
 		ActorTokenType:   cfg.ActorTokenType,
+		CacheTTL:         cfg.CacheTTL,
 	})
 
 	header := cfg.Header
@@ -191,7 +194,19 @@ func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, erro
 	}
 	// Reject extraneous fields from other source types
 	if cfg.Var != "" || cfg.Value != "" || cfg.Command != "" || cfg.TTL != "" || cfg.Secret != "" || cfg.Region != "" || cfg.Project != "" || cfg.Version != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Scopes != "" {
-		return nil, fmt.Errorf("token-exchange source only uses 'endpoint', 'client_id', 'client_secret'/'client_secret_env', 'subject_header'/'subject_from', 'bot_subject', 'actor_token_from', 'actor_token_type', 'subject_token_type', and 'resource'; found extraneous fields")
+		return nil, fmt.Errorf("token-exchange source only uses 'endpoint', 'client_id', 'client_secret'/'client_secret_env', 'subject_header'/'subject_from', 'bot_subject', 'actor_token_from', 'actor_token_type', 'subject_token_type', 'resource', and 'cache_ttl'; found extraneous fields")
+	}
+
+	var cacheTTL *time.Duration
+	if cfg.CacheTTL != "" {
+		d, err := time.ParseDuration(cfg.CacheTTL)
+		if err != nil {
+			return nil, fmt.Errorf("token-exchange source: invalid 'cache_ttl' %q: %w", cfg.CacheTTL, err)
+		}
+		if d < 0 {
+			return nil, fmt.Errorf("token-exchange source: 'cache_ttl' must not be negative, got %q", cfg.CacheTTL)
+		}
+		cacheTTL = &d
 	}
 
 	clientSecret := cfg.ClientSecret
@@ -214,6 +229,7 @@ func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, erro
 		Resource:         cfg.Resource,
 		SubjectTokenType: cfg.SubjectTokenType,
 		ActorTokenType:   cfg.ActorTokenType,
+		CacheTTL:         cacheTTL,
 		SubjectHeader:    cfg.SubjectHeader,
 		SubjectFrom:      cfg.SubjectFrom,
 		ActorTokenFrom:   cfg.ActorTokenFrom,

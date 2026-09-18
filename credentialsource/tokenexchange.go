@@ -23,6 +23,10 @@ type TokenExchangeConfig struct {
 	Resource         string // Target resource URI (e.g., "https://api.github.com")
 	SubjectTokenType string // Subject token type URI (defaults to access_token type)
 	ActorTokenType   string // Actor token type URI (defaults to access_token type)
+	// CacheTTL limits how long exchanged tokens are cached. Nil defaults to
+	// maxTokenTTL; zero disables caching. Positive values are capped at
+	// maxTokenTTL and by the STS expires_in value.
+	CacheTTL *time.Duration
 }
 
 // TokenExchangeResponse is the STS response per RFC 8693 §2.2.1.
@@ -43,6 +47,7 @@ type TokenExchangeSource struct {
 	resource         string
 	subjectTokenType string
 	actorTokenType   string
+	cacheTTL         time.Duration
 	client           *http.Client
 
 	// invalidateCooldown bounds how often a given key may be evicted by
@@ -80,6 +85,15 @@ func NewTokenExchangeSource(cfg TokenExchangeConfig) *TokenExchangeSource {
 	if actorTokenType == "" {
 		actorTokenType = "urn:ietf:params:oauth:token-type:access_token"
 	}
+	cacheTTL := maxTokenTTL
+	if cfg.CacheTTL != nil {
+		cacheTTL = *cfg.CacheTTL
+		if cacheTTL < 0 {
+			cacheTTL = 0
+		} else if cacheTTL > maxTokenTTL {
+			cacheTTL = maxTokenTTL
+		}
+	}
 	return &TokenExchangeSource{
 		endpoint:           cfg.Endpoint,
 		clientID:           cfg.ClientID,
@@ -87,6 +101,7 @@ func NewTokenExchangeSource(cfg TokenExchangeConfig) *TokenExchangeSource {
 		resource:           cfg.Resource,
 		subjectTokenType:   subjectTokenType,
 		actorTokenType:     actorTokenType,
+		cacheTTL:           cacheTTL,
 		client:             &http.Client{Timeout: 30 * time.Second},
 		cache:              make(map[tokenCacheKey]cachedToken),
 		lastInvalidated:    make(map[tokenCacheKey]time.Time),
@@ -197,9 +212,10 @@ func (s *TokenExchangeSource) Invalidate(subjectToken, actorToken string) {
 }
 
 // Resolve returns a credential for the given subject, using the cache when
-// possible. Cache entries live for the STS-advertised expires_in, capped at
-// maxTokenTTL. Concurrent requests for the same subject are coalesced into a
-// single STS call via singleflight. When actorToken is non-empty, it is
+// enabled and possible. Cache entries live for the STS-advertised expires_in,
+// capped at the configured cache TTL and maxTokenTTL. A zero configured TTL
+// disables caching while retaining singleflight coalescing for concurrent
+// requests. When actorToken is non-empty, it is forwarded to the STS as the
 // forwarded to the STS as the RFC 8693 actor_token parameter and included
 // in the cache key. When requestID is non-empty, it is forwarded as
 // X-Request-Id to the STS for cross-service correlation.
@@ -237,8 +253,8 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorTo
 		}
 
 		ttl := time.Duration(result.ExpiresIn) * time.Second
-		if ttl <= 0 || ttl > maxTokenTTL {
-			ttl = maxTokenTTL
+		if ttl <= 0 || ttl > s.cacheTTL {
+			ttl = s.cacheTTL
 		}
 
 		s.mu.Lock()
@@ -252,7 +268,7 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorTo
 		// Otherwise this token may predate the rotation that prompted the
 		// invalidation, and writing it would re-stale the entry that was just
 		// cleared. The caller still gets this token; only the caching is skipped.
-		if s.cacheGen == gen {
+		if s.cacheGen == gen && ttl > 0 {
 			s.cache[ck] = cachedToken{
 				accessToken: result.AccessToken,
 				expiresAt:   now.Add(ttl),

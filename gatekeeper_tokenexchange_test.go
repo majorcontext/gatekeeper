@@ -150,6 +150,93 @@ func TestNewTokenExchangeResolver_InvalidateOnAuthFailureRecovers(t *testing.T) 
 	}
 }
 
+// Regression: Boxes can change the subscription account backing a running box
+// without changing that box's proxy-auth subject or actor token. The STS still
+// advertises a positive lifetime for the old account's valid token, so neither
+// expiry nor destination 401/403 invalidation detects the switch. At 18:58:17 a
+// box switched accounts; its prompt at 18:58:23 reused the token exchanged at
+// 18:58:08 instead of consulting the STS for the newly selected account.
+func TestResolveTokenExchange_CacheTTLZeroReExchangesAfterAccountSwitch(t *testing.T) {
+	var exchanges atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := exchanges.Add(1)
+		token := "subscription_for_acct_old"
+		if n > 1 {
+			token = "subscription_for_acct_new_cv"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": token,
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	_, resolver, err := ResolveCredentialSource(CredentialConfig{
+		Host: "api.anthropic.com",
+		Source: SourceConfig{
+			Type:           "token-exchange",
+			Endpoint:       srv.URL,
+			ClientID:       "gk",
+			ClientSecret:   "secret",
+			SubjectFrom:    "proxy-auth",
+			ActorTokenFrom: "proxy-auth-password",
+			Resource:       "https://api.anthropic.com",
+			CacheTTL:       "0",
+		},
+		Grant: "claude-code-user",
+	})
+	if err != nil {
+		t.Fatalf("ResolveCredentialSource: %v", err)
+	}
+
+	resolve := func() string {
+		proxyReq := httptest.NewRequest("CONNECT", "http://api.anthropic.com:443", nil)
+		proxyReq.SetBasicAuth("same-box-subject", "same-box-actor")
+		proxyReq.Header.Set("Proxy-Authorization", proxyReq.Header.Get("Authorization"))
+		proxyReq.Header.Del("Authorization")
+		innerReq := httptest.NewRequest("POST", "https://api.anthropic.com/v1/messages", nil)
+		creds, err := resolver(context.Background(), proxyReq, innerReq, "api.anthropic.com")
+		if err != nil {
+			t.Fatalf("resolver: %v", err)
+		}
+		if len(creds) != 1 {
+			t.Fatalf("got %d credentials, want 1", len(creds))
+		}
+		return creds[0].Value
+	}
+
+	if got := resolve(); got != "Bearer subscription_for_acct_old" {
+		t.Fatalf("first credential = %q, want old account token", got)
+	}
+	if got := resolve(); got != "Bearer subscription_for_acct_new_cv" {
+		t.Errorf("credential after account switch = %q, want new account token", got)
+	}
+	if got := exchanges.Load(); got != 2 {
+		t.Errorf("STS exchanges = %d, want 2 with cache_ttl: 0", got)
+	}
+}
+
+func TestResolveTokenExchange_CacheTTLRejectsInvalidValues(t *testing.T) {
+	for _, ttl := range []string{"-1s", "not-a-duration"} {
+		t.Run(ttl, func(t *testing.T) {
+			_, err := resolveTokenExchange(CredentialConfig{
+				Source: SourceConfig{
+					Endpoint:      "https://sts.example.com/token",
+					ClientID:      "gk",
+					ClientSecret:  "secret",
+					SubjectHeader: "X-Subject",
+					CacheTTL:      ttl,
+				},
+			})
+			if err == nil {
+				t.Fatalf("resolveTokenExchange cache_ttl %q: got nil error", ttl)
+			}
+		})
+	}
+}
+
 // decodeBasic returns the decoded user:pass of a "Basic <b64>" header value.
 func decodeBasic(t *testing.T, headerValue string) string {
 	t.Helper()

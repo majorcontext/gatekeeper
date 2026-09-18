@@ -139,6 +139,7 @@ type SourceConfig struct {
 	Resource         string `yaml:"resource,omitempty"`
 	ActorTokenFrom   string `yaml:"actor_token_from,omitempty"`
 	ActorTokenType   string `yaml:"actor_token_type,omitempty"`
+	CacheTTL         string `yaml:"cache_ttl,omitempty"` // Go duration; "0" disables token caching (default: 1m cap)
 	// BotSubject designates one sentinel subject value that resolves to the
 	// next credential rule for this host (typically a github-app/bot
 	// fallback) instead of an STS exchange -- exactly like the empty-string

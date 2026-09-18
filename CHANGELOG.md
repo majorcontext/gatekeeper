@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## Unreleased
+
+### Fixed
+
+- **Token-exchange sources can opt out of caching when the STS dynamically selects a backing account** (`credentialsource/tokenexchange.go`, `gatekeeper_tokenexchange.go`) — the cache key is `(subject_token, actor_token)`, so a long-running box that switches its subscription account without changing either proxy-auth value kept receiving the prior account's still-valid token until the one-minute cache ceiling elapsed. A destination response did not necessarily invalidate it because usage exhaustion and similar account-switch triggers are not `401`/`403`. The new per-source `cache_ttl` accepts a Go duration, defaults to the existing one-minute ceiling, and is still capped at one minute; `cache_ttl: "0"` disables persistence while retaining singleflight coalescing for simultaneous exchanges. Existing configurations are unchanged. Deployments with mutable account selection must opt their subscription token-exchange rules into `cache_ttl: "0"`.
+
 ## v0.23.0 — 2026-09-17
 
 ### Added

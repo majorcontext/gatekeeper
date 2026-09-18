@@ -75,8 +75,8 @@ This distinction only matters when the key itself rotates (e.g., a new GCP servi
 `token-exchange` does not fit the fetch-once/refresh-on-a-timer model above — it resolves a credential per request, scoped to the caller's identity, and has its own cache:
 
 - Tokens are cached per `(subject_token, actor_token)` pair.
-- Cache TTL is the STS's `expires_in`, **capped at 1 minute** regardless of what the STS advertises. If `expires_in` is `0` or omitted, the 1-minute cap is used directly.
-- Concurrent requests for the same subject are coalesced into a single STS call via singleflight — the 1-minute cap does not mean an STS call every minute per active subject, it means at most one exchange per subject per minute even under concurrent load.
+- Cache TTL is the STS's `expires_in`, capped by the source's `cache_ttl` and the hard 1-minute ceiling. `cache_ttl` defaults to `1m`; set it to `"0"` for mutable backing credentials that must be resolved on every request. If `expires_in` is `0` or omitted, `cache_ttl` is used directly.
+- Concurrent requests for the same subject are coalesced into a single STS call via singleflight — including when caching is disabled.
 - There is no proactive refresh: a cache miss (first request, or the entry aged out) triggers a synchronous exchange on that request's path.
 
 See [Token Exchange: Caching Behavior](./06-token-exchange.md#caching-behavior) for the full mechanics and the reasoning behind the 1-minute cap.
