@@ -409,7 +409,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	// request is going. Record a placeholder arriving here — the request is
 	// forwarded and fails upstream on its own merits.
 	if bundleID, carries := carriesBundlePlaceholder(proxyReq, p.getCredentialBundlesForRequest(r)); carries {
-		p.logPolicy(r, "credential-bundle", "mcp.request", "",
+		p.logPolicyObservation(r, "credential-bundle", "mcp.request", "",
 			"credential bundle "+bundleID+" is not available through the MCP relay")
 	}
 

@@ -429,7 +429,18 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 	})
 
 	p.SetPolicyLogger(func(data proxy.PolicyLogData) {
-		slog.Warn("policy denial",
+		// A non-blocking entry is something policy noticed and let through. It
+		// is still worth surfacing — a credential bundle whose scope disagrees
+		// with where its client goes shows up here — but counting it as a
+		// denial would page whoever alerts on that rate for traffic nothing
+		// stopped.
+		msg, event := "policy denial", "policy.denial"
+		level := slog.LevelWarn
+		if !data.Blocking {
+			msg, event = "policy observation", "policy.observation"
+			level = slog.LevelInfo
+		}
+		slog.Log(context.Background(), level, msg,
 			"run_id", data.RunID,
 			"scope", data.Scope,
 			"operation", data.Operation,
@@ -440,13 +451,15 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 		if data.Ctx != nil {
 			span := trace.SpanFromContext(data.Ctx)
 			if span.SpanContext().IsValid() {
-				span.AddEvent("policy.denial", trace.WithAttributes(
+				span.AddEvent(event, trace.WithAttributes(
 					attribute.String("scope", data.Scope),
 					attribute.String("operation", data.Operation),
 					attribute.String("rule", data.Rule),
 					attribute.String("message", data.Message),
 				))
-				proxy.RecordPolicyDenial(data.Ctx, data.Scope, data.Rule)
+				if data.Blocking {
+					proxy.RecordPolicyDenial(data.Ctx, data.Scope, data.Rule)
+				}
 			}
 		}
 	})

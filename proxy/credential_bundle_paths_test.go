@@ -550,3 +550,56 @@ func TestInScopeBundleStillInjectsAfterDegrade(t *testing.T) {
 		t.Fatalf("in-scope Authorization = %q, want the real value", gotAuth)
 	}
 }
+
+// A skipped bundle is not a denial and must not be reported as one.
+//
+// Every PolicyLogData reaching gatekeeper.go's sink is warned as "policy
+// denial" and counted by RecordPolicyDenial. Before bundles degraded rather
+// than blocked, that was sound — every caller was a real refusal. Routing a
+// harmless out-of-scope forward through the same channel would page whoever
+// alerts on the denial rate: the same "looks like a proxy fault" outcome this
+// behavior exists to avoid, moved from the client to the operator.
+func TestSkippedBundleIsNotReportedAsADenial(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	bundle := codexTestBundle()
+	bundle.Scope = CredentialScope{Origins: []string{backend.URL}, Methods: []string{"POST"}, PathPrefixes: []string{"/backend-api/codex"}}
+
+	p := NewProxy()
+	var policy []PolicyLogData
+	p.SetPolicyLogger(func(d PolicyLogData) { policy = append(policy, d) })
+
+	req := httptest.NewRequest("POST", backend.URL+"/backend-api/MCP", nil)
+	req.Header.Set("Authorization", "Bearer fake-access")
+	req.Header.Set("ChatGPT-Account-ID", "fake-account")
+	p.handleHTTP(httptest.NewRecorder(), withBundleContext(req, bundle))
+
+	if len(policy) != 1 {
+		t.Fatalf("policy log = %+v, want exactly one entry", policy)
+	}
+	if policy[0].Blocking {
+		t.Error("a skipped bundle was reported as Blocking; it would be counted as a policy denial")
+	}
+}
+
+// Companion: an actual refusal must still be Blocking, or the flag above
+// could be satisfied by never marking anything as a denial again.
+func TestNetworkPolicyDenialIsStillBlocking(t *testing.T) {
+	p := NewProxy()
+	var policy []PolicyLogData
+	p.SetPolicyLogger(func(d PolicyLogData) { policy = append(policy, d) })
+
+	req := httptest.NewRequest("GET", "http://blocked.example/x", nil)
+	rec := httptest.NewRecorder()
+	p.handleHTTP(rec, withRunContext(req, &RunContextData{Policy: "strict"}))
+
+	if len(policy) == 0 {
+		t.Fatal("a network-policy denial produced no policy log entry")
+	}
+	if !policy[0].Blocking {
+		t.Errorf("network denial Blocking = false, want true: %+v", policy[0])
+	}
+}

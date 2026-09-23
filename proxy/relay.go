@@ -146,7 +146,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 	bundleResult := injectCredentialBundles(proxyReq, p.getCredentialBundlesForRequest(r), targetURL.Scheme, targetURL.Host)
 	if bundleResult.Skipped {
-		p.logPolicy(r, "credential-bundle", "http.request", "", bundleResult.Reason)
+		p.logPolicyObservation(r, "credential-bundle", "http.request", "", bundleResult.Reason)
 	}
 	credResult := mergeCredentialInjectionResults(bundleResult.credentialInjectionResult, injectCredentials(proxyReq, creds, host, r.Method, rest, bundleResult.InjectedHeaders))
 	mergeExtraHeaders(proxyReq, host, p.getExtraHeadersForRequest(r, host))
