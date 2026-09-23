@@ -436,7 +436,7 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 		// stopped.
 		msg, event := "policy denial", "policy.denial"
 		level := slog.LevelWarn
-		if !data.Blocking {
+		if data.NonBlocking {
 			msg, event = "policy observation", "policy.observation"
 			level = slog.LevelInfo
 		}
@@ -457,7 +457,7 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 					attribute.String("rule", data.Rule),
 					attribute.String("message", data.Message),
 				))
-				if data.Blocking {
+				if !data.NonBlocking {
 					proxy.RecordPolicyDenial(data.Ctx, data.Scope, data.Rule)
 				}
 			}

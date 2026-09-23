@@ -580,8 +580,8 @@ func TestSkippedBundleIsNotReportedAsADenial(t *testing.T) {
 	if len(policy) != 1 {
 		t.Fatalf("policy log = %+v, want exactly one entry", policy)
 	}
-	if policy[0].Blocking {
-		t.Error("a skipped bundle was reported as Blocking; it would be counted as a policy denial")
+	if !policy[0].NonBlocking {
+		t.Error("a skipped bundle was not marked NonBlocking; it would be counted as a policy denial")
 	}
 }
 
@@ -599,7 +599,43 @@ func TestNetworkPolicyDenialIsStillBlocking(t *testing.T) {
 	if len(policy) == 0 {
 		t.Fatal("a network-policy denial produced no policy log entry")
 	}
-	if !policy[0].Blocking {
-		t.Errorf("network denial Blocking = false, want true: %+v", policy[0])
+	if policy[0].NonBlocking {
+		t.Errorf("network denial marked NonBlocking, so it would never reach denial alerting: %+v", policy[0])
+	}
+}
+
+// PolicyLogData is built as a literal in several places, including the Postgres
+// plane, which terminates the connection right after logging. The field's sense
+// is chosen so those literals are denials without their author having to know
+// the field exists: a flag defaulting to "observation" drops such a denial out
+// of alerting silently, and silence in an alerting path is worse than an extra
+// warning.
+func TestZeroValuePolicyLogDataCountsAsADenial(t *testing.T) {
+	var zero PolicyLogData
+	if zero.NonBlocking {
+		t.Fatal("a zero-value PolicyLogData is not a denial; every direct literal would silently stop being alertable")
+	}
+}
+
+// The Postgres-plane network denial builds its entry directly rather than
+// through logPolicy, so it needs its own guard: it closes the connection, and
+// must be counted like any other refusal.
+func TestPostgresNetworkDenialIsCountedAsADenial(t *testing.T) {
+	var policy []PolicyLogData
+	p := NewProxy()
+	p.SetPolicyLogger(func(d PolicyLogData) { policy = append(policy, d) })
+
+	// Mirror the literal at the Postgres deny site (proxy/postgres.go).
+	p.policyLogger(PolicyLogData{
+		Scope:     "network",
+		Operation: "postgres.connect",
+		Message:   "Host not in allow list: db.example",
+	})
+
+	if len(policy) != 1 {
+		t.Fatalf("policy log = %+v, want one entry", policy)
+	}
+	if policy[0].NonBlocking {
+		t.Error("the Postgres denial is marked NonBlocking; it terminates the connection and must reach denial alerting")
 	}
 }

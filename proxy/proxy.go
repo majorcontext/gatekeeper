@@ -219,11 +219,16 @@ type PolicyLogData struct {
 	Message   string
 	Ctx       context.Context // Request context (for OTel span extraction, may be nil)
 
-	// Blocking distinguishes a refusal from an observation. True means the
-	// request was stopped; false means policy noticed something and let it
-	// through. Consumers alert and count on denials, so an observation logged
-	// as one would page an operator for traffic that was never blocked.
-	Blocking bool
+	// NonBlocking marks an entry that policy noticed but did not stop.
+	// Consumers alert and count on denials, so an observation reported as one
+	// would page an operator for traffic nothing blocked.
+	//
+	// The sense is negative on purpose: the zero value is a denial. This struct
+	// is built as a literal in several places, and a field defaulting to
+	// "observation" would silently drop any denial whose author did not know to
+	// set it — the failure is silence in an alerting path, which is strictly
+	// worse than an extra warning. Getting it wrong now over-reports.
+	NonBlocking bool
 }
 
 // PolicyLogger is called when a policy denial occurs.
@@ -760,7 +765,6 @@ func (p *Proxy) logPolicy(ctxReq *http.Request, scope, operation, rule, message 
 		reqCtx = ctxReq.Context()
 	}
 	p.policyLogger(PolicyLogData{
-		Blocking:  true,
 		RunID:     runID,
 		Scope:     scope,
 		Operation: operation,
@@ -1550,13 +1554,13 @@ func (p *Proxy) logPolicyObservation(ctxReq *http.Request, scope, operation, rul
 		reqCtx = ctxReq.Context()
 	}
 	p.policyLogger(PolicyLogData{
-		Blocking:  false,
-		RunID:     runID,
-		Scope:     scope,
-		Operation: operation,
-		Rule:      rule,
-		Message:   message,
-		Ctx:       reqCtx,
+		NonBlocking: true,
+		RunID:       runID,
+		Scope:       scope,
+		Operation:   operation,
+		Rule:        rule,
+		Message:     message,
+		Ctx:         reqCtx,
 	})
 }
 
