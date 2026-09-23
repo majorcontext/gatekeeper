@@ -37,8 +37,18 @@ type CredentialBundle struct {
 
 type credentialBundleInjectionResult struct {
 	credentialInjectionResult
-	Denied bool
-	Reason string
+	// Skipped is set when a request presented a bundle's placeholder but no
+	// bundle applied to it. Nothing is injected and the request continues
+	// unchanged.
+	//
+	// This is deliberately not a refusal. A placeholder is synthetic, so
+	// forwarding it grants nothing and the upstream answers as it would for
+	// any credential it does not accept. Blocking instead would turn every
+	// route a scope does not name into a hard client failure — which is how a
+	// client asking for a capability it was never granted ends up looking like
+	// a proxy fault. The boundary is what gets injected, not what gets through.
+	Skipped bool
+	Reason  string
 }
 
 func mergeCredentialInjectionResults(a, b credentialInjectionResult) credentialInjectionResult {
@@ -118,13 +128,11 @@ func bundleIsWellFormed(bundle CredentialBundle) bool {
 // carriesBundlePlaceholder reports whether the request presents any well-formed
 // bundle's placeholder, and names the bundle if so.
 //
-// The MCP relay uses this to refuse such a request rather than to inject one.
-// A bundle is scoped to an origin and path on the forwarding paths; the relay
-// selects its target from a registered server list instead, so evaluating a
-// bundle's scope there would mean honoring it against a destination the scope
-// was never written for. Refusing keeps a placeholder from being forwarded to a
-// third party while making it impossible for the relay to hand out the real
-// value by a route the scope does not cover.
+// The MCP relay uses this to record that it happened. The relay never injects a
+// bundle: it resolves its target from a registered server list rather than from
+// a scope, so honoring one there would mean applying a scope to a destination it
+// was never written for. Logging rather than refusing keeps that boundary while
+// leaving the request to fail on its own merits upstream.
 func carriesBundlePlaceholder(req *http.Request, bundles []CredentialBundle) (string, bool) {
 	for _, bundle := range bundles {
 		if !bundleIsWellFormed(bundle) {
@@ -142,7 +150,8 @@ func carriesBundlePlaceholder(req *http.Request, bundles []CredentialBundle) (st
 // injectCredentialBundles replaces an eligible bundle atomically. Bundles are
 // opt-in: a request is considered a candidate only when it carries at least
 // one header named by a bundle. Once selected, any scope or placeholder
-// mismatch fails closed so a synthetic credential cannot escape upstream.
+// mismatch injects nothing at all — never a partial bundle — and the request
+// is forwarded untouched, with Skipped set so the near miss stays observable.
 func injectCredentialBundles(req *http.Request, bundles []CredentialBundle, scheme, host string) credentialBundleInjectionResult {
 	if len(bundles) == 0 {
 		return credentialBundleInjectionResult{}
@@ -211,7 +220,7 @@ func injectCredentialBundles(req *http.Request, bundles []CredentialBundle, sche
 	}
 
 	if candidate {
-		return credentialBundleInjectionResult{Denied: true, Reason: "credential bundle scope or placeholder mismatch"}
+		return credentialBundleInjectionResult{Skipped: true, Reason: "credential bundle scope or placeholder mismatch"}
 	}
 	return credentialBundleInjectionResult{}
 }

@@ -30,52 +30,29 @@ func collectLogs(p *Proxy) (*sync.Mutex, *[]RequestLogData) {
 	return &mu, &logged
 }
 
-// A denied bundle is the single most important thing in this feature to have a
-// record of: reaching it means something tried to send a subscription
-// placeholder somewhere it is not allowed to go. The CONNECT and relay paths
-// log it; the plain-HTTP forward path dropped it silently, so a denial over
-// http:// left no trace in the request log at all.
-func TestHandleHTTP_DeniedBundleIsLogged(t *testing.T) {
-	p := NewProxy()
-	mu, logged := collectLogs(p)
+// A scope mismatch must stay visible even though it no longer blocks: it means
+// a bundle's scope disagrees with where its client actually goes, and without a
+// record that is invisible rather than merely non-fatal.
+func TestHandleHTTP_SkippedBundleIsRecorded(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
 
-	// Plain HTTP against a bundle that requires TLS: the placeholder makes the
-	// request a candidate, and the scope check then fails closed.
-	req := httptest.NewRequest("POST", "http://chatgpt.com/backend-api/codex/responses", nil)
+	bundle := codexTestBundle()
+	bundle.Scope = CredentialScope{Origins: []string{backend.URL}, Methods: []string{"POST"}, PathPrefixes: []string{"/backend-api/codex"}}
+
+	p := NewProxy()
+	var policy []PolicyLogData
+	p.SetPolicyLogger(func(d PolicyLogData) { policy = append(policy, d) })
+
+	req := httptest.NewRequest("POST", backend.URL+"/elsewhere", nil)
 	req.Header.Set("Authorization", "Bearer fake-access")
 	req.Header.Set("ChatGPT-Account-ID", "fake-account")
-	rec := httptest.NewRecorder()
-	p.handleHTTP(rec, withBundleContext(req, codexTestBundle()))
+	p.handleHTTP(httptest.NewRecorder(), withBundleContext(req, bundle))
 
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", rec.Code)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(*logged) != 1 {
-		t.Fatalf("logged %d entries, want exactly 1 — a denied credential bundle must be recorded", len(*logged))
-	}
-	entry := (*logged)[0]
-	if !entry.Denied {
-		t.Error("Denied = false, want true — this is a policy decision, not a client error")
-	}
-	if entry.DenyReason == "" {
-		t.Error("DenyReason is empty, want the bundle mismatch reason")
-	}
-	if entry.StatusCode != http.StatusForbidden {
-		t.Errorf("StatusCode = %d, want 403", entry.StatusCode)
-	}
-	if entry.Host != "chatgpt.com" {
-		t.Errorf("Host = %q, want chatgpt.com", entry.Host)
-	}
-	// The log must retain what the client sent, never the real credential.
-	for name, values := range entry.RequestHeaders {
-		for _, v := range values {
-			if strings.Contains(v, "real-access") || strings.Contains(v, "real-account") {
-				t.Errorf("log leaked a real credential in %s: %q", name, v)
-			}
-		}
+	if len(policy) != 1 || policy[0].Scope != "credential-bundle" || policy[0].Message == "" {
+		t.Fatalf("policy log = %+v, want one credential-bundle entry with a reason", policy)
 	}
 }
 
@@ -219,7 +196,7 @@ func TestRelay_CredentialBundleIsScoped(t *testing.T) {
 
 	// Companion: the same relay, the same placeholders, a path the bundle does
 	// not cover. Nothing may be injected, and the denial must be logged.
-	t.Run("out of scope is denied and logged", func(t *testing.T) {
+	t.Run("out of scope receives no credential", func(t *testing.T) {
 		gotAuth, gotAccount = "", ""
 		bundle := codexTestBundle()
 		bundle.Scope = CredentialScope{
@@ -227,7 +204,7 @@ func TestRelay_CredentialBundleIsScoped(t *testing.T) {
 			Methods:      []string{"POST"},
 			PathPrefixes: []string{"/backend-api/codex"},
 		}
-		p, mu, logged := newRelay(t, bundle.Scope)
+		p, _, _ := newRelay(t, bundle.Scope)
 
 		req := httptest.NewRequest("POST", "/relay/codex/backend-api/other", nil)
 		req.Header.Set("Authorization", "Bearer fake-access")
@@ -235,16 +212,12 @@ func TestRelay_CredentialBundleIsScoped(t *testing.T) {
 		rec := httptest.NewRecorder()
 		p.handleRelay(rec, withBundleContext(req, bundle))
 
-		if rec.Code != http.StatusForbidden {
-			t.Fatalf("status = %d, want 403", rec.Code)
+		if rec.Code == http.StatusForbidden {
+			t.Fatalf("out-of-scope relay request was blocked: %q", rec.Body.String())
 		}
-		if gotAuth != "" || gotAccount != "" {
-			t.Fatalf("upstream was reached with auth=%q account=%q; nothing should have been forwarded", gotAuth, gotAccount)
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		if len(*logged) != 1 || !(*logged)[0].Denied {
-			t.Fatalf("logged %+v, want one entry marked denied", *logged)
+		// Forwarded, but carrying the client's own placeholders — never the bundle.
+		if gotAuth != "Bearer fake-access" || gotAccount != "fake-account" {
+			t.Fatalf("bundle leaked off-scope: auth=%q account=%q", gotAuth, gotAccount)
 		}
 	})
 }
@@ -307,17 +280,16 @@ func TestIntercept_CredentialBundleIsScoped(t *testing.T) {
 		}
 	})
 
-	t.Run("adjacent path is denied before reaching upstream", func(t *testing.T) {
-		reached.Store(false)
+	// An adjacent path must not receive the credential. It is still forwarded —
+	// the boundary is what gets injected, not what gets through.
+	t.Run("adjacent path receives no credential", func(t *testing.T) {
+		gotAuth, gotAccount = "", ""
 		resp := post(t, "/backend-api/codexevil/responses")
-		if resp.StatusCode != http.StatusForbidden {
-			t.Fatalf("status = %d, want 403", resp.StatusCode)
+		if resp.StatusCode == http.StatusForbidden {
+			t.Fatal("status = 403, want the request forwarded without injection")
 		}
-		if resp.Header.Get("X-Moat-Blocked") != "credential-bundle" {
-			t.Errorf("X-Moat-Blocked = %q, want credential-bundle", resp.Header.Get("X-Moat-Blocked"))
-		}
-		if reached.Load() {
-			t.Error("upstream was contacted for a denied request")
+		if gotAuth != "Bearer fake-access" || gotAccount != "fake-account" {
+			t.Fatalf("bundle leaked to an adjacent path: auth=%q account=%q", gotAuth, gotAccount)
 		}
 	})
 }
@@ -425,10 +397,10 @@ func TestHandleHTTP_BundleDoesNotTriggerAutoInjectionOfOtherHeaders(t *testing.T
 }
 
 // The MCP relay resolves its target from the registered server list, not from a
-// bundle's scope, so a bundle must neither be honored nor quietly forwarded
-// there. A request carrying a placeholder is refused, and the real value is
-// never reachable by that route.
-func TestMCPRelay_RefusesBundlePlaceholders(t *testing.T) {
+// bundle's scope, so it must never inject one — that would apply a scope to a
+// destination it was never written for. It records the near miss and forwards
+// the request, which then fails upstream on its own merits.
+func TestMCPRelay_RecordsButDoesNotInjectBundlePlaceholders(t *testing.T) {
 	var reached atomic.Bool
 	var gotAuth string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -439,7 +411,8 @@ func TestMCPRelay_RefusesBundlePlaceholders(t *testing.T) {
 	defer backend.Close()
 
 	p := NewProxy()
-	mu, logged := collectLogs(p)
+	var policy []PolicyLogData
+	p.SetPolicyLogger(func(d PolicyLogData) { policy = append(policy, d) })
 	rc := &RunContextData{
 		CredentialBundles: []CredentialBundle{codexTestBundle()},
 		MCPServers:        []MCPServerConfig{{Name: "srv", URL: backend.URL}},
@@ -450,19 +423,19 @@ func TestMCPRelay_RefusesBundlePlaceholders(t *testing.T) {
 	rec := httptest.NewRecorder()
 	p.handleMCPRelay(rec, withRunContext(req, rc))
 
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", rec.Code)
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("the MCP relay blocked a request carrying a placeholder: %q", rec.Body.String())
 	}
-	if reached.Load() {
-		t.Errorf("the MCP server was contacted; a bundle placeholder was forwarded (auth=%q)", gotAuth)
+	if !reached.Load() {
+		t.Error("the MCP server was not contacted")
 	}
+	// The one thing that must never happen here: the real value reaching a
+	// relay target, which no bundle scope describes.
 	if strings.Contains(gotAuth, "real-access") {
 		t.Fatalf("the real bundle value reached an MCP server: %q", gotAuth)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(*logged) != 1 || !(*logged)[0].Denied {
-		t.Fatalf("logged %+v, want one entry marked denied", *logged)
+	if len(policy) != 1 || policy[0].Operation != "mcp.request" {
+		t.Fatalf("policy log = %+v, want one mcp.request entry", policy)
 	}
 }
 
@@ -491,5 +464,89 @@ func TestMCPRelay_UnrelatedRequestIsUnaffectedByBundles(t *testing.T) {
 	}
 	if !reached.Load() {
 		t.Error("the MCP server was not contacted")
+	}
+}
+
+// A bundle grants a capability for an exact request shape. A request outside
+// that shape must simply not receive it — not be blocked.
+//
+// Refusing looks protective and is not: the placeholder is synthetic, so
+// forwarding it grants nothing and the upstream answers as it would for any
+// bad credential. What refusing does do is convert every route the scope does
+// not name into a hard client failure. Codex's own `codex_apps` connector hits
+// `/backend-api/MCP` with the same placeholder; under a 403 it failed at
+// startup with "credential bundle rejected", which reads as a proxy bug rather
+// than as the absence of a credential it was never granted.
+func TestOutOfScopeBundleRequestIsForwardedNotBlocked(t *testing.T) {
+	var gotAuth, gotAccount, gotPath string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotAccount = r.Header.Get("ChatGPT-Account-ID")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	bundle := codexTestBundle()
+	bundle.Scope = CredentialScope{
+		Origins:      []string{backend.URL},
+		Methods:      []string{"POST"},
+		PathPrefixes: []string{"/backend-api/codex"},
+	}
+
+	p := NewProxy()
+	var policy []PolicyLogData
+	p.SetPolicyLogger(func(d PolicyLogData) { policy = append(policy, d) })
+
+	// The route Codex's apps connector actually uses.
+	req := httptest.NewRequest("POST", backend.URL+"/backend-api/MCP", nil)
+	req.Header.Set("Authorization", "Bearer fake-access")
+	req.Header.Set("ChatGPT-Account-ID", "fake-account")
+	rec := httptest.NewRecorder()
+	p.handleHTTP(rec, withBundleContext(req, bundle))
+
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("out-of-scope request was blocked: %q", rec.Body.String())
+	}
+	if gotPath != "/backend-api/MCP" {
+		t.Fatalf("upstream never saw the request (path %q)", gotPath)
+	}
+	// Nothing from the bundle may be injected — that is the actual boundary.
+	if gotAuth != "Bearer fake-access" || gotAccount != "fake-account" {
+		t.Fatalf("bundle leaked off-scope: auth=%q account=%q", gotAuth, gotAccount)
+	}
+	// The near miss still has to be observable, or a mis-scoped bundle becomes
+	// invisible instead of merely non-fatal.
+	if len(policy) != 1 || policy[0].Scope != "credential-bundle" {
+		t.Fatalf("policy log = %+v, want one credential-bundle entry", policy)
+	}
+}
+
+// Companion: in-scope still injects, so the test above cannot pass on a proxy
+// that has stopped applying bundles altogether.
+func TestInScopeBundleStillInjectsAfterDegrade(t *testing.T) {
+	var gotAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	bundle := codexTestBundle()
+	bundle.Scope = CredentialScope{
+		Origins:      []string{backend.URL},
+		Methods:      []string{"POST"},
+		PathPrefixes: []string{"/backend-api/codex"},
+	}
+
+	p := NewProxy()
+	req := httptest.NewRequest("POST", backend.URL+"/backend-api/codex/responses", nil)
+	req.Header.Set("Authorization", "Bearer fake-access")
+	req.Header.Set("ChatGPT-Account-ID", "fake-account")
+	rec := httptest.NewRecorder()
+	p.handleHTTP(rec, withBundleContext(req, bundle))
+
+	if gotAuth != "Bearer real-access" {
+		t.Fatalf("in-scope Authorization = %q, want the real value", gotAuth)
 	}
 }

@@ -2361,32 +2361,11 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	bundleResult := injectCredentialBundles(outReq, p.getCredentialBundlesForRequest(r), r.URL.Scheme, lookupHost)
-	if bundleResult.Denied {
-		http.Error(w, "credential bundle rejected", http.StatusForbidden)
-		// A bundle mismatch is a denial like a network- or Keep-policy denial,
-		// so it goes to the policy log too — that is what feeds PolicyLogger
-		// and the policy_denial metric operators alert on.
+	if bundleResult.Skipped {
+		// Nothing was injected and the request continues. Record it: a bundle
+		// whose scope does not match where its client actually goes is a
+		// configuration problem, and without this it would be invisible.
 		p.logPolicy(r, "credential-bundle", "http.request", "", bundleResult.Reason)
-		// Reaching here means a request carried a bundle placeholder somewhere
-		// the bundle does not permit, so it is exactly the event the request log
-		// exists to record. originalReqHeaders predates injection, so it holds
-		// the client's placeholders rather than any real credential.
-		p.logRequest(r, RequestLogData{
-			Method:         r.Method,
-			URL:            r.URL.String(),
-			Host:           host,
-			Path:           r.URL.Path,
-			RequestType:    "http",
-			StatusCode:     http.StatusForbidden,
-			Duration:       time.Since(start),
-			RequestHeaders: p.logHeadersRedacted(originalReqHeaders, lookupHost),
-			RequestSize:    r.ContentLength,
-			ResponseSize:   -1,
-			Denied:         true,
-			DenyReason:     bundleResult.Reason,
-			ClientAddr:     r.RemoteAddr,
-		})
-		return
 	}
 	credResult := mergeCredentialInjectionResults(bundleResult.credentialInjectionResult, injectCredentials(outReq, creds, host, r.Method, r.URL.Path, bundleResult.InjectedHeaders))
 
@@ -3198,29 +3177,8 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		// Snapshot first: logs must retain only the client-sent placeholders.
 		preBundleHeaders := req.Header.Clone()
 		bundleResult := injectCredentialBundles(req, p.getCredentialBundlesForRequest(r), "https", r.Host)
-		if bundleResult.Denied {
+		if bundleResult.Skipped {
 			p.logPolicy(r, "credential-bundle", "http.request", "", bundleResult.Reason)
-			w.Header().Set("X-Moat-Blocked", "credential-bundle")
-			w.Header().Set("Content-Type", "text/plain")
-			w.WriteHeader(http.StatusForbidden)
-			fmt.Fprint(w, "credential bundle rejected\n")
-			p.logRequest(r, RequestLogData{
-				RequestID:      innerReqID,
-				Method:         req.Method,
-				URL:            "https://" + r.Host + req.URL.RequestURI(),
-				Host:           host,
-				Path:           req.URL.Path,
-				RequestType:    "connect",
-				StatusCode:     http.StatusForbidden,
-				Duration:       time.Since(reqStart),
-				RequestHeaders: p.logHeadersRedacted(preBundleHeaders, r.Host),
-				RequestSize:    req.ContentLength,
-				ResponseSize:   -1,
-				ClientAddr:     r.RemoteAddr,
-				Denied:         true,
-				DenyReason:     bundleResult.Reason,
-			})
-			return
 		}
 
 		// Capture request body for logging before ReverseProxy consumes it.
