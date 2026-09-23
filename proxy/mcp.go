@@ -404,20 +404,13 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 		proxyReq.Header.Set("X-Request-Id", RequestIDFromContext(r.Context()))
 	}
 
-	// A credential bundle is scoped to an origin and path on the forwarding
-	// paths. The relay picks its target from the registered server list, so a
-	// bundle's scope says nothing about where this request is going — and the
-	// relay must never become a way to obtain the real value off-scope. Refuse
-	// the request instead of evaluating the bundle.
+	// The relay never injects a credential bundle: it picks its target from the
+	// registered server list, so a bundle's scope says nothing about where this
+	// request is going. Record a placeholder arriving here — the request is
+	// forwarded and fails upstream on its own merits.
 	if bundleID, carries := carriesBundlePlaceholder(proxyReq, p.getCredentialBundlesForRequest(r)); carries {
-		reason := "credential bundle " + bundleID + " is not available through the MCP relay"
-		p.logPolicy(r, "credential-bundle", "mcp.request", "", reason)
-		p.logExit(r, logBase, start, http.StatusForbidden, func(d *RequestLogData) {
-			d.Denied = true
-			d.DenyReason = reason
-		})
-		http.Error(w, "credential bundle rejected", http.StatusForbidden)
-		return
+		p.logPolicyObservation(r, "credential-bundle", "mcp.request", "",
+			"credential bundle "+bundleID+" is not available through the MCP relay")
 	}
 
 	// Inject credentials.

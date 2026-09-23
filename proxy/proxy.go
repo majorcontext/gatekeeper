@@ -218,6 +218,17 @@ type PolicyLogData struct {
 	Rule      string
 	Message   string
 	Ctx       context.Context // Request context (for OTel span extraction, may be nil)
+
+	// NonBlocking marks an entry that policy noticed but did not stop.
+	// Consumers alert and count on denials, so an observation reported as one
+	// would page an operator for traffic nothing blocked.
+	//
+	// The sense is negative on purpose: the zero value is a denial. This struct
+	// is built as a literal in several places, and a field defaulting to
+	// "observation" would silently drop any denial whose author did not know to
+	// set it — the failure is silence in an alerting path, which is strictly
+	// worse than an extra warning. Getting it wrong now over-reports.
+	NonBlocking bool
 }
 
 // PolicyLogger is called when a policy denial occurs.
@@ -738,7 +749,9 @@ func (p *Proxy) SetPolicyLogger(logger PolicyLogger) {
 	p.policyLogger = logger
 }
 
-// logPolicy logs a policy denial if a logger is configured.
+// logPolicy logs a policy denial — a request that was refused — if a logger is
+// configured. For something policy noticed but did not stop, use
+// logPolicyObservation.
 func (p *Proxy) logPolicy(ctxReq *http.Request, scope, operation, rule, message string) {
 	if p.policyLogger == nil {
 		return
@@ -1521,6 +1534,34 @@ func getRunContext(r *http.Request) *RunContextData {
 		return rc
 	}
 	return nil
+}
+
+// logPolicyObservation records something policy noticed without refusing it.
+//
+// It reaches the same logger as logPolicy but is marked non-blocking, so a
+// consumer can surface it without counting it toward the denial rate it
+// alerts on.
+func (p *Proxy) logPolicyObservation(ctxReq *http.Request, scope, operation, rule, message string) {
+	if p.policyLogger == nil {
+		return
+	}
+	var runID string
+	var reqCtx context.Context
+	if ctxReq != nil {
+		if rc := getRunContext(ctxReq); rc != nil {
+			runID = rc.RunID
+		}
+		reqCtx = ctxReq.Context()
+	}
+	p.policyLogger(PolicyLogData{
+		NonBlocking: true,
+		RunID:       runID,
+		Scope:       scope,
+		Operation:   operation,
+		Rule:        rule,
+		Message:     message,
+		Ctx:         reqCtx,
+	})
 }
 
 // logHeadersRedacted clones h for logging with the subject-identity
@@ -2361,32 +2402,11 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	bundleResult := injectCredentialBundles(outReq, p.getCredentialBundlesForRequest(r), r.URL.Scheme, lookupHost)
-	if bundleResult.Denied {
-		http.Error(w, "credential bundle rejected", http.StatusForbidden)
-		// A bundle mismatch is a denial like a network- or Keep-policy denial,
-		// so it goes to the policy log too — that is what feeds PolicyLogger
-		// and the policy_denial metric operators alert on.
-		p.logPolicy(r, "credential-bundle", "http.request", "", bundleResult.Reason)
-		// Reaching here means a request carried a bundle placeholder somewhere
-		// the bundle does not permit, so it is exactly the event the request log
-		// exists to record. originalReqHeaders predates injection, so it holds
-		// the client's placeholders rather than any real credential.
-		p.logRequest(r, RequestLogData{
-			Method:         r.Method,
-			URL:            r.URL.String(),
-			Host:           host,
-			Path:           r.URL.Path,
-			RequestType:    "http",
-			StatusCode:     http.StatusForbidden,
-			Duration:       time.Since(start),
-			RequestHeaders: p.logHeadersRedacted(originalReqHeaders, lookupHost),
-			RequestSize:    r.ContentLength,
-			ResponseSize:   -1,
-			Denied:         true,
-			DenyReason:     bundleResult.Reason,
-			ClientAddr:     r.RemoteAddr,
-		})
-		return
+	if bundleResult.Skipped {
+		// Nothing was injected and the request continues. Record it: a bundle
+		// whose scope does not match where its client actually goes is a
+		// configuration problem, and without this it would be invisible.
+		p.logPolicyObservation(r, "credential-bundle", "http.request", "", bundleResult.Reason)
 	}
 	credResult := mergeCredentialInjectionResults(bundleResult.credentialInjectionResult, injectCredentials(outReq, creds, host, r.Method, r.URL.Path, bundleResult.InjectedHeaders))
 
@@ -3193,34 +3213,14 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			return
 		}
 
-		// Credential bundles are validated and applied before ReverseProxy so
-		// a mismatch can be denied without ever constructing an upstream request.
+		// Credential bundles are evaluated and applied before ReverseProxy so a
+		// match is in place on the request it forwards. A mismatch injects
+		// nothing and the request goes on unchanged.
 		// Snapshot first: logs must retain only the client-sent placeholders.
 		preBundleHeaders := req.Header.Clone()
 		bundleResult := injectCredentialBundles(req, p.getCredentialBundlesForRequest(r), "https", r.Host)
-		if bundleResult.Denied {
-			p.logPolicy(r, "credential-bundle", "http.request", "", bundleResult.Reason)
-			w.Header().Set("X-Moat-Blocked", "credential-bundle")
-			w.Header().Set("Content-Type", "text/plain")
-			w.WriteHeader(http.StatusForbidden)
-			fmt.Fprint(w, "credential bundle rejected\n")
-			p.logRequest(r, RequestLogData{
-				RequestID:      innerReqID,
-				Method:         req.Method,
-				URL:            "https://" + r.Host + req.URL.RequestURI(),
-				Host:           host,
-				Path:           req.URL.Path,
-				RequestType:    "connect",
-				StatusCode:     http.StatusForbidden,
-				Duration:       time.Since(reqStart),
-				RequestHeaders: p.logHeadersRedacted(preBundleHeaders, r.Host),
-				RequestSize:    req.ContentLength,
-				ResponseSize:   -1,
-				ClientAddr:     r.RemoteAddr,
-				Denied:         true,
-				DenyReason:     bundleResult.Reason,
-			})
-			return
+		if bundleResult.Skipped {
+			p.logPolicyObservation(r, "credential-bundle", "http.request", "", bundleResult.Reason)
 		}
 
 		// Capture request body for logging before ReverseProxy consumes it.

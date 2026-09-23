@@ -33,7 +33,7 @@ func TestInjectCredentialBundles_ReplacesAllHeadersAtomically(t *testing.T) {
 
 	res := injectCredentialBundles(req, []CredentialBundle{codexTestBundle()}, "https", "chatgpt.com")
 
-	if res.Denied {
+	if res.Skipped {
 		t.Fatalf("bundle denied: %s", res.Reason)
 	}
 	if got := req.Header.Get("Authorization"); got != "Bearer real-access" {
@@ -48,6 +48,9 @@ func TestInjectCredentialBundles_ReplacesAllHeadersAtomically(t *testing.T) {
 }
 
 func TestInjectCredentialBundles_FailsClosedWithoutMutating(t *testing.T) {
+	// "Fails closed" means nothing is injected and the request is left exactly
+	// as the client sent it. It does not mean the request is blocked: the
+	// placeholder is synthetic, so forwarding it grants nothing.
 	tests := []struct {
 		name    string
 		method  string
@@ -95,8 +98,11 @@ func TestInjectCredentialBundles_FailsClosedWithoutMutating(t *testing.T) {
 
 			res := injectCredentialBundles(req, []CredentialBundle{codexTestBundle()}, tc.scheme, tc.host)
 
-			if !res.Denied {
-				t.Fatal("request was not denied")
+			if !res.Skipped {
+				t.Fatal("out-of-scope request was not recorded as skipped")
+			}
+			if len(res.InjectedHeaders) != 0 {
+				t.Fatalf("injected %v on a scope mismatch", res.InjectedHeaders)
 			}
 			if got := req.Header.Get("Authorization"); got != beforeAuth {
 				t.Errorf("Authorization mutated on deny: %q", got)
@@ -119,7 +125,7 @@ func TestInjectCredentialBundles_AcceptsExplicitDefaultPort(t *testing.T) {
 	req.Header.Set("ChatGPT-Account-ID", "fake-account")
 
 	res := injectCredentialBundles(req, []CredentialBundle{codexTestBundle()}, "https", "chatgpt.com:443")
-	if res.Denied {
+	if res.Skipped {
 		t.Fatalf("https://chatgpt.com:443 was denied; it is the same origin as https://chatgpt.com")
 	}
 	if got := req.Header.Get("Authorization"); got != "Bearer real-access" {
@@ -138,7 +144,7 @@ func TestInjectCredentialBundles_AcceptsPrefixItself(t *testing.T) {
 	req.Header.Set("ChatGPT-Account-ID", "fake-account")
 
 	res := injectCredentialBundles(req, []CredentialBundle{codexTestBundle()}, "https", "chatgpt.com")
-	if res.Denied {
+	if res.Skipped {
 		t.Fatal("the prefix path itself was denied")
 	}
 }
@@ -149,7 +155,7 @@ func TestInjectCredentialBundles_IgnoresUnrelatedRequestWithoutPlaceholders(t *t
 		t.Fatal(err)
 	}
 	res := injectCredentialBundles(req, []CredentialBundle{codexTestBundle()}, "https", "chatgpt.com")
-	if res.Denied || len(res.Injected) != 0 {
+	if res.Skipped || len(res.Injected) != 0 {
 		t.Fatalf("unrelated request should be untouched, got %+v", res)
 	}
 }
@@ -158,7 +164,7 @@ func TestInjectCredentialBundles_IgnoresUnrelatedRequestWithoutPlaceholders(t *t
 // absent header, so an empty Placeholder compares equal on every request that
 // simply does not carry that header — one misconfigured entry would otherwise
 // deny far more traffic than the bundle was ever scoped to cover.
-func TestInjectCredentialBundles_MalformedBundleIsIgnoredNotDenied(t *testing.T) {
+func TestInjectCredentialBundles_MalformedBundleIsIgnoredEntirely(t *testing.T) {
 	malformed := []struct {
 		name   string
 		bundle CredentialBundle
@@ -194,8 +200,8 @@ func TestInjectCredentialBundles_MalformedBundleIsIgnoredNotDenied(t *testing.T)
 				t.Fatal(err)
 			}
 			res := injectCredentialBundles(req, []CredentialBundle{tc.bundle}, "https", "chatgpt.com")
-			if res.Denied {
-				t.Fatalf("a malformed bundle denied an unrelated request: %s", res.Reason)
+			if res.Skipped {
+				t.Fatalf("a malformed bundle flagged an unrelated request: %s", res.Reason)
 			}
 			if len(res.InjectedHeaders) != 0 {
 				t.Fatalf("a malformed bundle injected %v", res.InjectedHeaders)
@@ -216,8 +222,8 @@ func TestInjectCredentialBundles_MalformedBundleDoesNotDisableValidOne(t *testin
 
 	broken := CredentialBundle{ID: "broken", Replacements: []HeaderReplacement{{Name: "X-Unset"}}}
 	res := injectCredentialBundles(req, []CredentialBundle{broken, codexTestBundle()}, "https", "chatgpt.com")
-	if res.Denied {
-		t.Fatalf("valid bundle denied: %s", res.Reason)
+	if res.Skipped {
+		t.Fatalf("valid bundle skipped: %s", res.Reason)
 	}
 	if got := req.Header.Get("Authorization"); got != "Bearer real-access" {
 		t.Errorf("Authorization = %q, want the valid bundle's value", got)
