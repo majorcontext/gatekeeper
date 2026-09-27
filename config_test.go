@@ -17,7 +17,6 @@ proxy:
   host: 127.0.0.1
   proxy_protocol: true
   auth_token_env: GATEKEEPER_PROXY_AUTH_TOKEN
-  reject_mismatched_auth: true
 tls:
   ca_cert: /tmp/ca.crt
   ca_key: /tmp/ca.key
@@ -67,9 +66,6 @@ log:
 	}
 	if cfg.Proxy.AuthTokenEnv != "GATEKEEPER_PROXY_AUTH_TOKEN" {
 		t.Errorf("Proxy.AuthTokenEnv = %q, want GATEKEEPER_PROXY_AUTH_TOKEN", cfg.Proxy.AuthTokenEnv)
-	}
-	if !cfg.Proxy.RejectMismatchedAuth {
-		t.Error("Proxy.RejectMismatchedAuth = false, want true")
 	}
 
 	// TLS
@@ -148,9 +144,6 @@ proxy:
 	}
 	if cfg.Proxy.ProxyProtocol {
 		t.Error("Proxy.ProxyProtocol = true, want false when absent from config")
-	}
-	if cfg.Proxy.RejectMismatchedAuth {
-		t.Error("Proxy.RejectMismatchedAuth = true, want false when absent from config")
 	}
 	if cfg.Postgres != nil && cfg.Postgres.ProxyProtocol {
 		t.Error("Postgres.ProxyProtocol = true, want false when absent from config")

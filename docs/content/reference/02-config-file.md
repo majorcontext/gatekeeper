@@ -111,6 +111,10 @@ The username portion is ignored. The token comparison is constant-time to preven
 
 Mutually exclusive with `auth_token_env`.
 
+**Whenever `auth_token` (or `auth_token_env`) resolves to a non-empty token, a request presenting a `Proxy-Authorization` password that does not equal it gets `407`, before `delegateAuth` or any credential resolver ever runs** — including when a credential sets `actor_token_from` (see [Token exchange](../guides/06-token-exchange.md)), which would otherwise forward that password to an STS. A request with no `Proxy-Authorization` at all is unaffected. This means a deployment that needs each caller to authenticate with its own distinct, STS-validated password — rather than one shared static token — must leave `auth_token` and `auth_token_env` both unset; with neither set, `actor_token_from` still requires a non-empty password and still forwards it to the STS exactly as before.
+
+This does not apply to gatekeeper's daemon mode (moat's per-run `contextResolver`, not configured through this file): there, `auth_token` is never a single shared secret in the first place — each caller's own token is looked up individually — so comparing a presented password against one static value would compare against the wrong thing, and gatekeeper does not do it.
+
 ### proxy.auth_token_env
 
 Name of an environment variable holding the proxy auth token, read once at startup.
@@ -124,27 +128,7 @@ proxy:
 - **Required:** No
 - **Default:** — (no authentication required)
 
-Mutually exclusive with `auth_token`: set one or the other, not both, or gatekeeper refuses to start. The named variable must be set and non-empty at startup; a missing or empty variable is a fatal config error naming the variable, never any value.
-
-### proxy.reject_mismatched_auth
-
-Reject a `Proxy-Authorization` password that does not equal the resolved `auth_token`/`auth_token_env`, even when a credential's `actor_token_from` would otherwise delegate the check to an STS (see [Token exchange](../guides/06-token-exchange.md)).
-
-```yaml
-proxy:
-  auth_token_env: GATEKEEPER_PROXY_AUTH_TOKEN
-  reject_mismatched_auth: true
-```
-
-- **Type:** `bool`
-- **Required:** No
-- **Default:** `false`
-
-Without this option, a credential rule that sets `actor_token_from` makes gatekeeper accept any non-empty `Proxy-Authorization` password and forward it to the STS for validation — it never checks the password against this instance's own `auth_token`. That is the intended multi-tenant behavior when one gatekeeper instance legitimately serves many callers with different per-user passwords. It is a problem when each instance is meant to serve exactly one caller with its own static token: another caller's still-valid credentials pass the local check and get served under that caller's own identity, resolved by whichever party issued them.
-
-Setting `reject_mismatched_auth: true` closes that: a password that does not equal `auth_token` (constant-time compared) is rejected with `407` before delegateAuth or any credential resolver sees it, regardless of whether the STS would have accepted it. A request with no `Proxy-Authorization` at all is unaffected — it falls through to whatever the existing mode (`delegateAuth`, a plain `auth_token` check, or no auth at all) already does with an absent credential.
-
-Requires `auth_token` or `auth_token_env` to be set; gatekeeper refuses to start otherwise, since there would be nothing to compare against.
+Mutually exclusive with `auth_token`: set one or the other, not both, or gatekeeper refuses to start. The named variable must be set and non-empty at startup; a missing or empty variable is a fatal config error naming the variable, never any value. See [proxy.auth_token](#proxyauth_token) above for how a resolved token interacts with `actor_token_from`.
 
 ### proxy.proxy_protocol
 

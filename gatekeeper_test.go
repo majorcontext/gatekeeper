@@ -2271,7 +2271,15 @@ func TestHTTPSTokenExchangeActorToken(t *testing.T) {
 	}
 }
 
-func TestHTTPSTokenExchangeActorTokenWithAuthToken(t *testing.T) {
+// TestHTTPSTokenExchangeActorTokenWithAuthTokenMismatchRejected pins a
+// genuine behavior change end-to-end: auth_token together with
+// actor_token_from used to let any different, STS-validated password pass,
+// because delegateAuth skipped the static auth_token comparison entirely.
+// A caller's request now gets 407 before the STS or the backend ever see
+// it, so a deployment needing distinct per-caller passwords through
+// actor_token_from must leave auth_token unset (see
+// TestHTTPSTokenExchangeActorToken above).
+func TestHTTPSTokenExchangeActorTokenWithAuthTokenMismatchRejected(t *testing.T) {
 	caDir := t.TempDir()
 	ca, err := proxy.NewCA(caDir)
 	if err != nil {
@@ -2361,20 +2369,22 @@ func TestHTTPSTokenExchangeActorTokenWithAuthToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("GET through proxy: %v", err)
+	// The CONNECT handshake itself is rejected, so this surfaces as a
+	// transport error (matching TestProxy_DelegateAuthRejectsBearerAuth in
+	// the proxy package) rather than a 200/407 http.Response.
+	_, err = client.Do(req)
+	if err == nil {
+		t.Fatal("GET through proxy: expected error for a password that mismatches auth_token, got nil")
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200; auth_token + actor_token_from should delegate auth to STS", resp.StatusCode)
+	if !strings.Contains(err.Error(), "Proxy Authentication Required") {
+		t.Errorf("error = %v, want to contain 'Proxy Authentication Required'", err)
 	}
 
 	backendMu.Lock()
 	gotAuth := backendAuth
 	backendMu.Unlock()
-	if gotAuth != "Bearer exchanged-for-alice@example.com" {
-		t.Errorf("backend Authorization = %q, want %q", gotAuth, "Bearer exchanged-for-alice@example.com")
+	if gotAuth != "" {
+		t.Errorf("backend Authorization = %q, want empty; the request must be rejected before it reaches the STS or the backend", gotAuth)
 	}
 }
 

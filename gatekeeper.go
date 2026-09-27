@@ -476,7 +476,6 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 	if authToken != "" {
 		p.SetAuthToken(authToken)
 	}
-	p.SetRejectMismatchedAuth(cfg.Proxy.RejectMismatchedAuth)
 
 	// When actor_token_from is configured, each caller has a unique proxy
 	// auth password validated by the STS — skip the static authToken check.

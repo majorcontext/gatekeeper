@@ -70,15 +70,6 @@ type ProxyConfig struct {
 	// the port is reachable solely through the load balancer, and never use
 	// client_ip for security decisions.
 	ProxyProtocol bool `yaml:"proxy_protocol,omitempty"`
-
-	// RejectMismatchedAuth rejects a presented Proxy-Authorization password
-	// that does not equal the resolved auth_token/auth_token_env, even when
-	// a credential's actor_token_from delegates the static check to an STS
-	// (see resolveProxyAuthToken and proxy.Proxy.SetDelegateAuth). A request
-	// with no Proxy-Authorization at all is unaffected. Off by default, so
-	// every config written before this field existed keeps its current
-	// behavior unchanged. Requires auth_token or auth_token_env to be set.
-	RejectMismatchedAuth bool `yaml:"reject_mismatched_auth,omitempty"`
 }
 
 // TLSConfig configures the CA certificate used for TLS interception.
@@ -194,9 +185,6 @@ func resolveProxyAuthToken(cfg ProxyConfig) (string, error) {
 		if token == "" {
 			return "", fmt.Errorf("proxy.auth_token_env: environment variable %q is empty or not set", cfg.AuthTokenEnv)
 		}
-	}
-	if cfg.RejectMismatchedAuth && token == "" {
-		return "", fmt.Errorf("proxy.reject_mismatched_auth requires 'auth_token' or 'auth_token_env' to be set")
 	}
 	return token, nil
 }
