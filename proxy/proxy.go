@@ -684,6 +684,7 @@ type Proxy struct {
 	logger               RequestLogger    // Optional request logger
 	authToken            string           // Optional auth token required for proxy access
 	delegateAuth         bool             // Skip static authToken check; delegate to credential resolvers
+	rejectMismatchedAuth bool             // Reject a presented proxy password that isn't authToken, even under delegateAuth
 	policy               string           // "permissive" or "strict"
 	allowedHosts         []hostPattern    // parsed allow patterns for strict policy
 	requestChecker       RequestChecker   // per-host request rules checker
@@ -724,6 +725,17 @@ func (p *Proxy) SetAuthToken(token string) {
 // STS validates.
 func (p *Proxy) SetDelegateAuth(delegate bool) {
 	p.delegateAuth = delegate
+}
+
+// SetRejectMismatchedAuth controls whether a presented proxy password that
+// does not equal authToken is rejected with 407, even when delegateAuth is
+// set. It has no effect when authToken is empty (nothing to compare
+// against) or when a contextResolver is set (per-caller tokens are never a
+// single shared authToken). A request that presents no proxy credentials
+// at all is unaffected: it still falls through to the existing
+// delegateAuth/authToken/contextResolver check for that mode.
+func (p *Proxy) SetRejectMismatchedAuth(reject bool) {
+	p.rejectMismatchedAuth = reject
 }
 
 // SetCA sets the CA for TLS interception.
@@ -2046,6 +2058,25 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.contextResolver != nil && r.URL.Host == "" && strings.HasPrefix(r.URL.Path, "/_aws/") {
 		p.handleDirectAWSCredentials(w, r)
 		return
+	}
+
+	// A presented proxy password that isn't this instance's own authToken is
+	// rejected up front, before delegateAuth or contextResolver ever see it.
+	// Without this, delegateAuth's hasBasicProxyAuth only checks that SOME
+	// non-empty password was sent, so a caller presenting another instance's
+	// still-valid credentials passes and gets served under that caller's own
+	// resolved identity. A request with no Proxy-Authorization at all is
+	// unaffected: extractProxyToken returns ok=false and this check does
+	// nothing, leaving the existing per-mode check below to decide.
+	if p.rejectMismatchedAuth && p.authToken != "" && p.contextResolver == nil {
+		if token, ok := extractProxyToken(r); ok && subtle.ConstantTimeCompare([]byte(token), []byte(p.authToken)) != 1 {
+			slog.Warn("proxy auth mismatch",
+				"subsystem", "proxy",
+				"action", "auth-reject",
+			)
+			writeProxyAuthRequired(w, "Proxy authentication mismatch")
+			return
+		}
 	}
 
 	// Authentication and context resolution.

@@ -98,3 +98,23 @@ func TestResolveProxyAuthToken_ExtraneousFieldsRejected(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveProxyAuthToken_RejectMismatchedAuthRequiresToken(t *testing.T) {
+	_, err := resolveProxyAuthToken(ProxyConfig{RejectMismatchedAuth: true})
+	if err == nil {
+		t.Fatal("resolveProxyAuthToken: expected error when reject_mismatched_auth is set with no auth_token or auth_token_env, got nil")
+	}
+	if !strings.Contains(err.Error(), "reject_mismatched_auth") {
+		t.Errorf("error = %q, want it to name 'reject_mismatched_auth'", err)
+	}
+}
+
+func TestResolveProxyAuthToken_RejectMismatchedAuthWithLiteralTokenSucceeds(t *testing.T) {
+	token, err := resolveProxyAuthToken(ProxyConfig{AuthToken: "literal-token", RejectMismatchedAuth: true})
+	if err != nil {
+		t.Fatalf("resolveProxyAuthToken: %v", err)
+	}
+	if token != "literal-token" {
+		t.Errorf("token = %q, want %q", token, "literal-token")
+	}
+}

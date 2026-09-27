@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.25.0 — 2026-09-27
+
+### Added
+
+- **`proxy.reject_mismatched_auth` rejects a proxy password from another caller** (`config.go`, `proxy/proxy.go`) — when a credential sets `actor_token_from`, gatekeeper delegates the proxy's `Proxy-Authorization` check entirely to the STS: `delegateAuth` only required *some* non-empty password, never that it equaled this instance's own `auth_token`. That is correct when one gatekeeper instance legitimately serves many callers with distinct per-user passwords, but wrong when each instance is meant to serve exactly one caller holding its own static token — a request presenting another caller's still-valid credentials passed the local check and was served under that caller's own resolved identity, because the STS validates a token against whoever it actually belongs to, not against which instance received it. `proxy.reject_mismatched_auth: true` closes this: a presented password that does not equal the resolved `auth_token`/`auth_token_env` (constant-time compared) is now rejected with `407` before `delegateAuth` or any credential resolver ever sees it. A request with no `Proxy-Authorization` at all is unaffected, so clients that call the proxy without credentials keep working. The option is off by default, requires `auth_token` or `auth_token_env` to be set, and every existing config keeps its current behavior unchanged. Documented in the [config file reference](docs/content/reference/02-config-file.md#proxyreject_mismatched_auth) and the [token exchange guide](docs/content/guides/06-token-exchange.md) ([#73](https://github.com/majorcontext/gatekeeper/pull/73))
+
 ## v0.24.0 — 2026-09-27
 
 ### Added

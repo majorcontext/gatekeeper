@@ -126,6 +126,26 @@ proxy:
 
 Mutually exclusive with `auth_token`: set one or the other, not both, or gatekeeper refuses to start. The named variable must be set and non-empty at startup; a missing or empty variable is a fatal config error naming the variable, never any value.
 
+### proxy.reject_mismatched_auth
+
+Reject a `Proxy-Authorization` password that does not equal the resolved `auth_token`/`auth_token_env`, even when a credential's `actor_token_from` would otherwise delegate the check to an STS (see [Token exchange](../guides/06-token-exchange.md)).
+
+```yaml
+proxy:
+  auth_token_env: GATEKEEPER_PROXY_AUTH_TOKEN
+  reject_mismatched_auth: true
+```
+
+- **Type:** `bool`
+- **Required:** No
+- **Default:** `false`
+
+Without this option, a credential rule that sets `actor_token_from` makes gatekeeper accept any non-empty `Proxy-Authorization` password and forward it to the STS for validation — it never checks the password against this instance's own `auth_token`. That is the intended multi-tenant behavior when one gatekeeper instance legitimately serves many callers with different per-user passwords. It is a problem when each instance is meant to serve exactly one caller with its own static token: another caller's still-valid credentials pass the local check and get served under that caller's own identity, resolved by whichever party issued them.
+
+Setting `reject_mismatched_auth: true` closes that: a password that does not equal `auth_token` (constant-time compared) is rejected with `407` before delegateAuth or any credential resolver sees it, regardless of whether the STS would have accepted it. A request with no `Proxy-Authorization` at all is unaffected — it falls through to whatever the existing mode (`delegateAuth`, a plain `auth_token` check, or no auth at all) already does with an absent credential.
+
+Requires `auth_token` or `auth_token_env` to be set; gatekeeper refuses to start otherwise, since there would be nothing to compare against.
+
 ### proxy.proxy_protocol
 
 Parse PROXY protocol v1/v2 headers on the HTTP/CONNECT proxy listener to recover the real client address behind a TCP-terminating load balancer.

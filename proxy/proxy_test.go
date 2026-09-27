@@ -338,6 +338,102 @@ func TestProxy_DelegateAuthRejectsBearerAuth(t *testing.T) {
 	}
 }
 
+// TestProxy_RejectMismatchedAuth pins the fix for a companion accepting
+// another caller's valid-but-foreign proxy password under delegateAuth: box
+// B's companion answered 200 and served the request as box A's identity
+// because hasBasicProxyAuth only checked that a password was present, never
+// that it equaled B's own authToken. reject_mismatched_auth closes that
+// without disturbing a request that presents no credentials at all, which
+// some box tools rely on.
+func TestProxy_RejectMismatchedAuth(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("backend response"))
+	}))
+	defer backend.Close()
+
+	const ownToken = "box-b-own-token"
+
+	tests := []struct {
+		name       string
+		rejectOn   bool
+		anonymous  bool
+		password   string
+		wantStatus int
+	}{
+		{"reject on, mismatched password from another box", true, false, "box-a-token", http.StatusProxyAuthRequired},
+		{"reject on, matching password", true, false, ownToken, http.StatusOK},
+		{"reject on, absent credentials unaffected", true, true, "", http.StatusProxyAuthRequired},
+		{"reject off, mismatched password keeps today's behavior", false, false, "box-a-token", http.StatusOK},
+		{"reject off, matching password keeps today's behavior", false, false, ownToken, http.StatusOK},
+		{"reject off, absent credentials keeps today's behavior", false, true, "", http.StatusProxyAuthRequired},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewProxy()
+			p.SetAuthToken(ownToken)
+			p.SetDelegateAuth(true)
+			p.SetRejectMismatchedAuth(tt.rejectOn)
+
+			proxyServer := httptest.NewServer(p)
+			defer proxyServer.Close()
+
+			proxyURL := mustParseURL(proxyServer.URL)
+			if !tt.anonymous {
+				proxyURL.User = url.UserPassword("alice|box-a", tt.password)
+			}
+
+			client := &http.Client{
+				Transport: &http.Transport{
+					Proxy: http.ProxyURL(proxyURL),
+				},
+			}
+
+			resp, err := client.Get(backend.URL)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			resp.Body.Close()
+
+			if resp.StatusCode != tt.wantStatus {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
+			}
+		})
+	}
+}
+
+// TestProxy_RejectMismatchedAuthNoAuthTokenConfiguredIsNoop confirms the
+// option is inert without an authToken to compare against: an anonymous
+// request must keep passing through unauthenticated, matching the fully
+// open proxy's existing permissive behavior.
+func TestProxy_RejectMismatchedAuthNoAuthTokenConfiguredIsNoop(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("backend response"))
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	p.SetRejectMismatchedAuth(true)
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxyServer.URL)),
+		},
+	}
+
+	resp, err := client.Get(backend.URL)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d; reject_mismatched_auth without an auth_token must not block anonymous requests", resp.StatusCode, http.StatusOK)
+	}
+}
+
 func TestProxy_NetworkPolicyPermissive(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("backend response"))

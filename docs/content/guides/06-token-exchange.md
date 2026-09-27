@@ -170,7 +170,7 @@ HTTP_PROXY=http://alice%40example.com:ak_alice_xxxxx@127.0.0.1:9080
 
 Gatekeeper sends both `subject_token=alice@example.com` and `actor_token=ak_alice_xxxxx` to the STS. The STS validates that the API key belongs to Alice before issuing tokens.
 
-When `actor_token_from` is configured on any credential, gatekeeper requires all clients to provide Basic proxy auth with a non-empty password. The password is not checked against a static value -- it is forwarded to the STS.
+When `actor_token_from` is configured on any credential, gatekeeper requires all clients to provide Basic proxy auth with a non-empty password. The password is not checked against a static value by default -- it is forwarded to the STS, whichever caller it belongs to. When each instance is meant to serve one caller with its own static `auth_token`, set [`proxy.reject_mismatched_auth`](../reference/02-config-file.md#proxyreject_mismatched_auth) so a password from another caller is rejected before it ever reaches the STS.
 
 ## Caching behavior
 
