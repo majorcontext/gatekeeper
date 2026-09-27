@@ -2025,8 +2025,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// empty). We check r.URL.Host == "" to distinguish direct requests from
 	// proxied requests that happen to have /relay/ in the path — without this,
 	// a proxied request to http://anything.com/relay/foo would match and bypass auth.
-	// Auth is skipped because direct requests don't carry Proxy-Authorization.
-	// Safety: relays only forward to pre-configured URLs, not arbitrary hosts.
+	// This chain's context/delegateAuth checks below are skipped — handleRelay
+	// enforces authToken itself (see rejectMismatchedAuth) — and relays only
+	// forward to pre-configured URLs, not arbitrary hosts.
 	if len(p.relays) > 0 && r.URL.Host == "" && strings.HasPrefix(r.URL.Path, "/relay/") {
 		p.handleRelay(w, r)
 		return
@@ -2050,18 +2051,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A password that mismatches authToken is rejected before delegateAuth or any resolver runs; absent credentials, and daemon mode's per-caller contextResolver, are unaffected.
-	if p.contextResolver == nil && p.authToken != "" {
-		if ok, present := p.checkAuth(r); present && !ok {
-			slog.Warn("proxy auth mismatch",
-				"subsystem", "proxy",
-				"action", "auth-reject",
-			)
-			writeProxyAuthRequired(w, "Proxy authentication mismatch")
-			return
-		}
-	}
-
 	// Authentication and context resolution.
 	// When a contextResolver is set (daemon mode), extract the proxy auth token,
 	// resolve it to per-run context data, and store it in the request context.
@@ -2083,6 +2072,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		r = r.WithContext(ctx)
 	} else if p.delegateAuth {
+		// A password that mismatches a configured authToken is rejected even under delegateAuth.
+		if p.rejectMismatchedAuth(w, r) {
+			return
+		}
 		if !hasBasicProxyAuth(r) {
 			writeProxyAuthRequired(w, "Proxy authentication required")
 			return
@@ -2091,8 +2084,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r = r.WithContext(withUserID(r.Context(), uid))
 		}
 	} else if p.authToken != "" {
-		// The check above already rejected a present-but-mismatched password,
-		// so only "no password presented" remains live here.
+		if p.rejectMismatchedAuth(w, r) {
+			return
+		}
+		// rejectMismatchedAuth already handled a present-but-mismatched
+		// password, so only "no password presented" remains live here.
 		if _, present := p.checkAuth(r); !present {
 			writeProxyAuthRequired(w, "Proxy authentication required")
 			return
@@ -2214,6 +2210,27 @@ func (p *Proxy) checkAuth(r *http.Request) (ok, present bool) {
 		return false, false
 	}
 	return subtle.ConstantTimeCompare([]byte(token), []byte(p.authToken)) == 1, true
+}
+
+// rejectMismatchedAuth writes a 407 and returns true when the request
+// presents a proxy password that does not equal authToken. It is a no-op
+// (returns false) when authToken is empty or no password was presented at
+// all, so absent credentials are never treated as a mismatch. The 407 body
+// is identical to the "no credentials" response so a prober cannot tell
+// whether authToken is configured; the WARN log never carries the
+// presented value. Every caller that enforces authToken — the plain
+// authToken branch, delegateAuth, and the relay path, which bypasses that
+// chain entirely — calls this same check.
+func (p *Proxy) rejectMismatchedAuth(w http.ResponseWriter, r *http.Request) bool {
+	if p.authToken == "" {
+		return false
+	}
+	if ok, present := p.checkAuth(r); !present || ok {
+		return false
+	}
+	slog.Warn("proxy auth mismatch", "subsystem", "proxy", "action", "auth-reject")
+	writeProxyAuthRequired(w, "Proxy authentication required")
+	return true
 }
 
 // checkNetworkPolicy checks if the host:port is allowed by the network policy.

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -82,6 +83,65 @@ func TestRelay_InjectsCredentials(t *testing.T) {
 	}
 	if receivedBeta != "oauth-2025-04-20" {
 		t.Errorf("anthropic-beta = %q, want %q", receivedBeta, "oauth-2025-04-20")
+	}
+}
+
+// TestRelay_MismatchedAuthTokenRejectedBeforeResolver pins the relay-path
+// half of the mismatched-proxy-password fix: handleRelay is reached
+// directly (via the NO_PROXY bypass in ServeHTTP), so it never went through
+// the CONNECT/plain-HTTP auth chain at all. A caller presenting another
+// instance's still-valid password could reach getCredentialsForRequest and
+// the STS behind it, exactly like the CONNECT path this PR already fixed.
+// A resolver call here stands in for the STS round trip a real
+// token-exchange credential would make.
+func TestRelay_MismatchedAuthTokenRejectedBeforeResolver(t *testing.T) {
+	const ownToken = "box-b-own-token"
+
+	tests := []struct {
+		name              string
+		proxyAuthHeader   string // "" means no Proxy-Authorization at all
+		wantStatus        int
+		wantResolverCalls int32
+	}{
+		{"mismatched password rejected before resolver runs", "Basic " + basicAuth("alice|box-a", "box-a-token"), http.StatusProxyAuthRequired, 0},
+		{"matching password reaches resolver", "Basic " + basicAuth("alice|box-a", ownToken), http.StatusOK, 1},
+		{"absent credentials unaffected, reaches resolver", "", http.StatusOK, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var resolverCalls atomic.Int32
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer backend.Close()
+
+			p := NewProxy()
+			if err := p.AddRelay("anthropic", backend.URL); err != nil {
+				t.Fatalf("AddRelay: %v", err)
+			}
+			p.SetAuthToken(ownToken)
+
+			backendHost := strings.TrimPrefix(backend.URL, "http://")
+			host, _, _ := strings.Cut(backendHost, ":")
+			p.SetCredentialResolver(host, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]CredentialHeader, error) {
+				resolverCalls.Add(1)
+				return []CredentialHeader{{Name: "Authorization", Value: "Bearer exchanged"}}, nil
+			})
+
+			req := httptest.NewRequest("POST", "/relay/anthropic/v1/messages", nil)
+			if tt.proxyAuthHeader != "" {
+				req.Header.Set("Proxy-Authorization", tt.proxyAuthHeader)
+			}
+			rec := httptest.NewRecorder()
+			p.handleRelay(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			if n := resolverCalls.Load(); n != tt.wantResolverCalls {
+				t.Errorf("resolver was called %d times, want %d", n, tt.wantResolverCalls)
+			}
+		})
 	}
 }
 
