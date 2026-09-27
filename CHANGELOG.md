@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.24.0 — 2026-09-27
+
+### Added
+
+- **`proxy.auth_token_env` reads the proxy auth token from an environment variable** (`config.go`, `gatekeeper.go`) — the proxy's optional static auth token could previously only come from a literal `proxy.auth_token` value in the config file, so a deployment that keeps the token in a Kubernetes Secret had to render it into the config file before gatekeeper started, typically with an extra init container. `auth_token_env` names an environment variable gatekeeper reads once at startup instead, mirroring the existing `client_secret`/`client_secret_env` pattern on the `token-exchange` credential source. Setting both `auth_token` and `auth_token_env` is a config error, and an `auth_token_env` that is unset or empty at startup is a fatal config error naming the variable, never its value. A config that sets only `auth_token`, or sets neither, behaves exactly as before. Documented in the [config file reference](docs/content/reference/02-config-file.md#proxyauth_token_env).
+
 ## v0.23.2 — 2026-09-23
 
 ### Fixed

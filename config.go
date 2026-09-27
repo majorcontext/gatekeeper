@@ -48,6 +48,12 @@ type ProxyConfig struct {
 	Host      string `yaml:"host"`
 	AuthToken string `yaml:"auth_token,omitempty"` // Optional token clients must provide via Proxy-Authorization
 
+	// AuthTokenEnv names an environment variable holding the proxy auth
+	// token, read once at startup. Mutually exclusive with AuthToken: set
+	// one or the other, not both. The named variable must be set and
+	// non-empty at startup.
+	AuthTokenEnv string `yaml:"auth_token_env,omitempty"`
+
 	// ProxyProtocol enables PROXY protocol v1/v2 parsing on the HTTP/CONNECT
 	// proxy listener. When true, each inbound connection is checked for a
 	// leading PROXY protocol header (as prepended by a TCP load balancer,
@@ -164,6 +170,23 @@ type LogConfig struct {
 	Format         string   `yaml:"format"`                    // Output format ("json" or "text")
 	Output         string   `yaml:"output"`                    // Destination ("stderr", "stdout", or a file path; default: stderr)
 	CaptureHeaders []string `yaml:"capture_headers,omitempty"` // Request headers to log and strip before forwarding
+}
+
+// resolveProxyAuthToken resolves the effective proxy auth token from
+// cfg.AuthToken or cfg.AuthTokenEnv. It returns "" when neither is set,
+// meaning the proxy requires no auth token.
+func resolveProxyAuthToken(cfg ProxyConfig) (string, error) {
+	if cfg.AuthToken != "" && cfg.AuthTokenEnv != "" {
+		return "", fmt.Errorf("proxy: set 'auth_token' or 'auth_token_env', not both")
+	}
+	if cfg.AuthTokenEnv == "" {
+		return cfg.AuthToken, nil
+	}
+	token := os.Getenv(cfg.AuthTokenEnv)
+	if token == "" {
+		return "", fmt.Errorf("proxy.auth_token_env: environment variable %q is empty or not set", cfg.AuthTokenEnv)
+	}
+	return token, nil
 }
 
 // ParseConfig parses a Gate Keeper config from YAML bytes.

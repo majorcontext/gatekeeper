@@ -25,6 +25,7 @@ These variables are referenced by credential source configs in `gatekeeper.yaml`
 | _name from `source.var`_ | `env` source | The credential value. Must be set and non-empty. |
 | _name from `source.private_key_env`_ | `github-app` source | PEM-encoded RSA private key for GitHub App authentication. |
 | _name from `source.client_secret_env`_ | `token-exchange` source | OAuth client secret for the STS endpoint. |
+| _name from `proxy.auth_token_env`_ | `proxy` config | Proxy auth token clients must provide via `Proxy-Authorization`. Must be set and non-empty. |
 
 ---
 

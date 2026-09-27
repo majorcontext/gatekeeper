@@ -16,6 +16,7 @@ proxy:
   port: 8080
   host: 127.0.0.1
   proxy_protocol: true
+  auth_token_env: GATEKEEPER_PROXY_AUTH_TOKEN
 tls:
   ca_cert: /tmp/ca.crt
   ca_key: /tmp/ca.key
@@ -62,6 +63,9 @@ log:
 	}
 	if !cfg.Proxy.ProxyProtocol {
 		t.Error("Proxy.ProxyProtocol = false, want true")
+	}
+	if cfg.Proxy.AuthTokenEnv != "GATEKEEPER_PROXY_AUTH_TOKEN" {
+		t.Errorf("Proxy.AuthTokenEnv = %q, want GATEKEEPER_PROXY_AUTH_TOKEN", cfg.Proxy.AuthTokenEnv)
 	}
 
 	// TLS

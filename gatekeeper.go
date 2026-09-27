@@ -466,9 +466,15 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 
 	// Optional defense-in-depth: require a static token for proxy access.
 	// Clients provide it via Proxy-Authorization header or
-	// HTTP_PROXY=http://user:token@host.
-	if cfg.Proxy.AuthToken != "" {
-		p.SetAuthToken(cfg.Proxy.AuthToken)
+	// HTTP_PROXY=http://user:token@host. The token comes from either the
+	// literal auth_token or the environment variable named by
+	// auth_token_env; resolveProxyAuthToken rejects setting both.
+	authToken, err := resolveProxyAuthToken(cfg.Proxy)
+	if err != nil {
+		return nil, err
+	}
+	if authToken != "" {
+		p.SetAuthToken(authToken)
 	}
 
 	// When actor_token_from is configured, each caller has a unique proxy
