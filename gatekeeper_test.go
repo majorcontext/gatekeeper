@@ -278,6 +278,99 @@ func TestAuthToken(t *testing.T) {
 	}
 }
 
+func TestAuthTokenFromEnv(t *testing.T) {
+	t.Setenv("GATEKEEPER_PROXY_AUTH_TOKEN", "my-secret-token")
+
+	cfg := &Config{
+		Proxy: ProxyConfig{
+			Port:         0,
+			Host:         "127.0.0.1",
+			AuthTokenEnv: "GATEKEEPER_PROXY_AUTH_TOKEN",
+		},
+		Credentials: []CredentialConfig{
+			{
+				Host:   "api.example.com",
+				Source: SourceConfig{Type: "static", Value: "test-cred"},
+			},
+		},
+	}
+
+	srv, err := New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx := t.Context()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	// Request without auth token should be rejected, exactly like a
+	// literal auth_token.
+	req, _ := http.NewRequest(http.MethodGet, "http://"+srv.ProxyAddr(), nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET without auth: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Errorf("no-auth status = %d, want %d", resp.StatusCode, http.StatusProxyAuthRequired)
+	}
+
+	// Request WITH the token read from the environment should be accepted
+	// (not 407).
+	proxyURL, _ := url.Parse("http://moat:my-secret-token@" + srv.ProxyAddr())
+	authClient := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+	}
+	resp2, err := authClient.Get("http://api.example.com/test")
+	if err != nil {
+		t.Fatalf("GET with auth: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode == http.StatusProxyAuthRequired {
+		t.Error("request with valid env-sourced auth token was rejected with 407")
+	}
+}
+
+func TestAuthTokenBothSetIsConfigError(t *testing.T) {
+	t.Setenv("GATEKEEPER_PROXY_AUTH_TOKEN_CONFLICT", "env-token")
+
+	cfg := &Config{
+		Proxy: ProxyConfig{
+			Port:         0,
+			Host:         "127.0.0.1",
+			AuthToken:    "literal-token",
+			AuthTokenEnv: "GATEKEEPER_PROXY_AUTH_TOKEN_CONFLICT",
+		},
+	}
+
+	_, err := New(context.Background(), cfg, "")
+	if err == nil {
+		t.Fatal("New: expected error when auth_token and auth_token_env are both set, got nil")
+	}
+	if !strings.Contains(err.Error(), "auth_token") {
+		t.Errorf("New err = %q, want it to mention auth_token", err)
+	}
+}
+
+func TestAuthTokenEnvMissingIsFatal(t *testing.T) {
+	cfg := &Config{
+		Proxy: ProxyConfig{
+			Port:         0,
+			Host:         "127.0.0.1",
+			AuthTokenEnv: "GATEKEEPER_PROXY_AUTH_TOKEN_UNSET_XYZ",
+		},
+	}
+
+	_, err := New(context.Background(), cfg, "")
+	if err == nil {
+		t.Fatal("New: expected error for missing auth_token_env variable, got nil")
+	}
+	if !strings.Contains(err.Error(), "GATEKEEPER_PROXY_AUTH_TOKEN_UNSET_XYZ") {
+		t.Errorf("New err = %q, want it to name the variable", err)
+	}
+}
+
 func TestDefaultProxyHost(t *testing.T) {
 	cfg := &Config{
 		Proxy: ProxyConfig{Port: 0}, // no host specified

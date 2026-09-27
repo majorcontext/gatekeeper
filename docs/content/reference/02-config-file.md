@@ -109,6 +109,23 @@ export HTTP_PROXY=http://user:my-secret-token@127.0.0.1:8080
 
 The username portion is ignored. The token comparison is constant-time to prevent timing attacks.
 
+Mutually exclusive with `auth_token_env`.
+
+### proxy.auth_token_env
+
+Name of an environment variable holding the proxy auth token, read once at startup.
+
+```yaml
+proxy:
+  auth_token_env: GATEKEEPER_PROXY_AUTH_TOKEN
+```
+
+- **Type:** `string`
+- **Required:** No
+- **Default:** — (no authentication required)
+
+Mutually exclusive with `auth_token`: set one or the other, not both, or gatekeeper refuses to start. The named variable must be set and non-empty at startup; a missing or empty variable is a fatal config error naming the variable, never any value.
+
 ### proxy.proxy_protocol
 
 Parse PROXY protocol v1/v2 headers on the HTTP/CONNECT proxy listener to recover the real client address behind a TCP-terminating load balancer.
