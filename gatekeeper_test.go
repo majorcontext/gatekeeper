@@ -2286,7 +2286,9 @@ func TestHTTPSTokenExchangeActorTokenWithAuthTokenMismatchRejected(t *testing.T)
 		t.Fatalf("NewCA: %v", err)
 	}
 
+	var stsCalls atomic.Int32
 	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stsCalls.Add(1)
 		if r.Method != http.MethodPost {
 			http.Error(w, "want POST", http.StatusMethodNotAllowed)
 			return
@@ -2373,6 +2375,14 @@ func TestHTTPSTokenExchangeActorTokenWithAuthTokenMismatchRejected(t *testing.T)
 	// transport error (matching TestProxy_DelegateAuthRejectsBearerAuth in
 	// the proxy package) rather than a 200/407 http.Response.
 	_, err = client.Do(req)
+
+	// Checked before the err==nil Fatal below so a regression that lets the
+	// request through still reports the resolver having run, instead of
+	// being masked by the Fatal's early return.
+	if n := stsCalls.Load(); n != 0 {
+		t.Errorf("STS was called %d times, want 0 (a mismatched password must be rejected before the resolver runs)", n)
+	}
+
 	if err == nil {
 		t.Fatal("GET through proxy: expected error for a password that mismatches auth_token, got nil")
 	}

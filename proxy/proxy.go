@@ -2050,26 +2050,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Whenever authToken is configured, a presented proxy password that
-	// doesn't equal it is rejected up front, before delegateAuth or any
-	// credential resolver ever sees it. Without this, delegateAuth's
-	// hasBasicProxyAuth only checks that SOME non-empty password was sent,
-	// so a caller presenting another instance's still-valid credentials
-	// would pass and get served under that caller's own resolved identity —
-	// the STS validates a token against whoever it belongs to, not against
-	// which instance received it. A request with no Proxy-Authorization at
-	// all is unaffected: extractProxyToken returns ok=false and this check
-	// does nothing, leaving the existing per-mode check below to decide —
-	// so delegateAuth with no authToken configured keeps requiring, and
-	// forwarding to the token exchange, any non-empty password, matching or
-	// not, exactly as before.
-	//
-	// This is skipped entirely under a contextResolver (daemon mode): there,
-	// authToken is not a single shared secret at all — each caller's own
-	// token is looked up by contextResolver below, so comparing it against
-	// one static authToken would be comparing against the wrong thing.
+	// A password that mismatches authToken is rejected before delegateAuth or any resolver runs; absent credentials, and daemon mode's per-caller contextResolver, are unaffected.
 	if p.contextResolver == nil && p.authToken != "" {
-		if token, ok := extractProxyToken(r); ok && subtle.ConstantTimeCompare([]byte(token), []byte(p.authToken)) != 1 {
+		if ok, present := p.checkAuth(r); present && !ok {
 			slog.Warn("proxy auth mismatch",
 				"subsystem", "proxy",
 				"action", "auth-reject",
@@ -2107,11 +2090,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if uid := extractProxyUsername(r); uid != "" {
 			r = r.WithContext(withUserID(r.Context(), uid))
 		}
-	} else if p.authToken != "" && !p.checkAuth(r) {
-		writeProxyAuthRequired(w, "Proxy authentication required")
-		return
 	} else if p.authToken != "" {
-		// Auth passed — extract username if present.
+		// The check above already rejected a present-but-mismatched password,
+		// so only "no password presented" remains live here.
+		if _, present := p.checkAuth(r); !present {
+			writeProxyAuthRequired(w, "Proxy authentication required")
+			return
+		}
 		if uid := extractProxyUsername(r); uid != "" {
 			r = r.WithContext(withUserID(r.Context(), uid))
 		}
@@ -2217,15 +2202,18 @@ func extractProxyUsername(r *http.Request) string {
 	return parts[0]
 }
 
-// checkAuth validates the Proxy-Authorization header against the required token.
-// Accepts both Basic auth (from HTTP_PROXY=http://moat:token@host) and Bearer format.
-// Uses constant-time comparison to prevent timing attacks.
-func (p *Proxy) checkAuth(r *http.Request) bool {
-	token, ok := extractProxyToken(r)
-	if !ok {
-		return false
+// checkAuth validates the Proxy-Authorization header against the required
+// token. Accepts both Basic auth (from HTTP_PROXY=http://moat:token@host)
+// and Bearer format. Uses constant-time comparison to prevent timing
+// attacks. present is false when the request carries no proxy credentials
+// at all, in which case ok is meaningless; callers that only care whether
+// a mismatched password was presented check present before ok.
+func (p *Proxy) checkAuth(r *http.Request) (ok, present bool) {
+	token, present := extractProxyToken(r)
+	if !present {
+		return false, false
 	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(p.authToken)) == 1
+	return subtle.ConstantTimeCompare([]byte(token), []byte(p.authToken)) == 1, true
 }
 
 // checkNetworkPolicy checks if the host:port is allowed by the network policy.
