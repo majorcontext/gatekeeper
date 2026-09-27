@@ -61,7 +61,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// bypassing the CONNECT/plain-HTTP auth chain entirely, so it enforces
 	// authToken itself before any resolver or STS call. Absent credentials
 	// are unaffected: relay traffic requires no Proxy-Authorization at all.
-	if p.rejectMismatchedAuth(w, r) {
+	if rejected, _ := p.rejectMismatchedAuth(w, r); rejected {
 		return
 	}
 

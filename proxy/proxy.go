@@ -2073,7 +2073,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(ctx)
 	} else if p.delegateAuth {
 		// A password that mismatches a configured authToken is rejected even under delegateAuth.
-		if p.rejectMismatchedAuth(w, r) {
+		if rejected, _ := p.rejectMismatchedAuth(w, r); rejected {
 			return
 		}
 		if !hasBasicProxyAuth(r) {
@@ -2084,12 +2084,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r = r.WithContext(withUserID(r.Context(), uid))
 		}
 	} else if p.authToken != "" {
-		if p.rejectMismatchedAuth(w, r) {
+		rejected, present := p.rejectMismatchedAuth(w, r)
+		if rejected {
 			return
 		}
-		// rejectMismatchedAuth already handled a present-but-mismatched
-		// password, so only "no password presented" remains live here.
-		if _, present := p.checkAuth(r); !present {
+		if !present {
 			writeProxyAuthRequired(w, "Proxy authentication required")
 			return
 		}
@@ -2212,25 +2211,24 @@ func (p *Proxy) checkAuth(r *http.Request) (ok, present bool) {
 	return subtle.ConstantTimeCompare([]byte(token), []byte(p.authToken)) == 1, true
 }
 
-// rejectMismatchedAuth writes a 407 and returns true when the request
-// presents a proxy password that does not equal authToken. It is a no-op
-// (returns false) when authToken is empty or no password was presented at
-// all, so absent credentials are never treated as a mismatch. The 407 body
-// is identical to the "no credentials" response so a prober cannot tell
-// whether authToken is configured; the WARN log never carries the
-// presented value. Every caller that enforces authToken — the plain
-// authToken branch, delegateAuth, and the relay path, which bypasses that
-// chain entirely — calls this same check.
-func (p *Proxy) rejectMismatchedAuth(w http.ResponseWriter, r *http.Request) bool {
-	if p.authToken == "" {
-		return false
-	}
-	if ok, present := p.checkAuth(r); !present || ok {
-		return false
+// rejectMismatchedAuth calls checkAuth once and writes a 407 when the
+// request presents a proxy password that does not equal authToken,
+// returning rejected so the caller can stop. It never rejects for absence
+// (present is false) or when authToken is empty, so callers that also need
+// to require a password check present themselves instead of calling
+// checkAuth again. The 407 body is identical to the "no credentials"
+// response so a prober cannot tell whether authToken is configured; the
+// WARN log never carries the presented value. Every caller that enforces
+// authToken — the plain authToken branch, delegateAuth, and the relay path,
+// which bypasses that chain entirely — calls this same check.
+func (p *Proxy) rejectMismatchedAuth(w http.ResponseWriter, r *http.Request) (rejected, present bool) {
+	ok, present := p.checkAuth(r)
+	if !present || p.authToken == "" || ok {
+		return false, present
 	}
 	slog.Warn("proxy auth mismatch", "subsystem", "proxy", "action", "auth-reject")
 	writeProxyAuthRequired(w, "Proxy authentication required")
-	return true
+	return true, present
 }
 
 // checkNetworkPolicy checks if the host:port is allowed by the network policy.

@@ -477,8 +477,7 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 		p.SetAuthToken(authToken)
 	}
 
-	// When actor_token_from is configured, each caller has a unique proxy
-	// auth password validated by the STS — skip the static authToken check.
+	// When actor_token_from is configured, widen accepted passwords beyond authToken when it's empty (see SetDelegateAuth).
 	for _, cred := range cfg.Credentials {
 		if cred.Source.ActorTokenFrom != "" {
 			p.SetDelegateAuth(true)
