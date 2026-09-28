@@ -196,7 +196,18 @@ func TestProxy_AuthTokenInvalidToken(t *testing.T) {
 	}
 }
 
-func TestProxy_DelegateAuthSkipsStaticCheck(t *testing.T) {
+// TestProxy_DelegateAuthRejectsMismatchedStaticToken pins a genuine behavior
+// change: a companion configured with both a static authToken and
+// delegateAuth (actor_token_from) used to accept any non-empty password,
+// skipping the static check entirely and forwarding whatever it received to
+// the credential resolver. A caller presenting another instance's own
+// still-valid password then passed here and was served under that caller's
+// identity, resolved by whoever issued it — confirmed live: box A's own
+// username and token sent through box B's companion, answered 200, served
+// as A. Now, whenever authToken is configured, delegateAuth no longer
+// substitutes for it: a mismatched password is rejected before the resolver
+// ever runs.
+func TestProxy_DelegateAuthRejectsMismatchedStaticToken(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("backend response"))
 	}))
@@ -209,7 +220,6 @@ func TestProxy_DelegateAuthSkipsStaticCheck(t *testing.T) {
 	proxyServer := httptest.NewServer(p)
 	defer proxyServer.Close()
 
-	// With delegateAuth, a different password should pass the static check.
 	proxyURL := mustParseURL(proxyServer.URL)
 	proxyURL.User = url.UserPassword("alice", "per-user-api-key")
 
@@ -225,8 +235,8 @@ func TestProxy_DelegateAuthSkipsStaticCheck(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("status = %d, want %d; delegateAuth should skip static authToken check", resp.StatusCode, http.StatusOK)
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Errorf("status = %d, want %d; a password that mismatches authToken must be rejected even under delegateAuth", resp.StatusCode, http.StatusProxyAuthRequired)
 	}
 }
 
@@ -335,6 +345,72 @@ func TestProxy_DelegateAuthRejectsBearerAuth(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Proxy Authentication Required") {
 		t.Errorf("error = %v, want to contain 'Proxy Authentication Required'", err)
+	}
+}
+
+// TestProxy_MismatchedProxyPasswordRejected pins the fix for a companion
+// accepting another caller's valid-but-foreign proxy password under
+// delegateAuth: box B's companion answered 200 and served the request as
+// box A's identity because hasBasicProxyAuth only checked that a password
+// was present, never that it equaled B's own authToken. Whenever authToken
+// is configured, a mismatched password is now rejected unconditionally,
+// without disturbing a request that presents no credentials at all (some
+// box tools rely on that), and without disturbing delegateAuth's existing
+// behavior when no authToken is configured at all — there, any non-empty
+// password is still required and still passed on to the token exchange,
+// matching or not.
+func TestProxy_MismatchedProxyPasswordRejected(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("backend response"))
+	}))
+	defer backend.Close()
+
+	const ownToken = "box-b-own-token"
+
+	tests := []struct {
+		name         string
+		setAuthToken bool
+		anonymous    bool
+		password     string
+		wantStatus   int
+	}{
+		{"mismatched password from another box is rejected", true, false, "box-a-token", http.StatusProxyAuthRequired},
+		{"matching password passes", true, false, ownToken, http.StatusOK},
+		{"absent credentials unchanged", true, true, "", http.StatusProxyAuthRequired},
+		{"delegateAuth with no auth_token still passes any non-empty password", false, false, "not-checked-against-anything", http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewProxy()
+			if tt.setAuthToken {
+				p.SetAuthToken(ownToken)
+			}
+			p.SetDelegateAuth(true)
+
+			proxyServer := httptest.NewServer(p)
+			defer proxyServer.Close()
+
+			proxyURL := mustParseURL(proxyServer.URL)
+			if !tt.anonymous {
+				proxyURL.User = url.UserPassword("alice|box-a", tt.password)
+			}
+
+			client := &http.Client{
+				Transport: &http.Transport{
+					Proxy: http.ProxyURL(proxyURL),
+				},
+			}
+
+			resp, err := client.Get(backend.URL)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			resp.Body.Close()
+
+			if resp.StatusCode != tt.wantStatus {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
+			}
+		})
 	}
 }
 

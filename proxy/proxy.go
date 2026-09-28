@@ -683,7 +683,7 @@ type Proxy struct {
 	ca                   *CA              // Optional CA for TLS interception
 	logger               RequestLogger    // Optional request logger
 	authToken            string           // Optional auth token required for proxy access
-	delegateAuth         bool             // Skip static authToken check; delegate to credential resolvers
+	delegateAuth         bool             // When authToken is empty, require some non-empty password and delegate its validation to credential resolvers
 	policy               string           // "permissive" or "strict"
 	allowedHosts         []hostPattern    // parsed allow patterns for strict policy
 	requestChecker       RequestChecker   // per-host request rules checker
@@ -718,10 +718,12 @@ func (p *Proxy) SetAuthToken(token string) {
 	p.authToken = token
 }
 
-// SetDelegateAuth skips the static authToken check, allowing credential
-// resolvers to validate caller identity instead. Used when actor_token_from
-// is configured and each caller has a unique proxy auth password that the
-// STS validates.
+// SetDelegateAuth allows credential resolvers to validate caller identity
+// instead of a single shared authToken. Used when actor_token_from is
+// configured and each caller has a unique proxy auth password that the STS
+// validates. It only widens what ServeHTTP accepts when authToken is empty:
+// when authToken is set, ServeHTTP still requires a presented password to
+// equal it before delegateAuth or any resolver ever runs (see ServeHTTP).
 func (p *Proxy) SetDelegateAuth(delegate bool) {
 	p.delegateAuth = delegate
 }
@@ -2023,8 +2025,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// empty). We check r.URL.Host == "" to distinguish direct requests from
 	// proxied requests that happen to have /relay/ in the path — without this,
 	// a proxied request to http://anything.com/relay/foo would match and bypass auth.
-	// Auth is skipped because direct requests don't carry Proxy-Authorization.
-	// Safety: relays only forward to pre-configured URLs, not arbitrary hosts.
+	// This chain's context/delegateAuth checks below are skipped — handleRelay
+	// enforces authToken itself (see rejectMismatchedAuth) — and relays only
+	// forward to pre-configured URLs, not arbitrary hosts.
 	if len(p.relays) > 0 && r.URL.Host == "" && strings.HasPrefix(r.URL.Path, "/relay/") {
 		p.handleRelay(w, r)
 		return
@@ -2069,6 +2072,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		r = r.WithContext(ctx)
 	} else if p.delegateAuth {
+		// A password that mismatches a configured authToken is rejected even under delegateAuth.
+		if rejected, _ := p.rejectMismatchedAuth(w, r); rejected {
+			return
+		}
 		if !hasBasicProxyAuth(r) {
 			writeProxyAuthRequired(w, "Proxy authentication required")
 			return
@@ -2076,11 +2083,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if uid := extractProxyUsername(r); uid != "" {
 			r = r.WithContext(withUserID(r.Context(), uid))
 		}
-	} else if p.authToken != "" && !p.checkAuth(r) {
-		writeProxyAuthRequired(w, "Proxy authentication required")
-		return
 	} else if p.authToken != "" {
-		// Auth passed — extract username if present.
+		rejected, present := p.rejectMismatchedAuth(w, r)
+		if rejected {
+			return
+		}
+		if !present {
+			writeProxyAuthRequired(w, "Proxy authentication required")
+			return
+		}
 		if uid := extractProxyUsername(r); uid != "" {
 			r = r.WithContext(withUserID(r.Context(), uid))
 		}
@@ -2186,15 +2197,38 @@ func extractProxyUsername(r *http.Request) string {
 	return parts[0]
 }
 
-// checkAuth validates the Proxy-Authorization header against the required token.
-// Accepts both Basic auth (from HTTP_PROXY=http://moat:token@host) and Bearer format.
-// Uses constant-time comparison to prevent timing attacks.
-func (p *Proxy) checkAuth(r *http.Request) bool {
-	token, ok := extractProxyToken(r)
-	if !ok {
-		return false
+// checkAuth validates the Proxy-Authorization header against the required
+// token. Accepts both Basic auth (from HTTP_PROXY=http://moat:token@host)
+// and Bearer format. Uses constant-time comparison to prevent timing
+// attacks. present is false when the request carries no proxy credentials
+// at all, in which case ok is meaningless; callers that only care whether
+// a mismatched password was presented check present before ok.
+func (p *Proxy) checkAuth(r *http.Request) (ok, present bool) {
+	token, present := extractProxyToken(r)
+	if !present {
+		return false, false
 	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(p.authToken)) == 1
+	return subtle.ConstantTimeCompare([]byte(token), []byte(p.authToken)) == 1, true
+}
+
+// rejectMismatchedAuth calls checkAuth once and writes a 407 when the
+// request presents a proxy password that does not equal authToken,
+// returning rejected so the caller can stop. It never rejects for absence
+// (present is false) or when authToken is empty, so callers that also need
+// to require a password check present themselves instead of calling
+// checkAuth again. The 407 body is identical to the "no credentials"
+// response so a prober cannot tell whether authToken is configured; the
+// WARN log never carries the presented value. Every caller that enforces
+// authToken — the plain authToken branch, delegateAuth, and the relay path,
+// which bypasses that chain entirely — calls this same check.
+func (p *Proxy) rejectMismatchedAuth(w http.ResponseWriter, r *http.Request) (rejected, present bool) {
+	ok, present := p.checkAuth(r)
+	if !present || p.authToken == "" || ok {
+		return false, present
+	}
+	slog.Warn("proxy auth mismatch", "subsystem", "proxy", "action", "auth-reject")
+	writeProxyAuthRequired(w, "Proxy authentication required")
+	return true, present
 }
 
 // checkNetworkPolicy checks if the host:port is allowed by the network policy.

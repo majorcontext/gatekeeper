@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.25.0 — 2026-09-27
+
+### Changed
+
+- **A proxy password that mismatches `auth_token` is now always rejected, even under `delegateAuth`** (`proxy/proxy.go`) — when a credential sets `actor_token_from`, gatekeeper used to delegate the proxy's entire `Proxy-Authorization` check to the STS: `delegateAuth` only required *some* non-empty password, never that it equaled the instance's own `auth_token`. Confirmed live on boxes production: box A sent a request through box B's companion using A's own username and token; B answered 200 and served it as A, because the STS validates a token against whoever it actually belongs to, not against which instance received it. **Behavior change**: whenever `auth_token` (or `auth_token_env`) resolves to a non-empty token, a request presenting a password that does not constant-time-equal it now gets `407` before `delegateAuth` or any credential resolver ever runs — a config that sets `auth_token` together with `actor_token_from` and expects a *different*, STS-validated password to still pass will now see it rejected. A deployment that needs distinct per-caller passwords through one shared instance must leave `auth_token` and `auth_token_env` both unset; with neither set, `actor_token_from` keeps requiring, and forwarding to the STS, any non-empty password exactly as before. A request with no `Proxy-Authorization` at all is unaffected: whatever a mode already did with absent credentials — `delegateAuth` and a configured `auth_token` both already rejected them, and only a proxy with neither configured let them through — stays exactly the same; this change does not make gatekeeper accept unauthenticated callers anywhere it didn't already. Gatekeeper's daemon mode (moat's per-run `contextResolver`) is unaffected: `auth_token` is never a single shared secret there, so this check does not apply. The same rule now also applies to the `/relay/` direct-request path (`proxy/relay.go`), which bypasses the CONNECT/plain-HTTP auth chain entirely and could otherwise still reach a resolver and the STS with a mismatched password. Documented in the [config file reference](docs/content/reference/02-config-file.md#proxyauth_token) and the [token exchange guide](docs/content/guides/06-token-exchange.md) ([#73](https://github.com/majorcontext/gatekeeper/pull/73))
+
 ## v0.24.0 — 2026-09-27
 
 ### Added

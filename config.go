@@ -179,12 +179,12 @@ func resolveProxyAuthToken(cfg ProxyConfig) (string, error) {
 	if cfg.AuthToken != "" && cfg.AuthTokenEnv != "" {
 		return "", fmt.Errorf("proxy: set 'auth_token' or 'auth_token_env', not both")
 	}
-	if cfg.AuthTokenEnv == "" {
-		return cfg.AuthToken, nil
-	}
-	token := os.Getenv(cfg.AuthTokenEnv)
-	if token == "" {
-		return "", fmt.Errorf("proxy.auth_token_env: environment variable %q is empty or not set", cfg.AuthTokenEnv)
+	token := cfg.AuthToken
+	if cfg.AuthTokenEnv != "" {
+		token = os.Getenv(cfg.AuthTokenEnv)
+		if token == "" {
+			return "", fmt.Errorf("proxy.auth_token_env: environment variable %q is empty or not set", cfg.AuthTokenEnv)
+		}
 	}
 	return token, nil
 }

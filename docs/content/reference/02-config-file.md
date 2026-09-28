@@ -111,6 +111,10 @@ The username portion is ignored. The token comparison is constant-time to preven
 
 Mutually exclusive with `auth_token_env`.
 
+**Whenever `auth_token` (or `auth_token_env`) resolves to a non-empty token, a request presenting a `Proxy-Authorization` password that does not equal it gets `407`, before `delegateAuth` or any credential resolver ever runs** — including when a credential sets `actor_token_from` (see [Token exchange](../guides/06-token-exchange.md)), which would otherwise forward that password to an STS, and including a `/relay/{name}` request, which reaches its resolver by a different path than CONNECT or plain HTTP. A request with no `Proxy-Authorization` at all is unaffected. This means a deployment that needs each caller to authenticate with its own distinct, STS-validated password — rather than one shared static token — must leave `auth_token` and `auth_token_env` both unset; with neither set, `actor_token_from` still requires a non-empty password and still forwards it to the STS exactly as before.
+
+This does not apply to gatekeeper's daemon mode (moat's per-run `contextResolver`, not configured through this file): there, `auth_token` is never a single shared secret in the first place — each caller's own token is looked up individually — so comparing a presented password against one static value would compare against the wrong thing, and gatekeeper does not do it.
+
 ### proxy.auth_token_env
 
 Name of an environment variable holding the proxy auth token, read once at startup.
@@ -124,7 +128,7 @@ proxy:
 - **Required:** No
 - **Default:** — (no authentication required)
 
-Mutually exclusive with `auth_token`: set one or the other, not both, or gatekeeper refuses to start. The named variable must be set and non-empty at startup; a missing or empty variable is a fatal config error naming the variable, never any value.
+Mutually exclusive with `auth_token`: set one or the other, not both, or gatekeeper refuses to start. The named variable must be set and non-empty at startup; a missing or empty variable is a fatal config error naming the variable, never any value. See [proxy.auth_token](#proxyauth_token) above for how a resolved token interacts with `actor_token_from`.
 
 ### proxy.proxy_protocol
 
