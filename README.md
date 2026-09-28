@@ -1,6 +1,20 @@
 # Gatekeeper
 
-A credential-injecting TLS-intercepting proxy. Route HTTPS traffic through Gatekeeper and it transparently injects authentication headers based on hostname matching. Clients never see raw credentials.
+```text
+ ██████╗  █████╗ ████████╗███████╗██╗  ██╗███████╗███████╗██████╗ ███████╗██████╗ 
+██╔════╝ ██╔══██╗╚══██╔══╝██╔════╝██║ ██╔╝██╔════╝██╔════╝██╔══██╗██╔════╝██╔══██╗
+██║  ███╗███████║   ██║   █████╗  █████╔╝ █████╗  █████╗  ██████╔╝█████╗  ██████╔╝
+██║   ██║██╔══██║   ██║   ██╔══╝  ██╔═██╗ ██╔══╝  ██╔══╝  ██╔═══╝ ██╔══╝  ██╔══██╗
+╚██████╔╝██║  ██║   ██║   ███████╗██║  ██╗███████╗███████╗██║     ███████╗██║  ██║
+ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚══════╝╚══════╝╚═╝     ╚══════╝╚═╝  ╚═╝
+                                                                                  
+```
+
+A credential-injecting, TLS-intercepting proxy that transparently injects authentication headers into HTTPS traffic based on hostname matching, so clients never see raw credentials.
+
+[![CI](https://github.com/majorcontext/gatekeeper/actions/workflows/ci.yml/badge.svg)](https://github.com/majorcontext/gatekeeper/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/majorcontext/gatekeeper.svg)](https://pkg.go.dev/github.com/majorcontext/gatekeeper)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Full documentation: [docs/README.md](docs/README.md).
 
@@ -256,6 +270,10 @@ go test -race ./...      # test
 go vet ./...             # lint
 ```
 
-## License
+---
 
-MIT — see [LICENSE](LICENSE).
+Part of [Major Context](https://majorcontext.com).
+
+[Moat](https://github.com/majorcontext/moat) · [Keep](https://github.com/majorcontext/keep) · **Gatekeeper** · [Bailey](https://github.com/majorcontext/bailey) · [Harness](https://github.com/majorcontext/harness)
+
+MIT licensed. See [LICENSE](LICENSE).
