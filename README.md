@@ -1,15 +1,5 @@
 # Gatekeeper
 
-```text
- ██████╗  █████╗ ████████╗███████╗██╗  ██╗███████╗███████╗██████╗ ███████╗██████╗ 
-██╔════╝ ██╔══██╗╚══██╔══╝██╔════╝██║ ██╔╝██╔════╝██╔════╝██╔══██╗██╔════╝██╔══██╗
-██║  ███╗███████║   ██║   █████╗  █████╔╝ █████╗  █████╗  ██████╔╝█████╗  ██████╔╝
-██║   ██║██╔══██║   ██║   ██╔══╝  ██╔═██╗ ██╔══╝  ██╔══╝  ██╔═══╝ ██╔══╝  ██╔══██╗
-╚██████╔╝██║  ██║   ██║   ███████╗██║  ██╗███████╗███████╗██║     ███████╗██║  ██║
- ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚══════╝╚══════╝╚═╝     ╚══════╝╚═╝  ╚═╝
-                                                                                  
-```
-
 A credential-injecting, TLS-intercepting proxy that transparently injects authentication headers into HTTPS traffic based on hostname matching, so clients never see raw credentials.
 
 [![CI](https://github.com/majorcontext/gatekeeper/actions/workflows/ci.yml/badge.svg)](https://github.com/majorcontext/gatekeeper/actions/workflows/ci.yml)
