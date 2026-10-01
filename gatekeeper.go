@@ -468,7 +468,8 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 	// Clients provide it via Proxy-Authorization header or
 	// HTTP_PROXY=http://user:token@host. The token comes from either the
 	// literal auth_token or the environment variable named by
-	// auth_token_env; resolveProxyAuthToken rejects setting both.
+	// auth_token_env, or the file named by auth_token_file (reloaded by Start);
+	// resolveProxyAuthToken rejects setting more than one.
 	authToken, err := resolveProxyAuthToken(cfg.Proxy)
 	if err != nil {
 		return nil, err
@@ -950,6 +951,9 @@ func (s *Server) Start(ctx context.Context) error {
 	// Start background refresh goroutines for any RefreshingSource credentials.
 	refreshCtx, refreshCancel := context.WithCancel(context.Background())
 	s.refreshCancel = refreshCancel
+	if s.cfg.Proxy.AuthTokenFile != "" {
+		go s.proxy.WatchAuthTokenFile(refreshCtx, s.cfg.Proxy.AuthTokenFile, s.cfg.Proxy.AuthTokenFileInterval)
+	}
 	for _, pr := range s.pendingRefreshes {
 		s.startCredentialRefresh(refreshCtx, pr.src, pr.creds)
 	}

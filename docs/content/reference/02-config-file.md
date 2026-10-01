@@ -109,11 +109,29 @@ export HTTP_PROXY=http://user:my-secret-token@127.0.0.1:8080
 
 The username portion is ignored. The token comparison is constant-time to prevent timing attacks.
 
-Mutually exclusive with `auth_token_env`.
+Mutually exclusive with `auth_token_env` and `auth_token_file`.
 
 **Whenever `auth_token` (or `auth_token_env`) resolves to a non-empty token, a request presenting a `Proxy-Authorization` password that does not equal it gets `407`, before `delegateAuth` or any credential resolver ever runs** — including when a credential sets `actor_token_from` (see [Token exchange](../guides/06-token-exchange.md)), which would otherwise forward that password to an STS, and including a `/relay/{name}` request, which reaches its resolver by a different path than CONNECT or plain HTTP. A request with no `Proxy-Authorization` at all is unaffected. This means a deployment that needs each caller to authenticate with its own distinct, STS-validated password — rather than one shared static token — must leave `auth_token` and `auth_token_env` both unset; with neither set, `actor_token_from` still requires a non-empty password and still forwards it to the STS exactly as before.
 
 This does not apply to gatekeeper's daemon mode (moat's per-run `contextResolver`, not configured through this file): there, `auth_token` is never a single shared secret in the first place — each caller's own token is looked up individually — so comparing a presented password against one static value would compare against the wrong thing, and gatekeeper does not do it.
+
+### proxy.auth_token_file
+
+Path to a file holding the proxy auth token, reloaded when the file changes.
+
+```yaml
+proxy:
+  auth_token_file: /var/run/secrets/gatekeeper/token
+  auth_token_file_interval: 1s
+```
+
+- **Type:** `string` (`auth_token_file`), duration (`auth_token_file_interval`)
+- **Required:** No
+- **Default:** — (`auth_token_file_interval` defaults to `1s`)
+
+The file is read at startup; a missing or empty file is a fatal config error. Gatekeeper then re-reads it every `auth_token_file_interval`, so a Kubernetes Secret mount (updated through an atomic `..data` symlink swap) can rotate the token without a restart. The new token applies to proxy auth, `/relay/`, and the Postgres run-token check; the old token is rejected as soon as the reload succeeds. If a reload finds the file empty or unreadable, gatekeeper keeps the previous token and logs a warning. Surrounding whitespace is trimmed.
+
+Mutually exclusive with `auth_token` and `auth_token_env`.
 
 ### proxy.auth_token_env
 

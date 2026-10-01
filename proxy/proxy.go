@@ -680,15 +680,15 @@ type Proxy struct {
 	extraHeaders         map[string][]extraHeader           // host -> additional headers to inject
 	responseTransformers map[string][]ResponseTransformer   // host -> response transformers
 	mu                   sync.RWMutex
-	ca                   *CA              // Optional CA for TLS interception
-	logger               RequestLogger    // Optional request logger
-	authToken            string           // Optional auth token required for proxy access
-	delegateAuth         bool             // When authToken is empty, require some non-empty password and delegate its validation to credential resolvers
-	policy               string           // "permissive" or "strict"
-	allowedHosts         []hostPattern    // parsed allow patterns for strict policy
-	requestChecker       RequestChecker   // per-host request rules checker
-	pathRulesChecker     PathRulesChecker // checks if host has path-level rules
-	awsHandler           http.Handler     // Optional handler for AWS credential endpoint
+	ca                   *CA                    // Optional CA for TLS interception
+	logger               RequestLogger          // Optional request logger
+	authToken            atomic.Pointer[string] // Optional auth token required for proxy access; swapped by SetAuthToken
+	delegateAuth         bool                   // When authToken is empty, require some non-empty password and delegate its validation to credential resolvers
+	policy               string                 // "permissive" or "strict"
+	allowedHosts         []hostPattern          // parsed allow patterns for strict policy
+	requestChecker       RequestChecker         // per-host request rules checker
+	pathRulesChecker     PathRulesChecker       // checks if host has path-level rules
+	awsHandler           http.Handler           // Optional handler for AWS credential endpoint
 	credStore            CredentialStore
 	mcpServers           []MCPServerConfig
 	removeHeaders        map[string][]string           // host -> []headerName
@@ -714,8 +714,16 @@ func NewProxy() *Proxy {
 }
 
 // SetAuthToken sets the required authentication token for proxy access.
+// It is safe to call while the proxy is serving.
 func (p *Proxy) SetAuthToken(token string) {
-	p.authToken = token
+	p.authToken.Store(&token)
+}
+
+func (p *Proxy) currentAuthToken() string {
+	if t := p.authToken.Load(); t != nil {
+		return *t
+	}
+	return ""
 }
 
 // SetDelegateAuth allows credential resolvers to validate caller identity
@@ -2083,7 +2091,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if uid := extractProxyUsername(r); uid != "" {
 			r = r.WithContext(withUserID(r.Context(), uid))
 		}
-	} else if p.authToken != "" {
+	} else if p.currentAuthToken() != "" {
 		rejected, present := p.rejectMismatchedAuth(w, r)
 		if rejected {
 			return
@@ -2204,11 +2212,19 @@ func extractProxyUsername(r *http.Request) string {
 // at all, in which case ok is meaningless; callers that only care whether
 // a mismatched password was presented check present before ok.
 func (p *Proxy) checkAuth(r *http.Request) (ok, present bool) {
+	ok, present, _ = p.checkAuthAgainst(r)
+	return ok, present
+}
+
+// checkAuthAgainst is checkAuth plus the configured token it compared
+// against, loaded once so a concurrent reload cannot split the decision.
+func (p *Proxy) checkAuthAgainst(r *http.Request) (ok, present bool, want string) {
+	want = p.currentAuthToken()
 	token, present := extractProxyToken(r)
 	if !present {
-		return false, false
+		return false, false, want
 	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(p.authToken)) == 1, true
+	return subtle.ConstantTimeCompare([]byte(token), []byte(want)) == 1, true, want
 }
 
 // rejectMismatchedAuth calls checkAuth once and writes a 407 when the
@@ -2222,8 +2238,8 @@ func (p *Proxy) checkAuth(r *http.Request) (ok, present bool) {
 // authToken — the plain authToken branch, delegateAuth, and the relay path,
 // which bypasses that chain entirely — calls this same check.
 func (p *Proxy) rejectMismatchedAuth(w http.ResponseWriter, r *http.Request) (rejected, present bool) {
-	ok, present := p.checkAuth(r)
-	if !present || p.authToken == "" || ok {
+	ok, present, want := p.checkAuthAgainst(r)
+	if !present || want == "" || ok {
 		return false, present
 	}
 	slog.Warn("proxy auth mismatch", "subsystem", "proxy", "action", "auth-reject")

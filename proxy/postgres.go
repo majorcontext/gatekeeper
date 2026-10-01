@@ -779,8 +779,8 @@ func (s *PostgresServer) authenticate(token string) (*RunContextData, bool) {
 	if s.proxy.contextResolver != nil {
 		return s.proxy.contextResolver(token)
 	}
-	if s.proxy.authToken != "" {
-		match := subtle.ConstantTimeCompare([]byte(token), []byte(s.proxy.authToken)) == 1
+	if want := s.proxy.currentAuthToken(); want != "" {
+		match := subtle.ConstantTimeCompare([]byte(token), []byte(want)) == 1
 		return nil, match
 	}
 	return nil, true

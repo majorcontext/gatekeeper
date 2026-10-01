@@ -5,6 +5,8 @@ package gatekeeper
 // environment variable named by proxy.auth_token_env.
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -96,5 +98,33 @@ func TestResolveProxyAuthToken_ExtraneousFieldsRejected(t *testing.T) {
 				t.Errorf("resolveProxyAuthToken(%+v): expected error, got nil", tt.cfg)
 			}
 		})
+	}
+}
+
+func TestResolveProxyAuthToken_FileConflictsAndReads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("file-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveProxyAuthToken(ProxyConfig{AuthTokenFile: path})
+	if err != nil || got != "file-token" {
+		t.Fatalf("file only: token=%q err=%v; want %q, nil", got, err, "file-token")
+	}
+	for name, cfg := range map[string]ProxyConfig{
+		"env":     {AuthTokenFile: path, AuthTokenEnv: "X"},
+		"literal": {AuthTokenFile: path, AuthToken: "x"},
+	} {
+		if _, err := resolveProxyAuthToken(cfg); err == nil || !strings.Contains(err.Error(), "auth_token_file") {
+			t.Errorf("%s with file: err=%v; want error naming auth_token_file", name, err)
+		}
+	}
+	empty := filepath.Join(t.TempDir(), "empty")
+	if err := os.WriteFile(empty, []byte("\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{empty, filepath.Join(t.TempDir(), "absent")} {
+		if _, err := resolveProxyAuthToken(ProxyConfig{AuthTokenFile: p}); err == nil {
+			t.Errorf("file %s: want start error", p)
+		}
 	}
 }

@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## Unreleased
+
+### Added
+
+- **`proxy.auth_token_file` reads the proxy auth token from a file and reloads it when it changes** (`config.go`, `gatekeeper.go`, `proxy/authtokenfile.go`) — `auth_token` and `auth_token_env` are read once, so rotating the token of a long-lived instance, such as a pre-created companion rebound to a different caller, needed a restart. `auth_token_file` names a file (typically a Kubernetes Secret mount) that gatekeeper reads at startup — missing or empty is a fatal config error — and then re-reads every `auth_token_file_interval` (default `1s`). Polling reads through the Secret volume's atomic `..data` symlink swap without depending on filesystem-notification semantics. Every reader of the token — `CONNECT`/plain-HTTP proxy auth, `/relay/`, and the Postgres run-token check — now loads it atomically, so after a successful reload the old token is rejected immediately. A reload that finds the file empty or unreadable keeps the previous token and logs a WARN that never contains the value. Setting `auth_token_file` together with `auth_token` or `auth_token_env` is a config error; users of those two keys see no change.
+
 ## v0.25.0 — 2026-09-27
 
 ### Changed

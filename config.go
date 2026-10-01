@@ -3,6 +3,9 @@ package gatekeeper
 import (
 	"fmt"
 	"os"
+	"time"
+
+	"github.com/majorcontext/gatekeeper/proxy"
 
 	"gopkg.in/yaml.v3"
 )
@@ -53,6 +56,15 @@ type ProxyConfig struct {
 	// one or the other, not both. The named variable must be set and
 	// non-empty at startup.
 	AuthTokenEnv string `yaml:"auth_token_env,omitempty"`
+
+	// AuthTokenFile names a file holding the proxy auth token. Gatekeeper
+	// reads it at startup (missing or empty is fatal) and re-reads it every
+	// AuthTokenFileInterval, so a rotated token takes effect without a
+	// restart. Mutually exclusive with AuthToken and AuthTokenEnv.
+	AuthTokenFile string `yaml:"auth_token_file,omitempty"`
+
+	// AuthTokenFileInterval is the AuthTokenFile poll period (default 1s).
+	AuthTokenFileInterval time.Duration `yaml:"auth_token_file_interval,omitempty"`
 
 	// ProxyProtocol enables PROXY protocol v1/v2 parsing on the HTTP/CONNECT
 	// proxy listener. When true, each inbound connection is checked for a
@@ -178,6 +190,16 @@ type LogConfig struct {
 func resolveProxyAuthToken(cfg ProxyConfig) (string, error) {
 	if cfg.AuthToken != "" && cfg.AuthTokenEnv != "" {
 		return "", fmt.Errorf("proxy: set 'auth_token' or 'auth_token_env', not both")
+	}
+	if cfg.AuthTokenFile != "" && (cfg.AuthToken != "" || cfg.AuthTokenEnv != "") {
+		return "", fmt.Errorf("proxy: 'auth_token_file' is mutually exclusive with 'auth_token' and 'auth_token_env'")
+	}
+	if cfg.AuthTokenFile != "" {
+		token, err := proxy.ReadAuthTokenFile(cfg.AuthTokenFile)
+		if err != nil {
+			return "", fmt.Errorf("proxy.auth_token_file: %w", err)
+		}
+		return token, nil
 	}
 	token := cfg.AuthToken
 	if cfg.AuthTokenEnv != "" {
