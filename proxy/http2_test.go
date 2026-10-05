@@ -20,7 +20,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/net/http2"
 )
@@ -81,24 +83,39 @@ func newGRPCServer(t *testing.T, receivedHeaders *http.Header) *httptest.Server 
 func newGRPCProxySetup(t *testing.T, receivedHeaders *http.Header) (transport *http2.Transport, backendURL string) {
 	t.Helper()
 
+	backend := newGRPCServer(t, receivedHeaders)
+	t.Cleanup(backend.Close)
+	transport, backendURL, _ = newHTTP2ProxySetup(t, backend)
+	return transport, backendURL
+}
+
+func newHTTP2ProxySetup(t *testing.T, backends ...*httptest.Server) (transport *http2.Transport, backendURL string, p *Proxy) {
+	t.Helper()
 	ca, err := generateCA()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	backend := newGRPCServer(t, receivedHeaders)
-	t.Cleanup(backend.Close)
-
 	upstreamCAs := x509.NewCertPool()
-	upstreamCAs.AddCert(backend.Certificate())
+	var backendPorts []int
+	for _, backend := range backends {
+		upstreamCAs.AddCert(backend.Certificate())
+		backendAddr, _ := url.Parse(backend.URL)
+		backendPort := 0
+		fmt.Sscanf(backendAddr.Port(), "%d", &backendPort)
+		backendPorts = append(backendPorts, backendPort)
+	}
 
-	backendAddr, _ := url.Parse(backend.URL)
-	backendPort := 0
-	fmt.Sscanf(backendAddr.Port(), "%d", &backendPort)
-
-	p := NewProxy()
+	p = NewProxy()
 	p.SetCA(ca)
 	p.SetUpstreamCAs(upstreamCAs)
+	t.Cleanup(func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.h2UpstreamTransport != nil {
+			p.h2UpstreamTransport.CloseIdleConnections()
+		}
+	})
 	p.SetContextResolver(func(token string) (*RunContextData, bool) {
 		if token != "grpctest" {
 			return nil, false
@@ -107,7 +124,7 @@ func newGRPCProxySetup(t *testing.T, receivedHeaders *http.Header) (transport *h
 			Policy:           "permissive",
 			HostGateway:      "api.modal.com",
 			HostGatewayIP:    "127.0.0.1",
-			AllowedHostPorts: []int{backendPort},
+			AllowedHostPorts: backendPorts,
 			Credentials: map[string][]credentialHeader{
 				"api.modal.com": {
 					{Name: "x-modal-token-id", Value: "token-id-test", Grant: "modal"},
@@ -171,8 +188,9 @@ func newGRPCProxySetup(t *testing.T, receivedHeaders *http.Header) (transport *h
 		},
 	}
 
-	backendURL = fmt.Sprintf("https://api.modal.com:%d", backendPort)
-	return transport, backendURL
+	t.Cleanup(transport.CloseIdleConnections)
+	backendURL = fmt.Sprintf("https://api.modal.com:%d", backendPorts[0])
+	return transport, backendURL, p
 }
 
 // TestHTTP2_GRPCCredentialInjection verifies that HTTP/2 (gRPC) requests
@@ -221,5 +239,138 @@ func TestHTTP2_GRPCCredentialInjection(t *testing.T) {
 	}
 	if got := receivedHeaders.Get("x-modal-token-secret"); got != "token-secret-test" {
 		t.Errorf("x-modal-token-secret = %q, want token-secret-test", got)
+	}
+}
+
+func TestHTTP2_UpstreamALPN(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		protos    []string
+		wantProto int
+	}{
+		{"h1-only", []string{"http/1.1"}, 1},
+		{"no-alpn", []string{}, 1},
+		{"h2", []string{"h2", "http/1.1"}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			release := make(chan struct{})
+			defer close(release)
+			backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.ProtoMajor != tc.wantProto {
+					t.Errorf("upstream protocol = %s, want HTTP/%d", r.Proto, tc.wantProto)
+				}
+				body, err := io.ReadAll(r.Body)
+				if err != nil || string(body) != `{"name":"box.event"}` {
+					t.Errorf("event body = %q, error = %v", body, err)
+				}
+				if r.Header.Get("x-modal-token-id") != "token-id-test" {
+					t.Error("missing injected credential")
+				}
+				if r.Header.Get("Proxy-Authorization") != "" || r.Header.Get("Proxy-Connection") != "" {
+					t.Error("proxy headers leaked upstream")
+				}
+				w.Header().Set("Trailer", "X-Event-Status")
+				if tc.wantProto == 1 {
+					w.Header().Set("Connection", "X-Hop")
+					w.Header().Set("X-Hop", "must-not-forward")
+				}
+				w.Write([]byte("accepted\n"))
+				w.(http.Flusher).Flush()
+				<-release
+				w.Header().Set("X-Event-Status", "ok")
+			}))
+			backend.EnableHTTP2 = tc.wantProto == 2
+			backend.TLS = &tls.Config{NextProtos: tc.protos}
+			backend.StartTLS()
+			t.Cleanup(backend.Close)
+			transport, backendURL, p := newHTTP2ProxySetup(t, backend)
+			logs := make(chan RequestLogData, 1)
+			p.SetLogger(func(data RequestLogData) { logs <- data })
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			req, _ := http.NewRequestWithContext(ctx, "POST", backendURL+"/e/test-key", strings.NewReader(`{"name":"box.event"}`))
+			req.Header.Set("Proxy-Connection", "keep-alive")
+			resp, err := transport.RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				b, _ := io.ReadAll(resp.Body)
+				t.Fatalf("POST /e/test-key status = %d, want 200: %s", resp.StatusCode, b)
+			}
+			if resp.ProtoMajor != 2 {
+				t.Errorf("client protocol = %s, want HTTP/2", resp.Proto)
+			}
+			if resp.Header.Get("X-Hop") != "" || resp.Header.Get("Connection") != "" {
+				t.Error("hop-by-hop response headers leaked")
+			}
+			first := make([]byte, len("accepted\n"))
+			if _, err := io.ReadFull(resp.Body, first); err != nil || string(first) != "accepted\n" {
+				t.Fatalf("streamed body = %q, error = %v", first, err)
+			}
+			release <- struct{}{}
+			if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+				t.Fatal(err)
+			}
+			if got := resp.Trailer.Get("X-Event-Status"); got != "ok" {
+				t.Errorf("trailer = %q, want ok", got)
+			}
+			select {
+			case data := <-logs:
+				if data.StatusCode != 200 || !data.AuthInjected || !data.InjectedHeaders["x-modal-token-id"] {
+					t.Errorf("request log status = %d, injected = %v, headers = %v", data.StatusCode, data.AuthInjected, data.InjectedHeaders)
+				}
+				if data.RequestHeaders.Get("x-modal-token-id") != "" || data.RequestHeaders.Get("x-modal-token-secret") != "" {
+					t.Error("injected credential values leaked into request log")
+				}
+			case <-ctx.Done():
+				t.Fatal("missing request log")
+			}
+		})
+	}
+}
+
+func TestHTTP2_UpstreamProtocolCache(t *testing.T) {
+	var connections [2]atomic.Int32
+	var backends []*httptest.Server
+	for i, wantProto := range []int{1, 2} {
+		backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.ProtoMajor != wantProto {
+				t.Errorf("upstream protocol = %s, want HTTP/%d", r.Proto, wantProto)
+			}
+			io.WriteString(w, "ok")
+		}))
+		backend.EnableHTTP2 = wantProto == 2
+		backend.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+			if state == http.StateNew {
+				connections[i].Add(1)
+			}
+		}
+		backend.StartTLS()
+		t.Cleanup(backend.Close)
+		backends = append(backends, backend)
+	}
+	transport, _, _ := newHTTP2ProxySetup(t, backends...)
+	client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
+	for range 3 {
+		for _, backend := range backends {
+			u, _ := url.Parse(backend.URL)
+			resp, err := client.Get("https://api.modal.com:" + u.Port() + "/cached")
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil || resp.StatusCode != 200 || string(body) != "ok" {
+				t.Fatalf("cached request status = %d, body = %q, error = %v", resp.StatusCode, body, err)
+			}
+			transport.CloseIdleConnections()
+		}
+	}
+	for i := range connections {
+		if got := connections[i].Load(); got != 1 {
+			t.Errorf("upstream %d TLS connections = %d, want 1 across client tunnels", i, got)
+		}
 	}
 }

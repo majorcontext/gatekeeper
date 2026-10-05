@@ -698,6 +698,8 @@ type Proxy struct {
 	policyLogger         PolicyLogger                  // optional policy decision logger
 	upstreamCAs          *x509.CertPool                // optional CA pool for upstream TLS verification
 	captureHeaders       []string                      // headers to capture in logs and strip before forwarding
+
+	h2UpstreamTransport *http.Transport
 }
 
 // NewProxy creates a new auth proxy.
@@ -2843,41 +2845,23 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		RootCAs:    p.upstreamCAs,
 	}
 
-	// Build an upstream transport matching the negotiated protocol.
-	// When the client negotiated h2 (e.g., gRPC), the request object is an
-	// h2 request and cannot be round-tripped via an HTTP/1.1 transport
-	// without framing errors, so we must forward upstream over h2 as well.
-	//
-	// Limitation: http2.Transport never falls back to HTTP/1.1, so if the
-	// upstream only speaks HTTP/1.1 the connection will fail when the client
-	// has negotiated h2. For gRPC this is always correct (gRPC requires h2);
-	// for general h2 clients hitting h1-only upstreams it is a known
-	// limitation of the current implementation.
 	var transport http.RoundTripper
 	dialer := &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
 	}
 	if tlsClientConn.ConnectionState().NegotiatedProtocol == http2.NextProtoTLS {
-		transport = &http2.Transport{
-			TLSClientConfig: upstreamTLS,
-			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-				if cfg == nil {
-					cfg = upstreamTLS
-				}
-				return (&tls.Dialer{NetDialer: dialer, Config: cfg}).DialContext(ctx, network, addr)
-			},
-			ReadIdleTimeout: 30 * time.Second,
-			PingTimeout:     15 * time.Second,
+		transport, err = p.getH2UpstreamTransport()
+		if err != nil {
+			slog.Debug("failed to configure upstream transport",
+				"subsystem", "proxy", "host", host, "error", err)
+			return
 		}
 	} else {
 		transport = &http.Transport{
-			Proxy:           nil,
-			DialContext:     dialer.DialContext,
-			TLSClientConfig: upstreamTLS,
-			// Do NOT set ForceAttemptHTTP2: this path handles HTTP/1.1
-			// requests. Enabling h2 upstream for h1 clients causes
-			// framing mismatches.
+			Proxy:                 nil,
+			DialContext:           dialer.DialContext,
+			TLSClientConfig:       upstreamTLS,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ResponseHeaderTimeout: 5 * time.Minute,
 			MaxIdleConns:          100,
