@@ -109,13 +109,7 @@ func newHTTP2ProxySetup(t *testing.T, backends ...*httptest.Server) (transport *
 	p = NewProxy()
 	p.SetCA(ca)
 	p.SetUpstreamCAs(upstreamCAs)
-	t.Cleanup(func() {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		if p.h2UpstreamTransport != nil {
-			p.h2UpstreamTransport.CloseIdleConnections()
-		}
-	})
+	t.Cleanup(p.CloseIdleConnections)
 	p.SetContextResolver(func(token string) (*RunContextData, bool) {
 		if token != "grpctest" {
 			return nil, false
@@ -373,4 +367,35 @@ func TestHTTP2_UpstreamProtocolCache(t *testing.T) {
 			t.Errorf("upstream %d TLS connections = %d, want 1 across client tunnels", i, got)
 		}
 	}
+}
+
+func TestHTTP2_UpstreamCAChange(t *testing.T) {
+	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "ok")
+	}))
+	backend.EnableHTTP2 = true
+	backend.StartTLS()
+	t.Cleanup(backend.Close)
+	transport, backendURL, p := newHTTP2ProxySetup(t, backend)
+	client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
+	request := func(wantStatus int) {
+		t.Helper()
+		resp, err := client.Get(backendURL + "/trust")
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != wantStatus {
+			t.Fatalf("status after upstream CA change = %d, want %d", resp.StatusCode, wantStatus)
+		}
+		transport.CloseIdleConnections()
+	}
+	request(http.StatusOK)
+	p.SetUpstreamCAs(x509.NewCertPool())
+	request(http.StatusBadGateway)
+	trusted := x509.NewCertPool()
+	trusted.AddCert(backend.Certificate())
+	p.SetUpstreamCAs(trusted)
+	request(http.StatusOK)
 }

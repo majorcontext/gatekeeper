@@ -965,6 +965,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Stop gracefully shuts down the proxy server and all background refresh goroutines.
 func (s *Server) Stop(ctx context.Context) error {
+	if s.proxy != nil {
+		defer s.proxy.CloseIdleConnections()
+	}
 	if s.refreshCancel != nil {
 		s.refreshCancel()
 	}

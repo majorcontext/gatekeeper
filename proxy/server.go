@@ -77,6 +77,9 @@ func (s *Server) Port() string {
 
 // Stop stops the proxy server.
 func (s *Server) Stop(ctx context.Context) error {
+	if s.proxy != nil {
+		defer s.proxy.CloseIdleConnections()
+	}
 	if s.server != nil {
 		return s.server.Shutdown(ctx)
 	}

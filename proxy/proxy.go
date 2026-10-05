@@ -740,7 +740,14 @@ func (p *Proxy) SetCA(ca *CA) {
 // system root certificates are used. This is useful for environments with
 // private PKI or for testing.
 func (p *Proxy) SetUpstreamCAs(pool *x509.CertPool) {
+	p.mu.Lock()
 	p.upstreamCAs = pool
+	transport := p.h2UpstreamTransport
+	p.h2UpstreamTransport = nil
+	p.mu.Unlock()
+	if transport != nil {
+		transport.CloseIdleConnections()
+	}
 }
 
 // SetLogger sets the request logger.
@@ -2839,17 +2846,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		}
 	}()
 
-	// Shared TLS config for upstream connections (both h2 and h1 paths).
-	upstreamTLS := &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		RootCAs:    p.upstreamCAs,
-	}
-
 	var transport http.RoundTripper
-	dialer := &net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}
 	if tlsClientConn.ConnectionState().NegotiatedProtocol == http2.NextProtoTLS {
 		transport, err = p.getH2UpstreamTransport()
 		if err != nil {
@@ -2858,15 +2855,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			return
 		}
 	} else {
-		transport = &http.Transport{
-			Proxy:                 nil,
-			DialContext:           dialer.DialContext,
-			TLSClientConfig:       upstreamTLS,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 5 * time.Minute,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-		}
+		transport = newUpstreamTransport(p.getUpstreamCAs())
 	}
 
 	// Extract port from the CONNECT request for rule checking.
