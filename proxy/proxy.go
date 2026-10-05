@@ -746,6 +746,8 @@ func (p *Proxy) SetUpstreamCAs(pool *x509.CertPool) {
 	p.h2UpstreamTransport = nil
 	p.mu.Unlock()
 	if transport != nil {
+		// Existing tunnels retain their trust settings. Retired connections
+		// still in use are reclaimed by the transport's timeout once idle.
 		transport.CloseIdleConnections()
 	}
 }

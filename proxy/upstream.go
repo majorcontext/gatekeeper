@@ -58,6 +58,8 @@ func (p *Proxy) getH2UpstreamTransport() (*http.Transport, error) {
 	return transport, nil
 }
 
+// CloseIdleConnections closes idle connections in the shared upstream pool.
+// Active requests and per-tunnel HTTP/1.1 transports are unaffected.
 func (p *Proxy) CloseIdleConnections() {
 	p.mu.RLock()
 	transport := p.h2UpstreamTransport
