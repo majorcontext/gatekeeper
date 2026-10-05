@@ -952,7 +952,7 @@ func (s *PostgresServer) connectWithRetry(ctx context.Context, resolver Postgres
 		return connectPostgresUpstream(ctx, upstreamParams{
 			dialAddr:          dialAddr,
 			serverName:        host,
-			rootCAs:           s.proxy.upstreamCAs,
+			rootCAs:           s.proxy.getUpstreamCAs(),
 			user:              user,
 			password:          password,
 			startupParameters: startupParams,

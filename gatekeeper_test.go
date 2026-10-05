@@ -3500,3 +3500,63 @@ func TestHTTPSTokenExchangeOutrankedByStatic(t *testing.T) {
 		t.Errorf("backend received X-Gatekeeper-Subject = %q, want stripped (declared strip headers must apply when the resolver is skipped)", backendSubjectHeader)
 	}
 }
+
+func TestServerStopClosesIdleHTTP2Upstream(t *testing.T) {
+	closed := make(chan struct{}, 1)
+	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor != 2 {
+			t.Errorf("upstream protocol = %s, want HTTP/2", r.Proto)
+		}
+		io.WriteString(w, "ok")
+	}))
+	backend.EnableHTTP2 = true
+	backend.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			closed <- struct{}{}
+		}
+	}
+	backend.StartTLS()
+	defer backend.Close()
+	ca, err := proxy.NewCA(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := proxy.NewProxy()
+	p.SetCA(ca)
+	upstreamCAs := x509.NewCertPool()
+	upstreamCAs.AddCert(backend.Certificate())
+	p.SetUpstreamCAs(upstreamCAs)
+	backendURL, _ := url.Parse(backend.URL)
+	port, _ := net.LookupPort("tcp", backendURL.Port())
+	p.SetContextResolver(func(string) (*proxy.RunContextData, bool) {
+		return &proxy.RunContextData{Policy: "permissive", HostGateway: "127.0.0.1", HostGatewayIP: "127.0.0.1", AllowedHostPorts: []int{port}}, true
+	})
+	front := httptest.NewServer(p)
+	defer front.Close()
+	proxyURL, _ := url.Parse(front.URL)
+	proxyURL.User = url.UserPassword("test", "test-token")
+	clientCAs := x509.NewCertPool()
+	clientCAs.AppendCertsFromPEM(ca.CertPEM())
+	transport := &http.Transport{Proxy: http.ProxyURL(proxyURL), ForceAttemptHTTP2: true, TLSClientConfig: &tls.Config{RootCAs: clientCAs}}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	resp, err := client.Get(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || resp.ProtoMajor != 2 {
+		t.Fatalf("response = %s %s, want HTTP/2 200", resp.Proto, resp.Status)
+	}
+	transport.CloseIdleConnections()
+	s := &Server{proxy: p, proxyServer: front.Config}
+	if err := s.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("standalone stop left an idle upstream HTTP/2 connection open")
+	}
+}

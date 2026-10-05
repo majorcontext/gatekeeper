@@ -2,7 +2,11 @@ package proxy
 
 import (
 	"context"
+	"crypto/x509"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -70,5 +74,55 @@ func TestServer_Port(t *testing.T) {
 	addr := s.Addr()
 	if !strings.HasSuffix(addr, ":"+port) {
 		t.Errorf("Addr() = %q doesn't end with Port() = %q", addr, port)
+	}
+}
+
+func TestServer_StopClosesIdleUpstreamConnections(t *testing.T) {
+	closed := make(chan struct{}, 1)
+	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "ok")
+	}))
+	backend.EnableHTTP2 = true
+	backend.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			closed <- struct{}{}
+		}
+	}
+	backend.StartTLS()
+	defer backend.Close()
+	p := NewProxy()
+	pool := x509.NewCertPool()
+	pool.AddCert(backend.Certificate())
+	p.SetUpstreamCAs(pool)
+	transport, err := p.getH2UpstreamTransport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	resp, err := client.Get(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	s := NewServer(p)
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("proxy stop left an idle upstream HTTP/2 connection open")
+	}
+}
+
+func TestServer_StopBeforeStart(t *testing.T) {
+	s := &Server{}
+	if err := s.Stop(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
