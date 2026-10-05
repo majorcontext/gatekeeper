@@ -48,6 +48,7 @@ func (p *Proxy) getH2UpstreamTransport() (*http.Transport, error) {
 	}
 	transport = newUpstreamTransport(p.upstreamCAs)
 	transport.ForceAttemptHTTP2 = true
+	transport.ResponseHeaderTimeout = 0
 	h2Transport, err := http2.ConfigureTransports(transport)
 	if err != nil {
 		return nil, err
