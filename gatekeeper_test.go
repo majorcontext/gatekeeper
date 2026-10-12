@@ -3731,3 +3731,27 @@ func TestLoadCredentials_BoundsConcurrentFetches(t *testing.T) {
 		t.Fatalf("peak concurrent fetches = %d, want between 2 and 16", got)
 	}
 }
+
+func TestLoadCredentials_ClosesPostgresResolversWhenALaterFetchFails(t *testing.T) {
+	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var closed atomic.Int32
+	srv.resolveSource = func(sc SourceConfig) (credentialsource.CredentialSource, error) {
+		return closeTrackingSource{closed: &closed, fail: sc.Secret == "bad"}, nil
+	}
+	cfg := &Config{Credentials: []CredentialConfig{
+		{Host: "db.example.com", Grant: "db", Source: SourceConfig{Type: "mock", Secret: "neon"}, Postgres: &PostgresCredentialConfig{Resolver: "neon", Project: "p"}},
+		{Host: "bad.example.com", Grant: "bad", Source: SourceConfig{Type: "mock", Secret: "bad"}},
+	}}
+	if err := srv.loadCredentials(context.Background(), cfg); err == nil {
+		t.Fatal("loadCredentials succeeded, want the fetch failure")
+	}
+	if closed.Load() < 2 {
+		t.Fatalf("closed = %d, want the Postgres source and the failed source closed", closed.Load())
+	}
+	if len(srv.closers) != 0 {
+		t.Fatalf("closers left after a failed load = %d, want 0", len(srv.closers))
+	}
+}

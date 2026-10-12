@@ -527,7 +527,9 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 	var unique []*pendingSource
 	var entries []credEntry
 	// New returns no Server on failure, so Stop never runs: release every
-	// source built here instead.
+	// source and Postgres resolver built here instead. Header sources join
+	// s.closers only once all of them loaded.
+	closersBase := len(s.closers)
 	defer func() {
 		if err == nil {
 			return
@@ -537,7 +539,12 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 				_ = c.Close()
 			}
 		}
+		for _, c := range s.closers[closersBase:] {
+			_ = c.Close()
+		}
+		s.closers = s.closers[:closersBase]
 	}()
+	var sourceClosers []io.Closer
 
 	for _, cred := range cfg.Credentials {
 		if cred.Host == "" {
@@ -627,7 +634,7 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 		}
 		if e.first {
 			if c, ok := e.source.src.(io.Closer); ok {
-				s.closers = append(s.closers, c)
+				sourceClosers = append(sourceClosers, c)
 			}
 		}
 
@@ -651,6 +658,7 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 		}
 	}
 
+	s.closers = append(s.closers, sourceClosers...)
 	for _, ps := range refreshOrder {
 		s.pendingRefreshes = append(s.pendingRefreshes, *refreshMap[ps])
 	}
