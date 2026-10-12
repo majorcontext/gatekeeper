@@ -3560,3 +3560,71 @@ func TestServerStopClosesIdleHTTP2Upstream(t *testing.T) {
 		t.Fatal("standalone stop left an idle upstream HTTP/2 connection open")
 	}
 }
+
+// barrierSource blocks each Fetch until want Fetches are in flight at once.
+type barrierSource struct {
+	inflight *atomic.Int32
+	want     int32
+	name     string
+}
+
+func (b barrierSource) Fetch(ctx context.Context) (string, error) {
+	b.inflight.Add(1)
+	for b.inflight.Load() < b.want {
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("%s: only %d fetches in flight, want %d: %w", b.name, b.inflight.Load(), b.want, ctx.Err())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	return "tok_" + b.name, nil
+}
+
+func (b barrierSource) Type() string { return "barrier" }
+
+// A production config holds about a dozen network credential sources
+// (gcp-secretmanager, gcp-service-account, github-app). Fetching them one by
+// one put 1.5 s between container start and the listener.
+func TestLoadCredentials_FetchesDistinctSourcesConcurrently(t *testing.T) {
+	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inflight atomic.Int32
+	const n = 12
+	srv.resolveSource = func(sc SourceConfig) (credentialsource.CredentialSource, error) {
+		return barrierSource{inflight: &inflight, want: n, name: sc.Secret}, nil
+	}
+	cfg := &Config{}
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("secret-%d", i)
+		cfg.Credentials = append(cfg.Credentials, CredentialConfig{
+			Host: fmt.Sprintf("api%d.example.com", i), Grant: name,
+			Source: SourceConfig{Type: "gcp-secretmanager", Secret: name},
+		})
+	}
+	if err := srv.loadCredentials(context.Background(), cfg); err != nil {
+		t.Fatalf("loadCredentials: %v", err)
+	}
+	if got := inflight.Load(); got != n {
+		t.Fatalf("fetches started = %d, want %d", got, n)
+	}
+}
+
+func TestLoadCredentials_FetchFailureNamesTheFirstFailingCredentialInConfigOrder(t *testing.T) {
+	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.resolveSource = func(sc SourceConfig) (credentialsource.CredentialSource, error) {
+		return &mockRefreshSource{token: "t", fetchErr: errors.New("boom " + sc.Secret)}, nil
+	}
+	cfg := &Config{Credentials: []CredentialConfig{
+		{Host: "a.example.com", Grant: "a", Source: SourceConfig{Type: "mock", Secret: "a"}},
+		{Host: "b.example.com", Grant: "b", Source: SourceConfig{Type: "mock", Secret: "b"}},
+	}}
+	err = srv.loadCredentials(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "a.example.com") || !strings.Contains(err.Error(), "boom a") {
+		t.Fatalf("err = %v, want the failure of a.example.com first", err)
+	}
+}
