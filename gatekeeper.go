@@ -506,12 +506,12 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 // source (e.g., two hosts using the same github-app), a single Fetch is made at
 // startup and a single background refresh goroutine is registered. The token is
 // applied to all hosts that share the source.
-func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
+func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 	// Dedup sources: same SourceConfig → one Fetch, one refresh goroutine.
 	// Sources are built in config order, fetched concurrently (each fetch is
 	// a network round trip, and a production config has about a dozen), and
-	// applied in config order, so the first failing credential in the file
-	// is the one reported.
+	// applied in config order. Build errors come before fetch errors; among
+	// fetch errors the first credential in the file is the one reported.
 	type pendingSource struct {
 		src credentialsource.CredentialSource
 		val string
@@ -526,6 +526,18 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 	sources := make(map[SourceConfig]*pendingSource)
 	var unique []*pendingSource
 	var entries []credEntry
+	// New returns no Server on failure, so Stop never runs: release every
+	// source built here instead.
+	defer func() {
+		if err == nil {
+			return
+		}
+		for _, ps := range unique {
+			if c, ok := ps.src.(io.Closer); ok {
+				_ = c.Close()
+			}
+		}
+	}()
 
 	for _, cred := range cfg.Credentials {
 		if cred.Host == "" {

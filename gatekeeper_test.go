@@ -3611,13 +3611,40 @@ func TestLoadCredentials_FetchesDistinctSourcesConcurrently(t *testing.T) {
 	}
 }
 
+// failAfterSource fails once release closes; failNow fails at once.
+type failAfterSource struct {
+	release <-chan struct{}
+	msg     string
+	done    chan<- struct{}
+}
+
+func (f failAfterSource) Fetch(ctx context.Context) (string, error) {
+	if f.release != nil {
+		select {
+		case <-f.release:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	if f.done != nil {
+		close(f.done)
+	}
+	return "", errors.New(f.msg)
+}
+
+func (f failAfterSource) Type() string { return "fail" }
+
 func TestLoadCredentials_FetchFailureNamesTheFirstFailingCredentialInConfigOrder(t *testing.T) {
 	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	bFailed := make(chan struct{})
 	srv.resolveSource = func(sc SourceConfig) (credentialsource.CredentialSource, error) {
-		return &mockRefreshSource{token: "t", fetchErr: errors.New("boom " + sc.Secret)}, nil
+		if sc.Secret == "a" {
+			return failAfterSource{release: bFailed, msg: "boom a"}, nil
+		}
+		return failAfterSource{msg: "boom b", done: bFailed}, nil
 	}
 	cfg := &Config{Credentials: []CredentialConfig{
 		{Host: "a.example.com", Grant: "a", Source: SourceConfig{Type: "mock", Secret: "a"}},
@@ -3625,6 +3652,82 @@ func TestLoadCredentials_FetchFailureNamesTheFirstFailingCredentialInConfigOrder
 	}}
 	err = srv.loadCredentials(context.Background(), cfg)
 	if err == nil || !strings.Contains(err.Error(), "a.example.com") || !strings.Contains(err.Error(), "boom a") {
-		t.Fatalf("err = %v, want the failure of a.example.com first", err)
+		t.Fatalf("err = %v, want the failure of a.example.com though b.example.com failed first", err)
+	}
+}
+
+type closeTrackingSource struct {
+	closed *atomic.Int32
+	fail   bool
+}
+
+func (c closeTrackingSource) Fetch(context.Context) (string, error) {
+	if c.fail {
+		return "", errors.New("boom")
+	}
+	return "tok", nil
+}
+func (c closeTrackingSource) Type() string { return "close-tracking" }
+func (c closeTrackingSource) Close() error { c.closed.Add(1); return nil }
+
+func TestLoadCredentials_ClosesEveryBuiltSourceWhenAFetchFails(t *testing.T) {
+	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var closed atomic.Int32
+	srv.resolveSource = func(sc SourceConfig) (credentialsource.CredentialSource, error) {
+		return closeTrackingSource{closed: &closed, fail: sc.Secret == "s0"}, nil
+	}
+	cfg := &Config{}
+	for i := 0; i < 5; i++ {
+		name := fmt.Sprintf("s%d", i)
+		cfg.Credentials = append(cfg.Credentials, CredentialConfig{Host: name + ".example.com", Grant: name, Source: SourceConfig{Type: "mock", Secret: name}})
+	}
+	if err := srv.loadCredentials(context.Background(), cfg); err == nil {
+		t.Fatal("loadCredentials succeeded, want the fetch failure")
+	}
+	if got := closed.Load(); got != 5 {
+		t.Fatalf("closed sources = %d, want 5", got)
+	}
+}
+
+type peakSource struct {
+	cur, peak *atomic.Int32
+}
+
+func (p peakSource) Fetch(context.Context) (string, error) {
+	n := p.cur.Add(1)
+	for {
+		old := p.peak.Load()
+		if n <= old || p.peak.CompareAndSwap(old, n) {
+			break
+		}
+	}
+	time.Sleep(5 * time.Millisecond)
+	p.cur.Add(-1)
+	return "tok", nil
+}
+func (p peakSource) Type() string { return "peak" }
+
+func TestLoadCredentials_BoundsConcurrentFetches(t *testing.T) {
+	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cur, peak atomic.Int32
+	srv.resolveSource = func(SourceConfig) (credentialsource.CredentialSource, error) {
+		return peakSource{cur: &cur, peak: &peak}, nil
+	}
+	cfg := &Config{}
+	for i := 0; i < 40; i++ {
+		name := fmt.Sprintf("s%d", i)
+		cfg.Credentials = append(cfg.Credentials, CredentialConfig{Host: name + ".example.com", Grant: name, Source: SourceConfig{Type: "mock", Secret: name}})
+	}
+	if err := srv.loadCredentials(context.Background(), cfg); err != nil {
+		t.Fatalf("loadCredentials: %v", err)
+	}
+	if got := peak.Load(); got > 16 || got < 2 {
+		t.Fatalf("peak concurrent fetches = %d, want between 2 and 16", got)
 	}
 }
