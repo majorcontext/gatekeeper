@@ -3560,3 +3560,198 @@ func TestServerStopClosesIdleHTTP2Upstream(t *testing.T) {
 		t.Fatal("standalone stop left an idle upstream HTTP/2 connection open")
 	}
 }
+
+// barrierSource blocks each Fetch until want Fetches are in flight at once.
+type barrierSource struct {
+	inflight *atomic.Int32
+	want     int32
+	name     string
+}
+
+func (b barrierSource) Fetch(ctx context.Context) (string, error) {
+	b.inflight.Add(1)
+	for b.inflight.Load() < b.want {
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("%s: only %d fetches in flight, want %d: %w", b.name, b.inflight.Load(), b.want, ctx.Err())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	return "tok_" + b.name, nil
+}
+
+func (b barrierSource) Type() string { return "barrier" }
+
+// A production config holds about a dozen network credential sources
+// (gcp-secretmanager, gcp-service-account, github-app). Fetching them one by
+// one put 1.5 s between container start and the listener.
+func TestLoadCredentials_FetchesDistinctSourcesConcurrently(t *testing.T) {
+	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inflight atomic.Int32
+	const n = 12
+	srv.resolveSource = func(sc SourceConfig) (credentialsource.CredentialSource, error) {
+		return barrierSource{inflight: &inflight, want: n, name: sc.Secret}, nil
+	}
+	cfg := &Config{}
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("secret-%d", i)
+		cfg.Credentials = append(cfg.Credentials, CredentialConfig{
+			Host: fmt.Sprintf("api%d.example.com", i), Grant: name,
+			Source: SourceConfig{Type: "gcp-secretmanager", Secret: name},
+		})
+	}
+	if err := srv.loadCredentials(context.Background(), cfg); err != nil {
+		t.Fatalf("loadCredentials: %v", err)
+	}
+	if got := inflight.Load(); got != n {
+		t.Fatalf("fetches started = %d, want %d", got, n)
+	}
+}
+
+// failAfterSource fails once release closes; failNow fails at once.
+type failAfterSource struct {
+	release <-chan struct{}
+	msg     string
+	done    chan<- struct{}
+}
+
+func (f failAfterSource) Fetch(ctx context.Context) (string, error) {
+	if f.release != nil {
+		select {
+		case <-f.release:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	if f.done != nil {
+		close(f.done)
+	}
+	return "", errors.New(f.msg)
+}
+
+func (f failAfterSource) Type() string { return "fail" }
+
+func TestLoadCredentials_FetchFailureNamesTheFirstFailingCredentialInConfigOrder(t *testing.T) {
+	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bFailed := make(chan struct{})
+	srv.resolveSource = func(sc SourceConfig) (credentialsource.CredentialSource, error) {
+		if sc.Secret == "a" {
+			return failAfterSource{release: bFailed, msg: "boom a"}, nil
+		}
+		return failAfterSource{msg: "boom b", done: bFailed}, nil
+	}
+	cfg := &Config{Credentials: []CredentialConfig{
+		{Host: "a.example.com", Grant: "a", Source: SourceConfig{Type: "mock", Secret: "a"}},
+		{Host: "b.example.com", Grant: "b", Source: SourceConfig{Type: "mock", Secret: "b"}},
+	}}
+	err = srv.loadCredentials(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "a.example.com") || !strings.Contains(err.Error(), "boom a") {
+		t.Fatalf("err = %v, want the failure of a.example.com though b.example.com failed first", err)
+	}
+}
+
+type closeTrackingSource struct {
+	closed *atomic.Int32
+	fail   bool
+}
+
+func (c closeTrackingSource) Fetch(context.Context) (string, error) {
+	if c.fail {
+		return "", errors.New("boom")
+	}
+	return "tok", nil
+}
+func (c closeTrackingSource) Type() string { return "close-tracking" }
+func (c closeTrackingSource) Close() error { c.closed.Add(1); return nil }
+
+func TestLoadCredentials_ClosesEveryBuiltSourceWhenAFetchFails(t *testing.T) {
+	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var closed atomic.Int32
+	srv.resolveSource = func(sc SourceConfig) (credentialsource.CredentialSource, error) {
+		return closeTrackingSource{closed: &closed, fail: sc.Secret == "s0"}, nil
+	}
+	cfg := &Config{}
+	for i := 0; i < 5; i++ {
+		name := fmt.Sprintf("s%d", i)
+		cfg.Credentials = append(cfg.Credentials, CredentialConfig{Host: name + ".example.com", Grant: name, Source: SourceConfig{Type: "mock", Secret: name}})
+	}
+	if err := srv.loadCredentials(context.Background(), cfg); err == nil {
+		t.Fatal("loadCredentials succeeded, want the fetch failure")
+	}
+	if got := closed.Load(); got != 5 {
+		t.Fatalf("closed sources = %d, want 5", got)
+	}
+}
+
+type peakSource struct {
+	cur, peak *atomic.Int32
+}
+
+func (p peakSource) Fetch(context.Context) (string, error) {
+	n := p.cur.Add(1)
+	for {
+		old := p.peak.Load()
+		if n <= old || p.peak.CompareAndSwap(old, n) {
+			break
+		}
+	}
+	time.Sleep(5 * time.Millisecond)
+	p.cur.Add(-1)
+	return "tok", nil
+}
+func (p peakSource) Type() string { return "peak" }
+
+func TestLoadCredentials_BoundsConcurrentFetches(t *testing.T) {
+	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cur, peak atomic.Int32
+	srv.resolveSource = func(SourceConfig) (credentialsource.CredentialSource, error) {
+		return peakSource{cur: &cur, peak: &peak}, nil
+	}
+	cfg := &Config{}
+	for i := 0; i < 40; i++ {
+		name := fmt.Sprintf("s%d", i)
+		cfg.Credentials = append(cfg.Credentials, CredentialConfig{Host: name + ".example.com", Grant: name, Source: SourceConfig{Type: "mock", Secret: name}})
+	}
+	if err := srv.loadCredentials(context.Background(), cfg); err != nil {
+		t.Fatalf("loadCredentials: %v", err)
+	}
+	if got := peak.Load(); got > 16 || got < 2 {
+		t.Fatalf("peak concurrent fetches = %d, want between 2 and 16", got)
+	}
+}
+
+func TestLoadCredentials_ClosesPostgresResolversWhenALaterFetchFails(t *testing.T) {
+	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var closed atomic.Int32
+	srv.resolveSource = func(sc SourceConfig) (credentialsource.CredentialSource, error) {
+		return closeTrackingSource{closed: &closed, fail: sc.Secret == "bad"}, nil
+	}
+	cfg := &Config{Credentials: []CredentialConfig{
+		{Host: "db.example.com", Grant: "db", Source: SourceConfig{Type: "mock", Secret: "neon"}, Postgres: &PostgresCredentialConfig{Resolver: "neon", Project: "p"}},
+		{Host: "bad.example.com", Grant: "bad", Source: SourceConfig{Type: "mock", Secret: "bad"}},
+	}}
+	if err := srv.loadCredentials(context.Background(), cfg); err == nil {
+		t.Fatal("loadCredentials succeeded, want the fetch failure")
+	}
+	if closed.Load() < 2 {
+		t.Fatalf("closed = %d, want the Postgres source and the failed source closed", closed.Load())
+	}
+	if len(srv.closers) != 0 {
+		t.Fatalf("closers left after a failed load = %d, want 0", len(srv.closers))
+	}
+}

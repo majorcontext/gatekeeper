@@ -506,14 +506,45 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 // source (e.g., two hosts using the same github-app), a single Fetch is made at
 // startup and a single background refresh goroutine is registered. The token is
 // applied to all hosts that share the source.
-func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
+func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 	// Dedup sources: same SourceConfig → one Fetch, one refresh goroutine.
-	type fetchedSource struct {
+	// Sources are built in config order, fetched concurrently (each fetch is
+	// a network round trip, and a production config has about a dozen), and
+	// applied in config order. Build errors come before fetch errors; among
+	// fetch errors the first credential in the file is the one reported.
+	type pendingSource struct {
 		src credentialsource.CredentialSource
 		val string
+		err error
 	}
-	fetched := make(map[SourceConfig]*fetchedSource)
-	refreshMap := make(map[SourceConfig]*pendingRefresh)
+	type credEntry struct {
+		cred   CredentialConfig
+		header string
+		source *pendingSource
+		first  bool
+	}
+	sources := make(map[SourceConfig]*pendingSource)
+	var unique []*pendingSource
+	var entries []credEntry
+	// New returns no Server on failure, so Stop never runs: release every
+	// source and Postgres resolver built here instead. Header sources join
+	// s.closers only once all of them loaded.
+	closersBase := len(s.closers)
+	defer func() {
+		if err == nil {
+			return
+		}
+		for _, ps := range unique {
+			if c, ok := ps.src.(io.Closer); ok {
+				_ = c.Close()
+			}
+		}
+		for _, c := range s.closers[closersBase:] {
+			_ = c.Close()
+		}
+		s.closers = s.closers[:closersBase]
+	}()
+	var sourceClosers []io.Closer
 
 	for _, cred := range cfg.Credentials {
 		if cred.Host == "" {
@@ -542,17 +573,10 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 			return fmt.Errorf("credential for %s: format %q is only supported with the Authorization header", cred.Host, cred.Format)
 		}
 
-		// Reuse a previously fetched source with the same config, avoiding
+		// Reuse a previously built source with the same config, avoiding
 		// redundant source construction (e.g., os.ReadFile for github-app keys).
-		if fs, ok := fetched[cred.Source]; ok {
-			val := fs.val
-			if strings.EqualFold(header, "Authorization") {
-				val = ensureAuthScheme(val, cred.Prefix, cred.Format)
-			}
-			s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
-			if _, ok := fs.src.(credentialsource.RefreshingSource); ok {
-				refreshMap[cred.Source].creds = append(refreshMap[cred.Source].creds, cred)
-			}
+		if ps, ok := sources[cred.Source]; ok {
+			entries = append(entries, credEntry{cred: cred, header: header, source: ps})
 			continue
 		}
 
@@ -579,34 +603,64 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) error {
 			}
 		}
 
-		fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		val, fetchErr := src.Fetch(fetchCtx)
-		cancel()
-		if fetchErr != nil {
-			return fmt.Errorf("credential for %s: fetch failed: %w", cred.Host, fetchErr)
+		ps := &pendingSource{src: src}
+		sources[cred.Source] = ps
+		unique = append(unique, ps)
+		entries = append(entries, credEntry{cred: cred, header: header, source: ps, first: true})
+	}
+
+	const maxConcurrentFetches = 16
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, maxConcurrentFetches)
+	for _, ps := range unique {
+		wg.Add(1)
+		slots <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-slots }()
+			fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			ps.val, ps.err = ps.src.Fetch(fetchCtx)
+		}()
+	}
+	wg.Wait()
+
+	refreshMap := make(map[*pendingSource]*pendingRefresh)
+	var refreshOrder []*pendingSource
+	for _, e := range entries {
+		if e.source.err != nil {
+			// Never include the credential value in the error.
+			return fmt.Errorf("credential for %s: fetch failed: %w", e.cred.Host, e.source.err)
 		}
-		fetched[cred.Source] = &fetchedSource{src: src, val: val}
-		if c, ok := src.(io.Closer); ok {
-			s.closers = append(s.closers, c)
+		if e.first {
+			if c, ok := e.source.src.(io.Closer); ok {
+				sourceClosers = append(sourceClosers, c)
+			}
 		}
 
 		// For Authorization headers, ensure the value includes an auth
 		// scheme prefix. In the CLI flow, providers handle this (e.g.,
 		// GitHub provider prepends "Bearer "). The gatekeeper bypasses
 		// providers, so we auto-detect the scheme from the token format.
-		if strings.EqualFold(header, "Authorization") {
-			val = ensureAuthScheme(val, cred.Prefix, cred.Format)
+		val := e.source.val
+		if strings.EqualFold(e.header, "Authorization") {
+			val = ensureAuthScheme(val, e.cred.Prefix, e.cred.Format)
 		}
+		s.proxy.SetCredentialWithGrant(e.cred.Host, e.header, val, e.cred.Grant)
 
-		s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
-
-		if rs, ok := src.(credentialsource.RefreshingSource); ok {
-			refreshMap[cred.Source] = &pendingRefresh{src: rs, creds: []CredentialConfig{cred}}
+		if rs, ok := e.source.src.(credentialsource.RefreshingSource); ok {
+			if pr, ok := refreshMap[e.source]; ok {
+				pr.creds = append(pr.creds, e.cred)
+			} else {
+				refreshMap[e.source] = &pendingRefresh{src: rs, creds: []CredentialConfig{e.cred}}
+				refreshOrder = append(refreshOrder, e.source)
+			}
 		}
 	}
 
-	for _, pr := range refreshMap {
-		s.pendingRefreshes = append(s.pendingRefreshes, *pr)
+	s.closers = append(s.closers, sourceClosers...)
+	for _, ps := range refreshOrder {
+		s.pendingRefreshes = append(s.pendingRefreshes, *refreshMap[ps])
 	}
 	return nil
 }

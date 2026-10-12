@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.25.2 — 2026-10-12
+
+### Changed
+
+- **Startup fetches distinct credential sources concurrently** (`gatekeeper.go`) — `loadCredentials` fetched each distinct source one after another before the listener opened. A production config holds about a dozen network sources (`gcp-secretmanager`, `gcp-service-account`, `github-app`), so a container needed about 1.5 s from start to listening. Sources are now built in config order, fetched at once (at most 16 in flight, each bounded by the same 10 s), and applied in config order. Behavior is unchanged: every credential is loaded before the listener accepts a connection, identical `source` blocks still share one fetch and one refresh goroutine, a build error (a bad source block, a missing key file) is reported before any fetch error, the first credential in the file whose fetch fails is the fetch error that stops startup, and no error carries a credential value. Host commands of `process` sources now run at the same time as other sources at startup. A failed startup closes every source it built. Refresh goroutines now start in config order instead of map order.
+
 ## v0.25.1 — 2026-10-05
 
 ### Fixed
