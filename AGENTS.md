@@ -122,6 +122,7 @@ Always work test-first. Write the test, run it and confirm it fails, then write 
 ## Code Style
 
 - Follow standard Go conventions and `go fmt` formatting
+- Follow the installed `.agents/skills/go-guide/SKILL.md` for Go layout, API design, concurrency, tests, and comments. Where it differs from this file, this file wins
 - Use `go vet` to catch common issues
 - No `internal/` packages — this is a library module meant to be imported
 
@@ -131,6 +132,10 @@ Always work test-first. Write the test, run it and confirm it fails, then write 
   - Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`, `build`, `ci`, `perf`
   - Scope is optional but encouraged (e.g., `feat(proxy): add header injection`)
 - Do not include `Co-Authored-By` lines for AI agents in commit messages
+
+## Architecture Review
+
+Judge every change against the architecture as a whole, not the diff alone. Apply the installed `.agents/skills/architecture-review/SKILL.md`, then `.github/skills/gatekeeper-architecture-review/SKILL.md`.
 
 ## Security Considerations
 

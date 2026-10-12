@@ -38,7 +38,12 @@ jobs:
           prompt: |
             Use the /code-review skill to review this pull request.
 
-            This is a standalone credential-injecting TLS proxy. Review with these priorities:
+            This is a standalone credential-injecting TLS proxy. Read the root
+            AGENTS.md first. Then read .agents/skills/architecture-review/SKILL.md
+            and .github/skills/gatekeeper-architecture-review/SKILL.md and apply
+            them, and .agents/skills/go-guide/SKILL.md for Go code: judge the
+            change against the architecture as a whole, not the diff alone.
+            Review with these priorities:
             - Security issues (credential leaks, injection, TLS configuration, TOCTOU)
             - Race conditions, deadlocks, missing synchronization
             - Bugs, logic errors, nil/zero-value pitfalls
