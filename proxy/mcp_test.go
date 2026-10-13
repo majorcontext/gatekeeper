@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -495,4 +497,38 @@ func (m *mockCredentialStore) GetToken(provider string) (string, error) {
 		return token, nil
 	}
 	return "", fmt.Errorf("credential not found")
+}
+
+func TestMCPRelay_CrossHostRedirectNotFollowed(t *testing.T) {
+	var secondHits atomic.Int32
+	var leaked atomic.Value
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondHits.Add(1)
+		leaked.Store(r.Header.Get("X-API-Key"))
+	}))
+	defer second.Close()
+	secondURL := strings.Replace(second.URL, "127.0.0.1", "localhost", 1)
+
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, secondURL, http.StatusFound)
+	}))
+	defer first.Close()
+
+	p := NewProxy()
+	p.SetMCPServers([]MCPServerConfig{{
+		Name: "redir",
+		URL:  first.URL,
+		Auth: &MCPAuthConfig{Grant: "k", Header: "X-API-Key"},
+	}})
+	p.credStore = &mockCredentialStore{tokens: map[string]string{"k": "sk-secret"}}
+
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("POST", "/mcp/redir", nil))
+
+	if rec.Code != http.StatusFound {
+		t.Errorf("status = %d, want 302 returned unfollowed", rec.Code)
+	}
+	if n := secondHits.Load(); n != 0 {
+		t.Errorf("redirect target received %d requests (X-API-Key=%v), want 0", n, leaked.Load())
+	}
 }
