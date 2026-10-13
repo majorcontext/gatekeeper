@@ -1109,7 +1109,7 @@ func (p *Proxy) applyTokenSubstitution(req *http.Request, sub *tokenSubstitution
 	}
 }
 
-// refusesCleartextInjection reports whether forwarding in over scheme http
+// refusesCleartextInjection reports whether forwarding the request over scheme http
 // would inject a secret that was not marked AllowInsecure.
 func (p *Proxy) refusesCleartextInjection(in *http.Request, scheme, lookupHost string, creds []credentialHeader) bool {
 	if !strings.EqualFold(scheme, "http") {

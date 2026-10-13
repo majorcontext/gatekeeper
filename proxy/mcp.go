@@ -121,14 +121,6 @@ func (p *Proxy) injectMCPCredentialsWithContext(ctxReq, targetReq *http.Request)
 		return // No matching MCP server
 	}
 
-	if strings.EqualFold(targetReq.URL.Scheme, "http") && !matchedServer.Auth.AllowInsecure {
-		slog.Warn("credential injection over plain HTTP refused",
-			"subsystem", "proxy",
-			"action", "refuse-cleartext",
-			"host", reqHost)
-		return
-	}
-
 	// Check if the specified header exists
 	headerValue := targetReq.Header.Get(matchedServer.Auth.Header)
 
@@ -156,6 +148,14 @@ func (p *Proxy) injectMCPCredentialsWithContext(ctxReq, targetReq *http.Request)
 				"header", matchedServer.Auth.Header,
 				"value", headerValue[:min(20, len(headerValue))]+"...")
 		}
+		return
+	}
+
+	if strings.EqualFold(targetReq.URL.Scheme, "http") && !matchedServer.Auth.AllowInsecure {
+		slog.Warn("credential injection over plain HTTP refused",
+			"subsystem", "proxy",
+			"action", "refuse-cleartext",
+			"host", reqHost)
 		return
 	}
 
