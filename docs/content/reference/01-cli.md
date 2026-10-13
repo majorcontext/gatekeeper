@@ -55,7 +55,7 @@ When unset, the version defaults to `"dev"`. The version appears in the startup 
 
 ## Signals
 
-Gatekeeper listens for `SIGTERM` and `SIGINT`. On receipt, it gracefully shuts down the HTTP server (5-second timeout), cancels background credential refresh goroutines, closes credential source connections, and flushes OpenTelemetry providers.
+Gatekeeper listens for `SIGTERM` and `SIGINT`. On receipt, it gracefully shuts down the HTTP server (5-second timeout), cancels background credential refresh goroutines and waits for in-flight refreshes, closes credential source connections, and flushes OpenTelemetry providers. The refresh wait shares the 5-second timeout; if a refresh is still running when it expires, gatekeeper leaves the credential source connections open and exits.
 
 ---
 

@@ -215,6 +215,8 @@ type Server struct {
 
 	pendingRefreshes []pendingRefresh
 	refreshCancel    context.CancelFunc
+	refreshWG        sync.WaitGroup
+	stopping         bool        // guarded by mu; set once Stop begins
 	closers          []io.Closer // credential sources that hold resources
 
 	// resolveSource overrides ResolveSource for testing. When non-nil,
@@ -738,7 +740,9 @@ func (s *Server) loadPostgresCredential(ctx context.Context, cred CredentialConf
 // api.github.com and github.com both using the same github-app), a single
 // goroutine refreshes the token and applies it to all of them.
 func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsource.RefreshingSource, creds []CredentialConfig) {
+	s.refreshWG.Add(1)
 	go func() {
+		defer s.refreshWG.Done()
 		backoff := time.Duration(0)
 		const maxBackoff = 60 * time.Second
 
@@ -762,6 +766,9 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 			rawVal, err := src.Fetch(fetchCtx)
 			cancel()
 
+			if ctx.Err() != nil {
+				return
+			}
 			if err != nil {
 				if backoff == 0 {
 					backoff = time.Second
@@ -807,9 +814,11 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 	}()
 }
 
-// refreshInterval returns 75% of TTL, floored at 30 seconds.
+var refreshFloor = 30 * time.Second
+
+// refreshInterval returns 75% of TTL, floored at refreshFloor.
 func refreshInterval(ttl time.Duration) time.Duration {
-	return max(ttl*3/4, 30*time.Second)
+	return max(ttl*3/4, refreshFloor)
 }
 
 // ensureAuthScheme ensures a credential value has an auth scheme prefix
@@ -1015,11 +1024,15 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	// Start background refresh goroutines for any RefreshingSource credentials.
-	refreshCtx, refreshCancel := context.WithCancel(context.Background())
-	s.refreshCancel = refreshCancel
-	for _, pr := range s.pendingRefreshes {
-		s.startCredentialRefresh(refreshCtx, pr.src, pr.creds)
+	s.mu.Lock()
+	if !s.stopping {
+		refreshCtx, refreshCancel := context.WithCancel(context.Background())
+		s.refreshCancel = refreshCancel
+		for _, pr := range s.pendingRefreshes {
+			s.startCredentialRefresh(refreshCtx, pr.src, pr.creds)
+		}
 	}
+	s.mu.Unlock()
 	s.pendingRefreshes = nil
 
 	// Block until context canceled, then shut down.
@@ -1030,18 +1043,34 @@ func (s *Server) Start(ctx context.Context) error {
 	return s.Stop(shutdownCtx)
 }
 
-// Stop gracefully shuts down the proxy server and all background refresh goroutines.
+// Stop gracefully shuts down the proxy server and all background refresh
+// goroutines. It waits for in-flight refreshes before closing credential
+// sources, up to ctx; if ctx expires first the sources stay open.
 func (s *Server) Stop(ctx context.Context) error {
 	if s.proxy != nil {
 		defer s.proxy.CloseIdleConnections()
 	}
-	if s.refreshCancel != nil {
-		s.refreshCancel()
+	s.mu.Lock()
+	s.stopping = true
+	cancelRefresh := s.refreshCancel
+	s.mu.Unlock()
+	if cancelRefresh != nil {
+		cancelRefresh()
 	}
-	for _, c := range s.closers {
-		if err := c.Close(); err != nil {
-			slog.Warn("credential source close failed", "error", err)
+	drained := make(chan struct{})
+	go func() {
+		s.refreshWG.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+		for _, c := range s.closers {
+			if err := c.Close(); err != nil {
+				slog.Warn("credential source close failed", "error", err)
+			}
 		}
+	case <-ctx.Done():
+		slog.Warn("credential refresh did not stop before the shutdown deadline; sources left open")
 	}
 	if s.logCleanup != nil {
 		defer s.logCleanup()

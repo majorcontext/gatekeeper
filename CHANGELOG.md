@@ -12,6 +12,10 @@ Gatekeeper is pre-1.0. The configuration schema and credential source interface 
 - **Relay clients return upstream redirects unfollowed** (`proxy/relay.go`, `proxy/mcp.go`) — `/relay/` and `/mcp/` followed redirects, so a redirect to another host carried injected headers such as `x-api-key` with it. The 3xx response now goes to the caller as is.
 - **Host-gateway loopback matching normalizes the host** (`proxy/proxy.go`) — when the gateway routes to loopback, any loopback or unspecified IP literal (`127.0.0.2`, `0.0.0.0`, `[::ffff:127.0.0.1]`), `localhost` in any case, and a trailing-dot form now follow the `AllowedHostPorts` restriction. Short forms such as `127.1` are not parsed.
 
+### Fixed
+
+- **`Server.Stop` waits for credential refreshes before closing sources** (`gatekeeper.go`) — `Stop` cancelled the refresh goroutines but did not wait, then closed the sources, so a refresh could run `Fetch` on a closed source, log a false "credential refresh failed", or set a credential after `Stop` returned. `Stop` now waits for the goroutines, bounded by its context; if the context expires first the sources are left open.
+
 ## v0.26.0 — 2026-10-13
 
 ### Added
