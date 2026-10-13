@@ -207,9 +207,9 @@ func TestCleartextMCPRefusedByDefault(t *testing.T) {
 
 		reached, gotKey = false, ""
 		req := httptest.NewRequest("GET", backend.URL, nil)
-		req.Header.Set("API_KEY", "moat-stub-mcp-svc")
+		req.Header.Set("API_KEY", "gatekeeper-stub-mcp-svc")
 		p.ServeHTTP(httptest.NewRecorder(), req)
-		if want := map[bool]string{false: "moat-stub-mcp-svc", true: cleartextSecret}[optIn]; gotKey != want {
+		if want := map[bool]string{false: "gatekeeper-stub-mcp-svc", true: cleartextSecret}[optIn]; gotKey != want {
 			t.Errorf("stub path (opt-in %v): upstream API_KEY = %q, want %q", optIn, gotKey, want)
 		}
 	}

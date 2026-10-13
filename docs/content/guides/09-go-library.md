@@ -136,6 +136,12 @@ Moat imports `github.com/majorcontext/gatekeeper/proxy` and layers a daemon on t
 
 Gatekeeper has no knowledge of moat. It exposes the `ContextResolver` hook and `RunContextData` struct; moat provides the implementation.
 
+## Branding
+
+Blocked responses, relay errors, MCP stub values, and a newly generated CA are neutral by default: blocked bodies start with `gatekeeper:`, the MCP stub prefix is `gatekeeper-stub-`, the CA subject is `Gatekeeper CA`, and `Proxy-Authenticate` uses the `Gatekeeper-Policy` scheme. Every blocked response (network policy, host service, Keep `http` and MCP scopes, LLM policy, cleartext-injection refusal) carries `X-Gatekeeper-Blocked` and the alias `X-Moat-Blocked` with the same value.
+
+An embedder phrases these differently with `Proxy.SetBranding(proxy.Branding{...})` (`Name`, `ErrorPrefix`, `PolicyScheme`, `MCPStubPrefix`, `NetworkHint`, `HostHint`, `GrantHint`) and `proxy.NewCAWithSubject(dir, organization, commonName)`. A CA loaded from disk keeps its own subject.
+
 ## OTel middleware
 
 Wrap the proxy with `NewOTelHandler` for OpenTelemetry instrumentation:

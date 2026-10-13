@@ -47,19 +47,6 @@ var mcpRelayClient = &http.Client{
 }
 
 // formatCredValue prepends "Bearer " for OAuth grants; returns raw value otherwise.
-// grantToCommand converts a grant name like "oauth:notion" or "mcp-context7"
-// to a CLI-friendly form suitable for use in "moat grant <args>" instructions.
-// Examples: "oauth:notion" → "oauth notion", "mcp-context7" → "mcp context7".
-func grantToCommand(grant string) string {
-	if parts := strings.SplitN(grant, ":", 2); len(parts) == 2 {
-		return parts[0] + " " + parts[1]
-	}
-	if after, ok := strings.CutPrefix(grant, "mcp-"); ok {
-		return "mcp " + after
-	}
-	return grant
-}
-
 func formatCredValue(grant, value string) string {
 	if strings.HasPrefix(grant, "oauth:") {
 		return "Bearer " + value
@@ -132,11 +119,12 @@ func (p *Proxy) injectMCPCredentialsWithContext(ctxReq, targetReq *http.Request)
 	}
 
 	// Check if header value is a stub
-	expectedStub := "moat-stub-" + matchedServer.Auth.Grant
+	stubPrefix := p.mcpStubPrefix()
+	expectedStub := stubPrefix + matchedServer.Auth.Grant
 	if headerValue != expectedStub {
 		// Not a stub - could be a real credential or different value
 		// Log debug if it looks like a stub but doesn't match
-		if strings.HasPrefix(headerValue, "moat-stub-") {
+		if strings.HasPrefix(headerValue, stubPrefix) {
 			slog.Debug("MCP request has stub-like header value that doesn't match expected grant",
 				"server", matchedServer.Name,
 				"header", matchedServer.Auth.Header,
@@ -177,7 +165,7 @@ func (p *Proxy) injectMCPCredentialsWithContext(ctxReq, targetReq *http.Request)
 			"action", "inject-error",
 			"server", matchedServer.Name,
 			"grant", matchedServer.Auth.Grant,
-			"fix", "Run: moat grant "+grantToCommand(matchedServer.Auth.Grant))
+			"fix", p.grantHint(matchedServer.Auth.Grant))
 		// Leave stub in place - request will fail with stub credential
 		return
 	}
@@ -241,8 +229,8 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 		// identify it. Mirrors the parallel unknown-relay-endpoint 404 in
 		// relay.go, which also carries no Err.
 		p.logExit(r, logBase, start, http.StatusNotFound, nil)
-		http.Error(w, fmt.Sprintf("MOAT: MCP server '%s' not configured. Available servers: %d. Check moat.yaml.",
-			serverName, len(mcpServers)), http.StatusNotFound)
+		http.Error(w, fmt.Sprintf("%s: MCP server '%s' not configured. Available servers: %d.",
+			p.errorPrefix(), serverName, len(mcpServers)), http.StatusNotFound)
 		return
 	}
 
@@ -250,7 +238,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	targetURL, err := url.Parse(mcpServer.URL)
 	if err != nil {
 		p.logExit(r, logBase, start, http.StatusInternalServerError, func(d *RequestLogData) { d.Err = err })
-		http.Error(w, fmt.Sprintf("MOAT: Invalid MCP server URL for '%s': %s", serverName, mcpServer.URL),
+		http.Error(w, fmt.Sprintf("%s: Invalid MCP server URL for '%s': %s", p.errorPrefix(), serverName, mcpServer.URL),
 			http.StatusInternalServerError)
 		return
 	}
@@ -304,7 +292,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 					d.Denied = true
 					d.DenyReason = "Keep policy fail-closed: MCP request body is not valid JSON"
 				})
-				http.Error(w, "Moat: MCP request blocked — invalid JSON body.", http.StatusForbidden)
+				p.writeMCPBlocked(w, p.brandName()+": MCP request blocked — invalid JSON body.")
 				return
 			}
 			if mcpReq.Method == "tools/call" && mcpReq.Params.Name != "" {
@@ -323,7 +311,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 						d.DenyReason = "Keep policy evaluation error"
 						d.Err = evalErr
 					})
-					http.Error(w, "Moat: MCP tool call blocked — policy evaluation error.", http.StatusForbidden)
+					p.writeMCPBlocked(w, p.brandName()+": MCP tool call blocked — policy evaluation error.")
 					return
 				}
 				switch result.Decision {
@@ -333,11 +321,11 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 						d.Denied = true
 						d.DenyReason = "Keep policy denied: " + result.Rule + " " + result.Message
 					})
-					msg := "Moat: MCP tool call blocked by policy."
+					msg := p.brandName() + ": MCP tool call blocked by policy."
 					if result.Message != "" {
 						msg += " " + result.Message
 					}
-					http.Error(w, msg, http.StatusForbidden)
+					p.writeMCPBlocked(w, msg)
 					return
 				case keeplib.Redact:
 					mutated := keeplib.ApplyMutations(mcpReq.Params.Arguments, result.Mutations)
@@ -352,7 +340,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 							d.DenyReason = "Keep policy redaction failed: could not unmarshal body"
 							d.Err = unmarshalErr
 						})
-						http.Error(w, "Moat: MCP tool call blocked — redaction failed.", http.StatusForbidden)
+						p.writeMCPBlocked(w, p.brandName()+": MCP tool call blocked — redaction failed.")
 						return
 					}
 					params, ok := raw["params"].(map[string]any)
@@ -365,7 +353,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 							d.DenyReason = "Keep policy redaction failed: body missing params map"
 							d.Err = errors.New("mutated MCP request lacked a params map")
 						})
-						http.Error(w, "Moat: MCP tool call blocked — redaction failed.", http.StatusForbidden)
+						p.writeMCPBlocked(w, p.brandName()+": MCP tool call blocked — redaction failed.")
 						return
 					}
 					params["arguments"] = mutated
@@ -379,7 +367,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 							d.DenyReason = "Keep policy redaction failed: could not marshal mutated body"
 							d.Err = marshalErr
 						})
-						http.Error(w, "Moat: MCP tool call blocked — redaction failed.", http.StatusForbidden)
+						p.writeMCPBlocked(w, p.brandName()+": MCP tool call blocked — redaction failed.")
 						return
 					}
 					bodyBytes = mutatedBody
@@ -458,8 +446,8 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 			p.logExit(r, logBase, start, http.StatusInternalServerError, func(d *RequestLogData) {
 				d.Err = fmt.Errorf("loading credential for MCP server %q (grant %q) returned empty", serverName, mcpServer.Auth.Grant)
 			})
-			http.Error(w, fmt.Sprintf("MOAT: Failed to load credential for '%s'. Grant: %s. Run: moat grant %s",
-				serverName, mcpServer.Auth.Grant, grantToCommand(mcpServer.Auth.Grant)),
+			http.Error(w, fmt.Sprintf("%s: Failed to load credential for '%s'. Grant: %s. %s",
+				p.errorPrefix(), serverName, mcpServer.Auth.Grant, p.grantHint(mcpServer.Auth.Grant)),
 				http.StatusInternalServerError)
 			return
 		}
@@ -481,8 +469,8 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 			d.InjectedHeaders = injectedHeaders
 			d.Grants = grants
 		})
-		http.Error(w, fmt.Sprintf("MOAT: Failed to connect to MCP server '%s' at %s: %v",
-			serverName, targetURL.String(), err), http.StatusBadGateway)
+		http.Error(w, fmt.Sprintf("%s: Failed to connect to MCP server '%s' at %s: %v",
+			p.errorPrefix(), serverName, targetURL.String(), err), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()

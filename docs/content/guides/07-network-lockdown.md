@@ -36,7 +36,7 @@ network:
     - "*.anthropic.com"
 ```
 
-Requests to unlisted hosts receive an HTTP `407` response with a `Proxy-Authenticate: Moat-Policy` header.
+Requests to unlisted hosts receive an HTTP `407` response with a `Proxy-Authenticate: Gatekeeper-Policy` header.
 
 ## Glob patterns
 

@@ -63,8 +63,8 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// Do MITM interception when we have a CA configured.
 	//
 	// Security note: This intercepts ALL HTTPS traffic, not just credential-injected hosts.
-	// This is intentional for full observability - a core Moat feature. The container
-	// trusts our CA (mounted at /etc/ssl/certs/moat-ca/) and we verify upstream certs.
+	// This is intentional for full observability - a core feature. The container
+	// trusts our CA and we verify upstream certs.
 	//
 	// Applications with certificate pinning may fail. This is expected behavior since
 	// observability requires seeing all traffic.
@@ -100,7 +100,7 @@ func (p *Proxy) handleConnectTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 	targetConn, err := net.DialTimeout("tcp", dialAddr, connectTunnelDialTimeout)
 	if err != nil {
-		http.Error(w, "moat proxy: dial upstream failed", http.StatusBadGateway)
+		http.Error(w, p.errorPrefix()+": dial upstream failed", http.StatusBadGateway)
 		return
 	}
 

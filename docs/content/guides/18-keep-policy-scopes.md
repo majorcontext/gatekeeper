@@ -34,7 +34,7 @@ A run with no entry for a given key simply skips that check — Keep evaluation 
 
 Runs after [network policy](../concepts/04-network-policy.md) allows a request, on the plaintext request produced by TLS interception. Unlike network policy, it can inspect the request body, not just the host.
 
-**Denial:** `403 Forbidden`, header `X-Moat-Blocked: keep-policy`, `Content-Type: text/plain`, a plaintext body naming the host (and, for evaluation-error denials, a generic "policy evaluation error" — the specific evaluator error is not echoed to the client).
+**Denial:** `403 Forbidden`, header `X-Gatekeeper-Blocked: keep-policy` (also sent as `X-Moat-Blocked`), `Content-Type: text/plain`, a plaintext body naming the host (and, for evaluation-error denials, a generic "policy evaluation error" — the specific evaluator error is not echoed to the client).
 
 **Fail-closed conditions.** The engine's rules determine whether a body is needed at all (`eng.RequiresBody("http")`); when it is, gatekeeper reads and parses it before evaluation, and any of the following denies the request rather than passing it through unevaluated:
 
@@ -58,13 +58,13 @@ Evaluated inside the [MCP relay](./16-mcp-relay.md) handler, before the request 
 
 **Fail-closed condition:** once an engine is configured for a server, *every* request body to that server must parse as JSON, not just `tools/call` bodies — gatekeeper reads and unmarshals the body before it can even check the method name, and denies with `403` if that unmarshal fails. Only a body that does parse as JSON goes on to the method check above, where non-`tools/call` requests (and `tools/call` requests with an empty tool name) pass through without Keep evaluation.
 
-> **Note:** This scope does not set `X-Moat-Blocked`. All of its denial responses use a plain `http.Error` call with no policy header, unlike the `http` and `llm-gateway` scopes below. Don't rely on the header's presence to detect an MCP-scope denial in logs or client-side handling — use the response body and the `mcp.tool_call` operation in the policy log instead (see [Observability](#observability)).
+> **Note:** This scope sets `X-Gatekeeper-Blocked: mcp-policy` (also sent as `X-Moat-Blocked`) on every `403` denial, including the fail-closed invalid-JSON and evaluation-error denials. The `mcp.tool_call` operation in the policy log still carries the rule detail (see [Observability](#observability)).
 
 ## `llm-gateway` scope
 
 Evaluated on the response side, inside `ModifyResponse`, and gated on two hardcoded conditions: the response status must be exactly `200`, and the request host must be exactly `api.anthropic.com` (a literal string comparison, not a configurable pattern). A non-200 response, or a response from any other host, is never evaluated even when `KeepEngines["llm-gateway"]` is set.
 
-**Denial:** `400 Bad Request` (not `403` — this scope replaces the response body rather than blocking a forward-in-progress), `Content-Type: application/json`, header `X-Moat-Blocked: llm-policy`, JSON body:
+**Denial:** `400 Bad Request` (not `403` — this scope replaces the response body rather than blocking a forward-in-progress), `Content-Type: application/json`, header `X-Gatekeeper-Blocked: llm-policy` (also sent as `X-Moat-Blocked`), JSON body:
 
 ```json
 {
@@ -119,7 +119,7 @@ This logger fires only on denials — there is no corresponding "allow" log line
 
 Each denial also, when a trace context is present, adds a `policy.denial` span event (attributes: `scope`, `operation`, `rule`, `message`) and increments the `proxy.policy.denials` counter with `proxy.policy.scope` and `proxy.policy.rule` attributes. See [OpenTelemetry](./08-opentelemetry.md).
 
-### X-Moat-Blocked header values
+### X-Gatekeeper-Blocked header values
 
 | Value | Scope/layer | Status |
 |---|---|---|
@@ -127,7 +127,8 @@ Each denial also, when a trace context is present, adds a `policy.denial` span e
 | `host-service` | Host gateway | `407` |
 | `keep-policy` | `http` scope | `403` |
 | `llm-policy` | `llm-gateway` scope | `400` |
-| *(none)* | `mcp-<server-name>` scope | `403` |
+| `mcp-policy` | `mcp-<server-name>` scope | `403` |
+| `cleartext-credential` | Credential injection over plain HTTP refused | `403` |
 
 ## Next steps
 

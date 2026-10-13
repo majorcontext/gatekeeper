@@ -131,6 +131,7 @@ func TestMCPRelay_MissingCredential(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("POST", "/mcp/context7", strings.NewReader("{}"))
+	p.SetBranding(Branding{GrantHint: func(grant string) string { return "Run: grant " + grant }})
 	rec := httptest.NewRecorder()
 	p.handleMCPRelay(rec, req)
 
@@ -143,7 +144,7 @@ func TestMCPRelay_MissingCredential(t *testing.T) {
 	if !strings.Contains(body, "Failed to load credential") {
 		t.Errorf("error should mention failed to load credential, got: %s", body)
 	}
-	if !strings.Contains(body, "moat grant mcp context7") {
+	if !strings.Contains(body, "Run: grant mcp-context7") {
 		t.Errorf("error should suggest grant command, got: %s", body)
 	}
 }

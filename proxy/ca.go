@@ -42,10 +42,22 @@ type certCacheEntry struct {
 // CONNECT to many hostnames cannot grow memory without limit.
 const defaultCertCacheMax = 1024
 
+const (
+	defaultCAOrganization = "Gatekeeper"
+	defaultCACommonName   = "Gatekeeper CA"
+)
+
 // NewCA creates or loads a CA certificate.
 // If the CA files exist at the given path, they are loaded.
 // Otherwise, a new CA is generated and saved.
 func NewCA(caDir string) (*CA, error) {
+	return NewCAWithSubject(caDir, defaultCAOrganization, defaultCACommonName)
+}
+
+// NewCAWithSubject is NewCA with the subject of a newly generated CA set to
+// the given organization and common name. A CA loaded from caDir keeps the
+// subject it was created with.
+func NewCAWithSubject(caDir, organization, commonName string) (*CA, error) {
 	certPath := filepath.Join(caDir, "ca.crt")
 	keyPath := filepath.Join(caDir, "ca.key")
 
@@ -57,7 +69,7 @@ func NewCA(caDir string) (*CA, error) {
 	}
 
 	// Generate new CA
-	ca, err := generateCA()
+	ca, err := generateCASubject(organization, commonName)
 	if err != nil {
 		return nil, err
 	}
@@ -133,6 +145,10 @@ func parsePrivateKey(block *pem.Block) (crypto.Signer, error) {
 
 // generateCA creates a new CA certificate and key.
 func generateCA() (*CA, error) {
+	return generateCASubject(defaultCAOrganization, defaultCACommonName)
+}
+
+func generateCASubject(organization, commonName string) (*CA, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, fmt.Errorf("generating CA key: %w", err)
@@ -148,8 +164,8 @@ func generateCA() (*CA, error) {
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject: pkix.Name{
-			Organization: []string{"Moat"},
-			CommonName:   "Moat CA",
+			Organization: []string{organization},
+			CommonName:   commonName,
 		},
 		NotBefore:             time.Now(),
 		NotAfter:              time.Now().AddDate(10, 0, 0), // 10 years
@@ -215,7 +231,7 @@ func (ca *CA) GenerateCert(host string) (*tls.Certificate, error) {
 	template := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
-			Organization: []string{"Moat"},
+			Organization: ca.cert.Subject.Organization,
 			CommonName:   host,
 		},
 		NotBefore:   time.Now(),

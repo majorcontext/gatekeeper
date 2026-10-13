@@ -131,12 +131,12 @@ The relay endpoint above is one of two ways credentials reach an MCP server.
 
 **Relay mode** (`/mcp/{server-name}`, shown above): the client talks to gatekeeper's relay endpoint directly. Gatekeeper resolves the grant and sets the header on the outgoing request unconditionally.
 
-**Stub-replacement mode**: when an MCP client instead routes through the CONNECT proxy (`HTTP_PROXY`) to an MCP server's real hostname, gatekeeper inspects the configured `Auth.Header` on the intercepted request. If its value exactly matches `moat-stub-{grant}`, gatekeeper replaces it with the real credential; any other value (including a credential the client already holds) is left untouched. This mode requires a CA — TLS interception is what lets gatekeeper read and rewrite the header. See [CA Setup](./01-ca-setup.md).
+**Stub-replacement mode**: when an MCP client instead routes through the CONNECT proxy (`HTTP_PROXY`) to an MCP server's real hostname, gatekeeper inspects the configured `Auth.Header` on the intercepted request. If its value exactly matches `gatekeeper-stub-{grant}` (the prefix is `Branding.MCPStubPrefix`), gatekeeper replaces it with the real credential; any other value (including a credential the client already holds) is left untouched. This mode requires a CA — TLS interception is what lets gatekeeper read and rewrite the header. See [CA Setup](./01-ca-setup.md).
 
 ```bash
 # Client sends a stub value through the CONNECT proxy:
 curl --cacert ca.crt --proxy http://127.0.0.1:9080 \
-  -H "Authorization: moat-stub-mcp-context7" \
+  -H "Authorization: gatekeeper-stub-mcp-context7" \
   https://mcp.context7.com/mcp/v1/endpoint
 ```
 
@@ -165,7 +165,7 @@ MCP responses that use Server-Sent Events stream through the relay as they arriv
 | `500` | The server's configured `URL` failed to parse, reading the request body for Keep evaluation failed, the credential for the grant resolved empty, or building the outgoing request failed |
 | `502` | Gatekeeper reached out to the real MCP server and the connection failed |
 
-The `404` and `500` bodies include diagnostic detail (available server count, the grant name, a suggested `moat grant` command) meant for an operator or coding agent reading the response, not for display to an end user.
+The `404` and `500` bodies include diagnostic detail (available server count, the grant name, the hint from `Branding.GrantHint`, if set) meant for an operator or coding agent reading the response, not for display to an end user.
 
 ## Next steps
 

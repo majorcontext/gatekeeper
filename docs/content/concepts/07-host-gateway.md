@@ -52,7 +52,7 @@ This is a security boundary. Without port restrictions, a container can reach an
 
 The `AllowedHostPorts` field in `RunContextData` lists the permitted ports. This is configured programmatically — not through `gatekeeper.yaml`. Moat sets this field when registering runs.
 
-Requests to unlisted ports receive a `407` response with an `X-Moat-Blocked: host-service` header and a message indicating which port was denied and how to allow it.
+Requests to unlisted ports receive a `407` response with an `X-Gatekeeper-Blocked: host-service` (also sent as `X-Moat-Blocked`) header and a message indicating which port was denied and how to allow it.
 
 ## Credential matching across gateway and loopback
 

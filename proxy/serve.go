@@ -342,7 +342,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		logData.Duration = time.Since(start)
 		logData.Err = err
 		p.logRequest(r, logData)
-		http.Error(w, "moat proxy: upstream request failed", http.StatusBadGateway)
+		http.Error(w, p.errorPrefix()+": upstream request failed", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
