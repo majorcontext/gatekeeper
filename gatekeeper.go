@@ -3,10 +3,6 @@
 // Credentials are pre-configured in gatekeeper.yaml and injected for all
 // proxied requests matching the host. Access control is via network policy
 // (who can reach the proxy) and an optional static auth token.
-//
-// For per-caller credential isolation (run registration, token-scoped
-// credentials), use the daemon package, which provides a management API
-// over a Unix socket.
 package gatekeeper
 
 import (

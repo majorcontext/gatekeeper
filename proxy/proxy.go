@@ -1194,16 +1194,10 @@ func bareHost(host string) string {
 	return host
 }
 
-// matchWildcardHostKey reports whether a wildcard host map key like
-// "*.example.com" matches the request host, given the pre-lowercased host
-// and bare (port-stripped) host. "*.example.com" matches "api.example.com"
-// and "a.b.example.com", never "example.com" itself. This applies the same
-// suffix rule as hostHasSuffixFold (matchesPattern's wildcard branch),
-// inlined against the pre-lowered inputs so the per-key scan does not
-// re-lower the host — a semantic change to one must be mirrored in the
-// other. A port-less key matches the port-stripped host (any port); a key
-// carrying a port ("*.example.com:8443") matches the full host:port, so the
-// port must match exactly.
+// matchWildcardHostKey reports whether a wildcard key like "*.example.com"
+// matches the pre-lowercased host or port-stripped bare host. It mirrors
+// hostHasSuffixFold; change them together. A key with a port matches host:port
+// exactly.
 func matchWildcardHostKey(key, lowerHost, lowerBare string) bool {
 	if !strings.HasPrefix(key, "*.") {
 		return false
@@ -2909,8 +2903,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			// Credentials were resolved in the wrapping handler and passed via context.
 			creds, _ := pr.Out.Context().Value(interceptCredsKey{}).([]credentialHeader)
 
-			// Snapshot headers before credential injection so logs don't
-			// contain raw credential values (CLAUDE.md: never log credential values).
+			// Snapshot headers before injection so logs never hold credential values.
 			preInjectionHeaders, _ := pr.Out.Context().Value(interceptPreInjHeadersKey{}).(http.Header)
 			if preInjectionHeaders == nil {
 				preInjectionHeaders = pr.Out.Header.Clone()
@@ -2935,7 +2928,6 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			ctx = context.WithValue(ctx, interceptLogURLKey{}, logURL)
 			*pr.Out = *pr.Out.WithContext(ctx)
 
-			// Request ID.
 			if pr.Out.Header.Get("X-Request-Id") == "" {
 				pr.Out.Header.Set("X-Request-Id", newRequestID())
 			}

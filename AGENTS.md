@@ -52,7 +52,7 @@ credentialsource/   Pluggable credential backends
   githubapp.go       GitHub App installation token source
   tokenexchange.go   RFC 8693 token exchange source
   neon.go            Neon endpoint parsing + per-branch Postgres password resolver
-  httputil.go        Shared bounded token-response reader (readTokenResponse)
+  tokenresponse.go   Shared bounded token-response reader (readTokenResponse)
   jwt.go             Shared RS256 JWT signing (signRS256JWT)
 
 cmd/gatekeeper/     CLI entry point (--config flag), logging setup (logging.go), OTel providers (main.go)

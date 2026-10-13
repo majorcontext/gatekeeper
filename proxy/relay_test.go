@@ -91,7 +91,7 @@ func TestRelay_InjectsCredentials(t *testing.T) {
 // directly (via the NO_PROXY bypass in ServeHTTP), so it never went through
 // the CONNECT/plain-HTTP auth chain at all. A caller presenting another
 // instance's still-valid password could reach getCredentialsForRequest and
-// the STS behind it, exactly like the CONNECT path this PR already fixed.
+// the STS behind it, exactly like the CONNECT path.
 // A resolver call here stands in for the STS round trip a real
 // token-exchange credential would make.
 func TestRelay_MismatchedAuthTokenRejectedBeforeResolver(t *testing.T) {

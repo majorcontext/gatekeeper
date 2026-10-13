@@ -290,23 +290,9 @@ func (d *Demux) StopAccepting() error {
 // rather than tearing down the listener, and only an intentional shutdown
 // (d.closed set) exits the loop.
 //
-// This resilience is load-bearing precisely because acceptLoop is the SOLE
-// caller of Accept on the real socket in multiplex mode: http.Server.Serve
-// runs against the virtual listener (see virtualListener), which never
-// surfaces an OS-level Accept error, so http.Server's own accept-retry loop
-// can no longer see — let alone recover from — a transient failure on the
-// real socket. Returning here on the first transient error (EMFILE/ENFILE
-// under fd exhaustion, ECONNABORTED — realistic for a proxy holding many
-// long-lived CONNECT tunnels and Postgres relays) would kill accept for BOTH
-// planes until process restart, silently dropping the resilience the HTTP
-// plane had before it was multiplexed.
-//
-// Unlike net/http, this does not gate the retry on the deprecated and
-// unreliable net.Error.Temporary(): any error while the listener is still
-// live is treated as transient and retried. On a genuinely dead-but-unclosed
-// listener that means retrying once per second forever, each attempt logged
-// at WARN — the same acceptable, visible pathological case net/http tolerates
-// via its own capped backoff, not a tight zero-delay spin.
+// acceptLoop is the sole caller of Accept on the real socket, so exiting on a
+// transient error would stop accepting for both planes. Any error while the
+// listener is live is retried, each attempt logged at WARN.
 func (d *Demux) acceptLoop() {
 	var backoff time.Duration
 	for {

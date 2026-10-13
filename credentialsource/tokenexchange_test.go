@@ -205,7 +205,7 @@ func cachedTTL(t *testing.T, src *TokenExchangeSource, subject, actor string) ti
 	return time.Until(entry.expiresAt)
 }
 
-// The STS may advertise a very long expires_in — Neptune returns the remaining
+// The STS may advertise a very long expires_in, such as the remaining
 // lifetime of the underlying GitHub token, which can be hours. That token can be
 // revoked or rotated upstream at any moment, so caching it for the full window
 // means gatekeeper keeps injecting a stale credential (and the destination keeps

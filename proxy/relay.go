@@ -144,7 +144,6 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Copy headers (skip proxy-specific ones)
 	for key, values := range r.Header {
 		if key == "Proxy-Authorization" || key == "Proxy-Connection" {
 			continue
