@@ -1384,65 +1384,6 @@ func TestProxy_GetCredentialResolver_WildcardKey(t *testing.T) {
 	}
 }
 
-// TestProxy_GetCredentialsForRequest_RunContextWildcardKey verifies that
-// wildcard credential host keys work in RunContextData mode (per-run
-// credentials), not just in the proxy-level credentials map.
-func TestProxy_GetCredentialsForRequest_RunContextWildcardKey(t *testing.T) {
-	p := NewProxy()
-	rc := &RunContextData{
-		Credentials: map[string][]credentialHeader{
-			"*.box.example.com": {{Name: "Cf-Access-Client-Id", Value: "client-id-123", Grant: "cloudflare-access"}},
-		},
-	}
-	req := httptest.NewRequest("GET", "https://alpha.box.example.com/", nil)
-	req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
-
-	creds, err := p.getCredentialsForRequest(req, req, "alpha.box.example.com")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest: %v", err)
-	}
-	if len(creds) != 1 || creds[0].Grant != "cloudflare-access" {
-		t.Fatalf("getCredentialsForRequest(alpha.box.example.com) = %v, want cloudflare-access credential", creds)
-	}
-
-	apexCreds, err := p.getCredentialsForRequest(req, req, "box.example.com")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest(apex): %v", err)
-	}
-	if len(apexCreds) != 0 {
-		t.Fatalf("getCredentialsForRequest(box.example.com) = %v, want none (apex excluded)", apexCreds)
-	}
-}
-
-// TestProxy_GetCredentialsForRequest_ExactStaticBeatsWildcardResolver verifies
-// cross-map precedence: an exact-keyed static credential wins over a
-// wildcard-keyed resolver for the same host, while the resolver still serves
-// hosts with no exact static entry.
-func TestProxy_GetCredentialsForRequest_ExactStaticBeatsWildcardResolver(t *testing.T) {
-	p := NewProxy()
-	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
-	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "resolver-grant"}}, nil
-	})
-	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
-
-	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest: %v", err)
-	}
-	if len(creds) != 1 || creds[0].Grant != "static-grant" {
-		t.Fatalf("getCredentialsForRequest(api.example.com) grant = %v, want static-grant (exact static must beat wildcard resolver)", creds)
-	}
-
-	creds, err = p.getCredentialsForRequest(req, req, "other.example.com")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest(other): %v", err)
-	}
-	if len(creds) != 1 || creds[0].Grant != "resolver-grant" {
-		t.Fatalf("getCredentialsForRequest(other.example.com) grant = %v, want resolver-grant", creds)
-	}
-}
-
 // TestProxy_GetCredentials_MixedCaseHost verifies that a mixed-case request
 // host still resolves its exact-keyed credential in preference to a wildcard
 // key: exact matching must be as case-insensitive as wildcard matching, or
@@ -1481,51 +1422,6 @@ func TestProxy_GetCredentials_CaseVariantKeysDeterministic(t *testing.T) {
 		if creds[0].Grant != "upper-grant" {
 			t.Fatalf("iteration %d: grant = %q, want %q (lexicographically smallest case-variant key must win)", i, creds[0].Grant, "upper-grant")
 		}
-	}
-}
-
-// TestProxy_GetCredentialsForRequest_MoreSpecificWildcardStaticBeatsResolver
-// verifies cross-map wildcard specificity: when a static credential and a
-// resolver both match via wildcard keys, the more specific (longer) key wins
-// regardless of which map it lives in.
-func TestProxy_GetCredentialsForRequest_MoreSpecificWildcardStaticBeatsResolver(t *testing.T) {
-	p := NewProxy()
-	p.SetCredentialWithGrant("*.api.example.com", "Authorization", "Bearer static-token", "static-grant")
-	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "resolver-grant"}}, nil
-	})
-	req := httptest.NewRequest("GET", "https://svc.api.example.com/", nil)
-
-	creds, err := p.getCredentialsForRequest(req, req, "svc.api.example.com")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest: %v", err)
-	}
-	if len(creds) != 1 || creds[0].Grant != "static-grant" {
-		t.Fatalf("grant = %v, want static-grant (*.api.example.com static must beat *.example.com resolver)", creds)
-	}
-}
-
-// TestProxy_GetCredentialsForRequest_EmptyExactEntryFallsThrough verifies
-// that a present-but-empty entry in an embedder-supplied RunContextData
-// credentials map does not shadow a populated bare-host entry — matching the
-// pre-refactor len>0 gating.
-func TestProxy_GetCredentialsForRequest_EmptyExactEntryFallsThrough(t *testing.T) {
-	p := NewProxy()
-	rc := &RunContextData{
-		Credentials: map[string][]credentialHeader{
-			"api.example.com:443": {},
-			"api.example.com":     {{Name: "Authorization", Value: "Bearer tok", Grant: "the-grant"}},
-		},
-	}
-	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
-	req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
-
-	creds, err := p.getCredentialsForRequest(req, req, "api.example.com:443")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest: %v", err)
-	}
-	if len(creds) != 1 || creds[0].Grant != "the-grant" {
-		t.Fatalf("creds = %v, want the-grant credential (empty exact entry must not shadow bare-host entry)", creds)
 	}
 }
 
@@ -1583,27 +1479,6 @@ func TestProxy_GetCredentials_CaseVariantWildcardKeysDeterministic(t *testing.T)
 		if creds[0].Grant != "upper-grant" {
 			t.Fatalf("iteration %d: grant = %q, want %q (lexicographically smallest wildcard key must win)", i, creds[0].Grant, "upper-grant")
 		}
-	}
-}
-
-// TestProxy_GetCredentialsForRequest_StaticReadAfterResolverMiss verifies
-// that when a resolver returns nil, the static-credential fallback reads the
-// map fresh rather than a snapshot taken before the resolver ran — a token
-// refresh landing during a slow resolver call must not be missed.
-func TestProxy_GetCredentialsForRequest_StaticReadAfterResolverMiss(t *testing.T) {
-	p := NewProxy()
-	p.SetCredentialResolver("api.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-		p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer refreshed", "refreshed-grant")
-		return nil, nil
-	})
-	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
-
-	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest: %v", err)
-	}
-	if len(creds) != 1 || creds[0].Grant != "refreshed-grant" {
-		t.Fatalf("creds = %v, want refreshed-grant (static fallback must read fresh after resolver miss)", creds)
 	}
 }
 
@@ -4334,106 +4209,12 @@ func TestNewTokenSubstitution(t *testing.T) {
 	}
 }
 
-// TestProxy_GetCredentialsForRequest_CaseFoldPortBearingExactKey verifies
-// that the case-insensitive exact tier also folds port-bearing keys
-// (expressible in embedder-built RunContextData maps): a case-variant
-// host:port must hit its exact entry, not fall through to a wildcard.
-func TestProxy_GetCredentialsForRequest_CaseFoldPortBearingExactKey(t *testing.T) {
-	p := NewProxy()
-	rc := &RunContextData{
-		Credentials: map[string][]credentialHeader{
-			"internal.example.com:8443": {{Name: "Authorization", Value: "Bearer exact", Grant: "exact-grant"}},
-			"*.example.com:8443":        {{Name: "Authorization", Value: "Bearer wild", Grant: "wild-grant"}},
-		},
-	}
-	req := httptest.NewRequest("GET", "https://internal.example.com:8443/", nil)
-	req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
-
-	creds, err := p.getCredentialsForRequest(req, req, "Internal.example.com:8443")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest: %v", err)
-	}
-	if len(creds) != 1 || creds[0].Grant != "exact-grant" {
-		t.Fatalf("grant = %v, want exact-grant (case-variant host:port must hit its port-bearing exact key)", creds)
-	}
-}
-
-// TestProxy_GetCredentialsForRequest_WildcardSpecificityIgnoresPort verifies
-// that wildcard specificity is ranked by the domain part of the key, not raw
-// byte length: a port suffix must not make a domain-broader key outrank a
-// domain-narrower one, while at equal domain specificity a port-pinned key
-// beats a port-less one.
-func TestProxy_GetCredentialsForRequest_WildcardSpecificityIgnoresPort(t *testing.T) {
-	p := NewProxy()
-	rc := &RunContextData{
-		Credentials: map[string][]credentialHeader{
-			"*.example.com:8443": {{Name: "Authorization", Value: "Bearer broad", Grant: "broad-grant"}},
-			"*.api.example.com":  {{Name: "Authorization", Value: "Bearer narrow", Grant: "narrow-grant"}},
-		},
-	}
-	req := httptest.NewRequest("GET", "https://svc.api.example.com:8443/", nil)
-	req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
-
-	creds, err := p.getCredentialsForRequest(req, req, "svc.api.example.com:8443")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest: %v", err)
-	}
-	if len(creds) != 1 || creds[0].Grant != "narrow-grant" {
-		t.Fatalf("grant = %v, want narrow-grant (domain specificity must outrank a port suffix)", creds)
-	}
-
-	rc2 := &RunContextData{
-		Credentials: map[string][]credentialHeader{
-			"*.api.example.com:8443": {{Name: "Authorization", Value: "Bearer pinned", Grant: "pinned-grant"}},
-			"*.api.example.com":      {{Name: "Authorization", Value: "Bearer plain", Grant: "plain-grant"}},
-		},
-	}
-	req2 := httptest.NewRequest("GET", "https://svc.api.example.com:8443/", nil)
-	req2 = req2.WithContext(context.WithValue(req2.Context(), runContextKey, rc2))
-
-	creds, err = p.getCredentialsForRequest(req2, req2, "svc.api.example.com:8443")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest: %v", err)
-	}
-	if len(creds) != 1 || creds[0].Grant != "pinned-grant" {
-		t.Fatalf("grant = %v, want pinned-grant (port-pinned key beats port-less at equal domain)", creds)
-	}
-}
-
-// TestProxy_GetCredentialsForRequest_FoldTierPortPrecedence verifies that
-// the case-insensitive exact tier keeps the verbatim tiers' precedence: a
-// key fold-matching the full host:port beats a key fold-matching only the
-// bare host, so request-host casing cannot flip which credential is sent.
-func TestProxy_GetCredentialsForRequest_FoldTierPortPrecedence(t *testing.T) {
-	p := NewProxy()
-	rc := &RunContextData{
-		Credentials: map[string][]credentialHeader{
-			"API.example.com":      {{Name: "Authorization", Value: "Bearer portless", Grant: "portless-grant"}},
-			"API.example.com:8443": {{Name: "Authorization", Value: "Bearer pinned", Grant: "pinned-grant"}},
-		},
-	}
-	req := httptest.NewRequest("GET", "https://api.example.com:8443/", nil)
-	req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
-
-	// Repeat: a map-iteration-order-dependent pick must not pass by luck.
-	for i := range 100 {
-		creds, err := p.getCredentialsForRequest(req, req, "api.example.com:8443")
-		if err != nil {
-			t.Fatalf("getCredentialsForRequest: %v", err)
-		}
-		if len(creds) != 1 || creds[0].Grant != "pinned-grant" {
-			t.Fatalf("iteration %d: creds = %v, want pinned-grant (host:port fold match must beat bare fold match)", i, creds)
-		}
-	}
-}
-
 // TestProxy_HostKeyedMaps_EmptyEntryOptOut verifies presence-based exact
 // matching for the companion host-keyed maps: an embedder-supplied explicit
 // empty/nil entry for host:port opts that port out, suppressing both the
 // bare-host entry and any wildcard entry — the pre-wildcard behavior for
 // these maps, which embedders may rely on to keep secrets off specific
-// ports. (Credentials keep their historical len>0 gating instead; see
-// TestProxy_GetCredentialsForRequest_EmptyExactEntryFallsThrough.)
+// ports. Credentials keep their historical len>0 gating instead.
 func TestProxy_HostKeyedMaps_EmptyEntryOptOut(t *testing.T) {
 	const optedOut = "internal.example.com:8443"
 	p := NewProxy()
@@ -4469,65 +4250,6 @@ func TestProxy_HostKeyedMaps_EmptyEntryOptOut(t *testing.T) {
 	}
 	if got := p.getResponseTransformersForRequest(req, optedOut); len(got) != 0 {
 		t.Errorf("getResponseTransformersForRequest(%q) returned %d transformers, want none (explicit nil entry opts the port out)", optedOut, len(got))
-	}
-}
-
-// TestProxy_GetCredentialsForRequest_NilResolverOptOut verifies that an
-// explicitly-nil resolver entry disables resolution for that host — the
-// pre-wildcard behavior, where the nil exact entry was found and treated as
-// "no resolver" — instead of being skipped so a broader wildcard resolver
-// fires for a host the embedder deliberately opted out.
-func TestProxy_GetCredentialsForRequest_NilResolverOptOut(t *testing.T) {
-	p := NewProxy()
-	var invoked atomic.Bool
-	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-		invoked.Store(true)
-		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "resolver-grant"}}, nil
-	})
-	p.SetCredentialResolver("api.example.com", nil)
-	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
-	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
-
-	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest: %v", err)
-	}
-	if invoked.Load() {
-		t.Fatal("wildcard resolver ran for a host whose resolver was explicitly set to nil (opt-out must block broader resolvers)")
-	}
-	if len(creds) != 1 || creds[0].Grant != "static-grant" {
-		t.Fatalf("creds = %v, want static-grant", creds)
-	}
-
-	// The wildcard resolver still serves hosts that were not opted out.
-	creds, err = p.getCredentialsForRequest(req, req, "other.example.com")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest(other): %v", err)
-	}
-	if len(creds) != 1 || creds[0].Grant != "resolver-grant" {
-		t.Fatalf("creds = %v, want resolver-grant", creds)
-	}
-}
-
-// TestProxy_GetCredentialsForRequest_VerbatimStaticBeatsFoldResolver
-// verifies cross-map rank distinguishes verbatim from case-fold exact
-// matches: a static credential registered under the host's verbatim casing
-// beats a resolver whose key matches only by case folding — the same order
-// the tiers use inside a single map.
-func TestProxy_GetCredentialsForRequest_VerbatimStaticBeatsFoldResolver(t *testing.T) {
-	p := NewProxy()
-	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
-	p.SetCredentialResolver("API.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "resolver-grant"}}, nil
-	})
-	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
-
-	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest: %v", err)
-	}
-	if len(creds) != 1 || creds[0].Grant != "static-grant" {
-		t.Fatalf("creds = %v, want static-grant (verbatim static must beat fold-only resolver)", creds)
 	}
 }
 
@@ -4706,30 +4428,6 @@ func TestProxy_HandleHTTP_LogsClientAddr(t *testing.T) {
 	}
 }
 
-// TestProxy_GetCredentialsForRequest_BracketedIPv6Host verifies that a
-// bracketed, portless IPv6 lookup host like "[::1]" matches an
-// embedder-supplied key stored in canonical unbracketed form ("::1").
-func TestProxy_GetCredentialsForRequest_BracketedIPv6Host(t *testing.T) {
-	p := NewProxy()
-	rc := &RunContextData{
-		Credentials: map[string][]credentialHeader{
-			"::1": {{Name: "Authorization", Value: "Bearer v6", Grant: "v6-grant"}},
-		},
-	}
-	req := httptest.NewRequest("GET", "http://[::1]/", nil)
-	req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
-
-	for _, host := range []string{"[::1]", "[::1]:8080"} {
-		creds, err := p.getCredentialsForRequest(req, req, host)
-		if err != nil {
-			t.Fatalf("getCredentialsForRequest(%q): %v", host, err)
-		}
-		if len(creds) != 1 || creds[0].Grant != "v6-grant" {
-			t.Fatalf("getCredentialsForRequest(%q) = %v, want v6-grant credential", host, creds)
-		}
-	}
-}
-
 // TestProxy_HandleHTTP_DefaultPortPinnedKey verifies that the plain-HTTP
 // path presents a port-bearing lookup host even when the client omits the
 // scheme-default port, so a key pinned to ":80" fires for
@@ -4824,158 +4522,6 @@ func TestProxy_HandleHTTP_PolicyAndLookupPortAgree(t *testing.T) {
 	defer mu.Unlock()
 	if receivedAuth != "Bearer port80" {
 		t.Errorf("Authorization = %q, want %q (policy treats the unparseable port as 80, so credential lookup must agree)", receivedAuth, "Bearer port80")
-	}
-}
-
-// TestProxy_GetCredentialsForRequest_OutrankedResolverNotCalled verifies
-// that a resolver whose match is outranked by a static credential is not
-// invoked at all — its external call (e.g. an STS round trip) must not add
-// latency to requests that will use the static credential — while the
-// request sanitization it declared at registration is still applied.
-func TestProxy_GetCredentialsForRequest_OutrankedResolverNotCalled(t *testing.T) {
-	p := NewProxy()
-	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
-	var invoked atomic.Bool
-	p.SetCredentialResolverWithStripHeaders("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-		invoked.Store(true)
-		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "resolver-grant"}}, nil
-	}, "X-Subject-Token")
-
-	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
-	req.Header.Set("X-Subject-Token", "caller-identity")
-
-	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest: %v", err)
-	}
-	if invoked.Load() {
-		t.Fatal("outranked resolver was invoked (its external call must not stall static-credential hosts)")
-	}
-	if len(creds) != 1 || creds[0].Grant != "static-grant" {
-		t.Fatalf("creds = %v, want static-grant", creds)
-	}
-	if got := req.Header.Get("X-Subject-Token"); got != "" {
-		t.Fatalf("X-Subject-Token = %q, want removed (declared strip headers apply even when the resolver is skipped)", got)
-	}
-
-	// For hosts where the resolver is not outranked it runs normally.
-	req2 := httptest.NewRequest("GET", "https://other.example.com/", nil)
-	creds, err = p.getCredentialsForRequest(req2, req2, "other.example.com")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest(other): %v", err)
-	}
-	if !invoked.Load() {
-		t.Fatal("resolver did not run for a non-outranked host")
-	}
-	if len(creds) != 1 || creds[0].Grant != "resolver-grant" {
-		t.Fatalf("creds = %v, want resolver-grant", creds)
-	}
-}
-
-// TestProxy_GetCredentialsForRequest_PortPinnedExactBeatsBareResolver
-// verifies cross-map specificity within the exact tier: a port-pinned exact
-// static credential outranks a bare-host resolver for a port-bearing
-// request host, matching both the in-map exact ordering (host:port before
-// bare) and the wildcard tier's port-pinned-beats-port-less rule.
-func TestProxy_GetCredentialsForRequest_PortPinnedExactBeatsBareResolver(t *testing.T) {
-	p := NewProxy()
-	p.mu.Lock()
-	p.credentials["api.example.com:8443"] = []credentialHeader{{Name: "Authorization", Value: "Bearer pinned", Grant: "pinned-grant"}}
-	p.mu.Unlock()
-	p.SetCredentialResolver("api.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver", Grant: "resolver-grant"}}, nil
-	})
-	req := httptest.NewRequest("GET", "https://api.example.com:8443/", nil)
-
-	creds, err := p.getCredentialsForRequest(req, req, "api.example.com:8443")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest: %v", err)
-	}
-	if len(creds) != 1 || creds[0].Grant != "pinned-grant" {
-		t.Fatalf("creds = %v, want pinned-grant (port-pinned exact static must outrank bare-host resolver)", creds)
-	}
-}
-
-// TestProxy_GetCredentialsForRequest_LegacyOutrankedResolverStillRuns
-// verifies backward compatibility for resolvers registered through the
-// original SetCredentialResolver API (no declared strip headers): when
-// outranked by a static credential, such a resolver still runs — it may
-// sanitize the request in ways the proxy cannot know about — its
-// credentials are discarded in favor of the static ones, and its error is
-// not fatal. Only resolvers registered via
-// SetCredentialResolverWithStripHeaders opt into being skipped.
-func TestProxy_GetCredentialsForRequest_LegacyOutrankedResolverStillRuns(t *testing.T) {
-	p := NewProxy()
-	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
-	var invoked atomic.Bool
-	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-		invoked.Store(true)
-		innerReq.Header.Del("X-Subject-Token")
-		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "resolver-grant"}}, nil
-	})
-	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
-	req.Header.Set("X-Subject-Token", "caller-identity")
-
-	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest: %v", err)
-	}
-	if !invoked.Load() {
-		t.Fatal("legacy-registered resolver was skipped when outranked; without declared strip headers its sanitizing side effects would be lost")
-	}
-	if got := req.Header.Get("X-Subject-Token"); got != "" {
-		t.Fatalf("X-Subject-Token = %q, want removed by the resolver", got)
-	}
-	if len(creds) != 1 || creds[0].Grant != "static-grant" {
-		t.Fatalf("creds = %v, want static-grant (static still wins the credential)", creds)
-	}
-
-	t.Run("error is not fatal when outranked", func(t *testing.T) {
-		p := NewProxy()
-		p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer static-token", "static-grant")
-		var errInvoked atomic.Bool
-		p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-			errInvoked.Store(true)
-			return nil, errors.New("sts unavailable")
-		})
-		req := httptest.NewRequest("GET", "https://api.example.com/", nil)
-		creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
-		if err != nil {
-			t.Fatalf("getCredentialsForRequest: %v (outranked legacy resolver error must not fail the request)", err)
-		}
-		if !errInvoked.Load() {
-			t.Fatal("legacy resolver was not invoked")
-		}
-		if len(creds) != 1 || creds[0].Grant != "static-grant" {
-			t.Fatalf("creds = %v, want static-grant", creds)
-		}
-	})
-}
-
-// TestProxy_GetCredentialsForRequest_LegacyOutrankedStaticReadFresh verifies
-// that when a legacy (undeclared) resolver is outranked and run for its side
-// effects, the static credential returned reflects any refresh that landed
-// while the resolver was out — not the value read before the resolver ran.
-// A refreshing credential source can rotate the static token (via
-// SetCredentialWithGrant) during the resolver's external call; injecting the
-// pre-rotation value would send a token the upstream has already revoked.
-func TestProxy_GetCredentialsForRequest_LegacyOutrankedStaticReadFresh(t *testing.T) {
-	p := NewProxy()
-	p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer v1", "static-grant")
-	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-		// Simulate a refresh landing while the resolver is out: it rotates
-		// the static credential in place (same grant + header upserts).
-		p.SetCredentialWithGrant("api.example.com", "Authorization", "Bearer v2", "static-grant")
-		return []credentialHeader{{Name: "Authorization", Value: "Bearer resolver", Grant: "resolver-grant"}}, nil
-	})
-	req := httptest.NewRequest("GET", "https://api.example.com/", nil)
-
-	creds, err := p.getCredentialsForRequest(req, req, "api.example.com")
-	if err != nil {
-		t.Fatalf("getCredentialsForRequest: %v", err)
-	}
-	if len(creds) != 1 || creds[0].Value != "Bearer v2" {
-		t.Fatalf("creds = %v, want single credential with value %q (fresh post-refresh read), not stale v1 or the resolver's own credential", creds, "Bearer v2")
 	}
 }
 
