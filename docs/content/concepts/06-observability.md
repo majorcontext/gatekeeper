@@ -10,7 +10,7 @@ Gatekeeper produces structured logs, distributed traces, and request metrics via
 
 ## Callback-based architecture
 
-The `proxy` package defines two callback types for instrumentation:
+The `proxy` package exposes two callbacks for instrumentation:
 
 - **`SetLogger` callback** — called once per completed request with a `RequestLogData` struct containing method, host, path, status code, duration, injected headers, grant names, denial info, and request context.
 - **`SetPolicyLogger` callback** — called on each policy denial with scope, operation, rule, and message.
