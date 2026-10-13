@@ -61,6 +61,8 @@ func main() {
 
 `proxy.Proxy` implements `http.Handler`. Serve it with any `http.Server` or wrap it with middleware.
 
+`http.Server.Shutdown` does not close CONNECT tunnels or intercepted connections, because the proxy hijacks them. To stop cleanly, call `Shutdown` and then `Proxy.CloseConnections(ctx)`, or call both at once. `CloseConnections` closes the open tunnels, waits for them to exit until `ctx` ends, and makes the proxy refuse later CONNECT requests. `proxy.Server.Stop` does this for you.
+
 ## Key API
 
 | Method                       | Description                                          |
@@ -71,6 +73,7 @@ func main() {
 | `SetCredentialResolver(host, resolver)`               | Set a dynamic per-request resolver  |
 | `SetCredentialResolverWithStripHeaders(host, resolver, headers...)` | Set a dynamic resolver that also removes request headers it consumes; prefer this over `SetCredentialResolver` when the resolver reads a subject-identity or other header that must not reach the upstream, since the proxy strips those headers even when a better-matched static credential skips calling the resolver |
 | `SetNetworkPolicy(policy, allows, grants)`            | Configure network allow/deny        |
+| `CloseConnections(ctx)`      | Close open CONNECT tunnels and refuse new ones; call on shutdown |
 | `SetAuthToken(token)`        | Require proxy authentication                         |
 | `SetContextResolver(fn)`     | Map proxy auth tokens to per-caller contexts         |
 

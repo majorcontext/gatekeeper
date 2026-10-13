@@ -176,3 +176,43 @@ func TestCAGenerateCertCacheEvictsLeastRecentlyUsed(t *testing.T) {
 		t.Fatalf("regenerated cert does not verify: %v", err)
 	}
 }
+
+func TestServerStopClosesTunnelWhileRequestDrains(t *testing.T) {
+	inHandler := make(chan struct{})
+	release := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(inHandler)
+		<-release
+	}))
+	t.Cleanup(backend.Close)
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	tunnelTarget, _ := startUpstreamTCP(t)
+	s := NewServer(NewProxy())
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	tunnel, br := connectThrough(t, s.Addr(), tunnelTarget)
+
+	slow, err := net.Dial("tcp", s.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { slow.Close() })
+	fmt.Fprintf(slow, "GET %s/ HTTP/1.1\r\nHost: %s\r\n\r\n", backend.URL, backend.Listener.Addr())
+	<-inHandler
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- s.Stop(context.Background()) }()
+
+	assertClosedByPeer(t, tunnel, br, "tunnel during request drain")
+	close(release)
+	if err := <-stopped; err != nil {
+		t.Fatalf("Stop = %v, want nil", err)
+	}
+}
