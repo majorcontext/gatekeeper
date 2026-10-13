@@ -853,3 +853,21 @@ func TestTokenExchangeResolver_NilHooksUseDefaults(t *testing.T) {
 		t.Fatalf("resolve = %+v, %v; want one header with the bare token", got, err)
 	}
 }
+
+func TestTokenExchangeResolver_NilProxyAuthIssuesNothing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("token endpoint called without a subject")
+	}))
+	defer srv.Close()
+
+	resolve := TokenExchangeResolver(TokenExchangeResolverConfig{
+		TokenExchangeConfig: TokenExchangeConfig{Endpoint: srv.URL, ClientID: "c", ClientSecret: "s"},
+		SubjectFrom:         "proxy-auth",
+	})
+	proxyReq := httptest.NewRequest("CONNECT", "http://example.com/", nil)
+	proxyReq.SetBasicAuth("alice", "pw")
+	got, err := resolve(context.Background(), proxyReq, httptest.NewRequest("GET", "http://example.com/", nil), "example.com")
+	if err != nil || got != nil {
+		t.Fatalf("resolve = %+v, %v; want nil, nil", got, err)
+	}
+}
