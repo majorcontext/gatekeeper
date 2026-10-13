@@ -216,3 +216,13 @@ func TestServerStopClosesTunnelWhileRequestDrains(t *testing.T) {
 		t.Fatalf("Stop = %v, want nil", err)
 	}
 }
+
+func TestCloseConnectionsWithNoConnectionsIgnoresCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < 50; i++ {
+		if err := NewProxy().CloseConnections(ctx); err != nil {
+			t.Fatalf("CloseConnections with no open connections = %v, want nil", err)
+		}
+	}
+}

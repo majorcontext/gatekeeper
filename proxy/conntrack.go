@@ -60,7 +60,11 @@ func (p *Proxy) CloseConnections(ctx context.Context) error {
 	for c := range t.conns {
 		_ = c.Close()
 	}
+	empty := len(t.conns) == 0
 	t.mu.Unlock()
+	if empty {
+		return nil
+	}
 
 	drained := make(chan struct{})
 	go func() {
