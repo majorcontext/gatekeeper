@@ -29,7 +29,7 @@ A "yes" is a finding.
 5. **Token exchange.** Can the subject come from anything other than the configured source (`subject_from` or `subject_header`), such as a header an untrusted caller sets under proxy-auth mode? Is the actor token forwarded when `actor_token_from` is unset? Does a bot or empty subject still call the STS? Does a wire field differ from `docs/token-exchange-endpoint.md`?
 6. **Source ownership.** Does a credential backend bypass `credentialsource.CredentialSource` or `RefreshingSource`? Does the proxy core branch on a backend type? Do identical `source` blocks now fetch more than once or start a second refresh goroutine?
 7. **Library boundary.** Does the change add an `internal/` package, or make `proxy/` know about moat? Gatekeeper is an importable module. A public API or YAML field change is a contract change: it needs a doc update and a `CHANGELOG.md` entry that names the behavior change.
-8. **Observability stays additive.** Does any `proxy/` file other than `otel.go` import OTel? Instrumentation attaches through callbacks and `proxy/otel.go`, and must not change request behavior or errors.
+8. **Observability stays additive.** Does any non-test `proxy/` file other than `otel.go` import OTel? Instrumentation attaches through callbacks and `proxy/otel.go`, and must not change request behavior or errors.
 9. **Fail-open and fail-closed.** Does a new error path open a connection that policy should block? PROXY protocol parsing stays fail-open on headerless connections only. Network policy and auth stay fail-closed.
 10. **Tests.** Does a bug fix lack a regression test that failed first and names the real values from the report? Does a security change test only the accepted input and not the rejected one?
 

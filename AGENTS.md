@@ -94,7 +94,7 @@ The `HostGateway` field in `RunContextData` maps a synthetic hostname (used insi
 
 ### OpenTelemetry Instrumentation
 
-OTel integration uses a callback-based architecture — no file in `proxy/` other than `otel.go` imports OTel. Instrumentation is layered on externally:
+OTel integration uses a callback-based architecture — no non-test file in `proxy/` other than `otel.go` imports OTel. Instrumentation is layered on externally:
 
 - **`proxy.NewOTelHandler`** wraps the proxy as HTTP middleware, creating root spans and recording request duration/count metrics. Its `statusRecorder` implements `http.Hijacker` so CONNECT requests still work after hijack.
 - **Request/policy loggers** (set in `gatekeeper.go`) attach span events and record credential injection/policy denial metrics via exported functions `proxy.RecordCredentialInjection` and `proxy.RecordPolicyDenial`.

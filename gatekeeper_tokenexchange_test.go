@@ -166,7 +166,7 @@ func decodeBasic(t *testing.T, headerValue string) string {
 // TestNewTokenExchangeResolver_BotSubjectFallsThrough proves a configured
 // bot_subject sentinel gets exactly the same (nil, nil) fallthrough
 // treatment as an empty proxy-auth subject: getCredentialsForRequest
-// (proxy/proxy.go) reads that as "try the next credential for this host",
+// reads that as "try the next credential for this host",
 // which is how a per-host github-app (bot) credential rule is expected to
 // take over -- see the boxes configmap's "per-user token-exchange, then
 // github-app bot fallback" credential-rule ordering. The STS must never be
