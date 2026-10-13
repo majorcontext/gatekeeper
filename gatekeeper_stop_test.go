@@ -1,9 +1,15 @@
 package gatekeeper
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,6 +17,7 @@ import (
 	"time"
 
 	"github.com/majorcontext/gatekeeper/credentialsource"
+	"github.com/majorcontext/gatekeeper/proxy"
 )
 
 type blockingSource struct {
@@ -190,5 +197,38 @@ func TestStop_BeforeStartPreventsRefresh(t *testing.T) {
 
 	if got := src.calls.Load(); got != fetches {
 		t.Errorf("Fetch calls after Stop = %d, want %d: Start launched a refresh against a closed source", got, fetches)
+	}
+}
+
+func TestStop_ClosesCONNECTTunnel(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstream.Close()
+	p := proxy.NewProxy()
+	front := httptest.NewServer(p)
+	defer front.Close()
+
+	c, err := net.Dial("tcp", front.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	target := upstream.Addr().String()
+	fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	br := bufio.NewReader(c)
+	if resp, err := http.ReadResponse(br, nil); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT: resp=%v err=%v", resp, err)
+	}
+
+	s := &Server{proxy: p, proxyServer: front.Config}
+	if err := s.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop = %v, want nil", err)
+	}
+
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := br.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("tunnel still open after Stop: read err = %v", err)
 	}
 }

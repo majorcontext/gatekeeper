@@ -34,7 +34,8 @@ proxy/              Core TLS-intercepting proxy engine
   gateway.go          Host gateway rewriting, per-request policy lookups, /_aws/ and MCP relay routes
   httppolicy.go       Content-type checks, Keep HTTP policy call, duplicate JSON key detection
   logging.go          Request/policy logging, body capture, header filtering and sanitizing
-  ca.go              CA certificate loading and per-host cert generation
+  ca.go              CA certificate loading and per-host cert generation (LRU-bounded cache)
+  conntrack.go       Hijacked CONNECT/intercepted connection set, closed on shutdown
   hosts.go           Hostname matching (glob patterns, port policies, host-keyed map lookup)
   mcp.go             MCP relay handler (SSE streaming, tool credential injection)
   llmpolicy.go       LLM response policy evaluation via Keep

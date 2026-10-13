@@ -61,6 +61,21 @@ func main() {
 
 `proxy.Proxy` implements `http.Handler`. Serve it with any `http.Server` or wrap it with middleware.
 
+`http.Server.Shutdown` does not close CONNECT tunnels or intercepted connections, because the proxy hijacks them. Call `Proxy.CloseConnections(ctx)` after `Shutdown`, or at the same time:
+
+```go
+srv := &http.Server{Addr: "127.0.0.1:9080", Handler: p}
+go srv.ListenAndServe()
+
+// On shutdown:
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+_ = srv.Shutdown(ctx)
+_ = p.CloseConnections(ctx)
+```
+
+`CloseConnections` closes the open tunnels and waits for them to exit until `ctx` ends, then returns `ctx.Err()` if any remain. It is safe to call more than once. It is permanent: the `Proxy` refuses every later CONNECT, so create a new `Proxy` to serve again. `proxy.Server.Stop` and the standalone server's `Stop` do this for you.
+
 ## Key API
 
 | Method                       | Description                                          |
@@ -71,6 +86,7 @@ func main() {
 | `SetCredentialResolver(host, resolver)`               | Set a dynamic per-request resolver  |
 | `SetCredentialResolverWithStripHeaders(host, resolver, headers...)` | Set a dynamic resolver that also removes request headers it consumes; prefer this over `SetCredentialResolver` when the resolver reads a subject-identity or other header that must not reach the upstream, since the proxy strips those headers even when a better-matched static credential skips calling the resolver |
 | `SetNetworkPolicy(policy, allows, grants)`            | Configure network allow/deny        |
+| `CloseConnections(ctx)`      | Close open CONNECT tunnels and refuse new ones; call on shutdown |
 | `SetAuthToken(token)`        | Require proxy authentication                         |
 | `SetContextResolver(fn)`     | Map proxy auth tokens to per-caller contexts         |
 

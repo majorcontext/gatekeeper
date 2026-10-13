@@ -705,9 +705,7 @@ func (s *Server) Start(ctx context.Context) error {
 			// Tear down the already-running HTTP server and the demux's real
 			// listener so a postgres wiring failure doesn't leak either.
 			_ = dx.Close()
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = s.proxyServer.Shutdown(shutdownCtx)
-			cancel()
+			s.abortProxyServer()
 			return fmt.Errorf("starting postgres listener: %w", err)
 		}
 		s.mu.Lock()
@@ -727,9 +725,7 @@ func (s *Server) Start(ctx context.Context) error {
 				// failure doesn't leak the HTTP listener. http.Server.Shutdown
 				// closes the listener it was Serve-ing, so closing the server is
 				// sufficient — closing ln again here would race the Serve goroutine.
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				_ = s.proxyServer.Shutdown(shutdownCtx)
-				cancel()
+				s.abortProxyServer()
 				return fmt.Errorf("starting postgres listener: %w", err)
 			}
 			// Wrap before StartListener: the PROXY header arrives as the very
@@ -744,9 +740,7 @@ func (s *Server) Start(ctx context.Context) error {
 			pg := proxy.NewPostgresServer(s.proxy)
 			if err := pg.StartListener(pgLn); err != nil {
 				_ = pgLn.Close()
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				_ = s.proxyServer.Shutdown(shutdownCtx)
-				cancel()
+				s.abortProxyServer()
 				return fmt.Errorf("starting postgres listener: %w", err)
 			}
 			s.mu.Lock()
@@ -836,8 +830,28 @@ func (s *Server) Stop(ctx context.Context) error {
 			httpErr = s.proxyServer.Shutdown(ctx)
 		}()
 	}
+	var connsErr error
+	if s.proxy != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			connsErr = s.proxy.CloseConnections(ctx)
+		}()
+	}
 	wg.Wait()
+	if httpErr == nil {
+		httpErr = connsErr
+	}
 	return httpErr
+}
+
+// abortProxyServer tears down the HTTP server and its hijacked connections
+// after a failed Start.
+func (s *Server) abortProxyServer() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = s.proxyServer.Shutdown(ctx)
+	_ = s.proxy.CloseConnections(ctx)
 }
 
 // ProxyAddr returns the proxy listener's actual address (host:port).

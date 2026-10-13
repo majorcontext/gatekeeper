@@ -132,6 +132,13 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	done, ok := p.conns.add(clientConn)
+	if !ok {
+		clientConn.Close()
+		return
+	}
+	clientConn = &trackedConn{Conn: clientConn, done: done}
+
 	// Track whether the inner http.Server's connection was hijacked
 	// (e.g., for WebSocket upgrade). If hijacked, ReverseProxy owns the
 	// TLS conn and will close it; we must not close clientConn ourselves.

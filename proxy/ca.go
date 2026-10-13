@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"container/list"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -26,10 +27,20 @@ type CA struct {
 	certPEM []byte
 	keyPEM  []byte
 
-	// Cache generated certificates
-	certCache map[string]*tls.Certificate
-	cacheMu   sync.RWMutex
+	certCache    map[string]*list.Element
+	certLRU      *list.List
+	cacheMu      sync.Mutex
+	certCacheMax int
 }
+
+type certCacheEntry struct {
+	host string
+	cert *tls.Certificate
+}
+
+// defaultCertCacheMax bounds cached leaf certificates so a client sending
+// CONNECT to many hostnames cannot grow memory without limit.
+const defaultCertCacheMax = 1024
 
 // NewCA creates or loads a CA certificate.
 // If the CA files exist at the given path, they are loaded.
@@ -91,7 +102,8 @@ func LoadCA(certPEM, keyPEM []byte) (*CA, error) {
 		key:       key,
 		certPEM:   certPEM,
 		keyPEM:    keyPEM,
-		certCache: make(map[string]*tls.Certificate),
+		certCache: make(map[string]*list.Element),
+		certLRU:   list.New(),
 	}, nil
 }
 
@@ -167,7 +179,8 @@ func generateCA() (*CA, error) {
 		key:       key,
 		certPEM:   certPEM,
 		keyPEM:    keyPEM,
-		certCache: make(map[string]*tls.Certificate),
+		certCache: make(map[string]*list.Element),
+		certLRU:   list.New(),
 	}, nil
 }
 
@@ -179,12 +192,14 @@ func (ca *CA) CertPEM() []byte {
 // GenerateCert creates a certificate for the given host signed by the CA.
 func (ca *CA) GenerateCert(host string) (*tls.Certificate, error) {
 	// Check cache first
-	ca.cacheMu.RLock()
-	if cert, ok := ca.certCache[host]; ok {
-		ca.cacheMu.RUnlock()
+	ca.cacheMu.Lock()
+	if el, ok := ca.certCache[host]; ok {
+		ca.certLRU.MoveToFront(el)
+		cert := el.Value.(*certCacheEntry).cert
+		ca.cacheMu.Unlock()
 		return cert, nil
 	}
-	ca.cacheMu.RUnlock()
+	ca.cacheMu.Unlock()
 
 	// Generate new certificate
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -231,7 +246,21 @@ func (ca *CA) GenerateCert(host string) (*tls.Certificate, error) {
 
 	// Cache the certificate
 	ca.cacheMu.Lock()
-	ca.certCache[host] = cert
+	if el, ok := ca.certCache[host]; ok {
+		el.Value.(*certCacheEntry).cert = cert
+		ca.certLRU.MoveToFront(el)
+	} else {
+		ca.certCache[host] = ca.certLRU.PushFront(&certCacheEntry{host: host, cert: cert})
+	}
+	limit := ca.certCacheMax
+	if limit <= 0 {
+		limit = defaultCertCacheMax
+	}
+	for ca.certLRU.Len() > limit {
+		oldest := ca.certLRU.Back()
+		ca.certLRU.Remove(oldest)
+		delete(ca.certCache, oldest.Value.(*certCacheEntry).host)
+	}
 	ca.cacheMu.Unlock()
 
 	return cert, nil
