@@ -91,10 +91,11 @@ func newContractUpstream(t *testing.T, tlsServer bool) (*httptest.Server, <-chan
 func redirectHTTPTransport(t *testing.T, to string) {
 	t.Helper()
 	orig := httpTransport
-	httpTransport = &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+	tr := &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, to)
 	}}
-	t.Cleanup(func() { httpTransport = orig })
+	httpTransport = tr
+	t.Cleanup(func() { httpTransport = orig; tr.CloseIdleConnections() })
 }
 
 var (
@@ -373,21 +374,41 @@ func contractRows() []contractRow {
 			want: map[string]string{"Authorization": "Bearer static"},
 		},
 		{
-			name: "outranked resolver with declared strip headers is skipped and its headers removed",
-			host: "api.box.test",
+			name: "nil resolver opt-out leaves the wildcard resolver serving other hosts",
+			host: "other.box.test",
+			proxy: func(p *Proxy, _ hostKeys, c *atomic.Int32) {
+				p.SetCredentialResolver("*.box.test", resolverReturning(c, "Bearer resolver", "resolver"))
+				p.SetCredentialResolver("api.box.test", nil)
+				p.SetCredentialWithGrant("api.box.test", "Authorization", "Bearer static", "static")
+			},
+			want:      map[string]string{"Authorization": "Bearer resolver"},
+			wantCalls: 1,
+		},
+		{
+			name: "declared-strip-headers resolver still serves hosts it is not outranked on",
+			host: "other.box.test",
 			proxy: func(p *Proxy, _ hostKeys, c *atomic.Int32) {
 				p.SetCredentialWithGrant("api.box.test", "Authorization", "Bearer static", "static")
 				p.SetCredentialResolverWithStripHeaders("*.box.test", resolverReturning(c, "Bearer resolver", "resolver"), "X-Subject-Token")
+			},
+			headers:   map[string]string{"X-Subject-Token": "caller-identity"},
+			want:      map[string]string{"Authorization": "Bearer resolver", "X-Subject-Token": "caller-identity"},
+			wantCalls: 1,
+		},
+		{
+			name: "outranked resolver with declared strip headers is skipped and its headers removed",
+			proxy: func(p *Proxy, k hostKeys, c *atomic.Int32) {
+				rawCreds(p, k.hp, cred("Authorization", "Bearer static", "static"))
+				p.SetCredentialResolverWithStripHeaders(k.h, resolverReturning(c, "Bearer resolver", "resolver"), "X-Subject-Token")
 			},
 			headers: map[string]string{"X-Subject-Token": "caller-identity"},
 			want:    map[string]string{"Authorization": "Bearer static"},
 		},
 		{
 			name: "outranked legacy resolver still runs and static wins",
-			host: "api.box.test",
-			proxy: func(p *Proxy, _ hostKeys, c *atomic.Int32) {
-				p.SetCredentialWithGrant("api.box.test", "Authorization", "Bearer static", "static")
-				p.SetCredentialResolver("*.box.test", func(ctx context.Context, _, innerReq *http.Request, _ string) ([]credentialHeader, error) {
+			proxy: func(p *Proxy, k hostKeys, c *atomic.Int32) {
+				rawCreds(p, k.hp, cred("Authorization", "Bearer static", "static"))
+				p.SetCredentialResolver(k.h, func(ctx context.Context, _, innerReq *http.Request, _ string) ([]credentialHeader, error) {
 					c.Add(1)
 					innerReq.Header.Del("X-Subject-Token")
 					return authCred("Bearer resolver", "resolver"), nil
@@ -620,8 +641,8 @@ func (r contractRow) normalized() contractRow {
 }
 
 // TestCredentialContract pins credential precedence and injection as a
-// caller observes it. The http-cleartext path injects credentials over plain
-// HTTP today; a deliberate behavior change there edits only that path's runner.
+// caller observes it. The http-cleartext subtests inject credentials over plain
+// HTTP; a deliberate change to that behavior edits the expectations there.
 func TestCredentialContract(t *testing.T) {
 	for _, row := range contractRows() {
 		row = row.normalized()
@@ -697,6 +718,7 @@ func runContractConnect(t *testing.T, row contractRow) {
 	for n, v := range row.headers {
 		req.Header.Set(n, v)
 	}
+	t.Cleanup(client.CloseIdleConnections)
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("request: %v", err)
