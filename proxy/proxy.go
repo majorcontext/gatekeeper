@@ -2533,19 +2533,18 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if p.refusesCleartextInjection(r, r.URL.Scheme, lookupHost, creds) {
 		p.logRequest(r, RequestLogData{
-			Method:         r.Method,
-			URL:            r.URL.String(),
-			Host:           host,
-			Path:           r.URL.Path,
-			RequestType:    "http",
-			StatusCode:     http.StatusForbidden,
-			Duration:       time.Since(start),
-			RequestHeaders: p.logHeadersRedacted(r.Header, lookupHost),
-			RequestSize:    r.ContentLength,
-			ResponseSize:   -1,
-			Denied:         true,
-			DenyReason:     "credential injection over plain HTTP refused: " + host,
-			ClientAddr:     r.RemoteAddr,
+			Method:       r.Method,
+			URL:          r.URL.String(),
+			Host:         host,
+			Path:         r.URL.Path,
+			RequestType:  "http",
+			StatusCode:   http.StatusForbidden,
+			Duration:     time.Since(start),
+			RequestSize:  r.ContentLength,
+			ResponseSize: -1,
+			Denied:       true,
+			DenyReason:   "credential injection over plain HTTP refused: " + host,
+			ClientAddr:   r.RemoteAddr,
 		})
 		p.writeCleartextRefusal(w, host)
 		return
