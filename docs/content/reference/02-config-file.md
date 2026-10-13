@@ -462,7 +462,7 @@ network:
 - **Required:** No (only meaningful with `policy: strict`)
 - **Default:** `[]`
 
-Patterns support glob syntax. Port numbers are stripped before matching.
+Patterns support glob syntax. A pattern without a port matches ports 80 and 443. A pattern with a port, such as `api.example.com:8080`, matches only that port.
 
 ---
 
