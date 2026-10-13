@@ -47,7 +47,7 @@ func TestOtelSDKDisabled(t *testing.T) {
 	}
 }
 
-// TestLogOTelError_DemotesToDebug encodes the incident: running gatekeeper
+// TestLogOTelError_DemotesToDebug pins that running gatekeeper
 // without a collector produced one INFO line per second like
 //
 //	{"level":"INFO","msg":"Post \"https://localhost:4318/v1/logs\": dial tcp [::1]:4318: connect: connection refused"}

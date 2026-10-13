@@ -36,9 +36,12 @@ func TestSkillsMatchSpecification(t *testing.T) {
 		t.Fatal("no SKILL.md files found")
 	}
 	for _, path := range found {
-		errs, _ := validate(path)
+		errs, warns := validate(path)
 		for _, e := range errs {
 			t.Errorf("%s: %s", path, e)
+		}
+		for _, w := range warns {
+			t.Logf("%s: warn: %s", path, w)
 		}
 	}
 }
