@@ -215,6 +215,7 @@ type Server struct {
 
 	pendingRefreshes []pendingRefresh
 	refreshCancel    context.CancelFunc
+	refreshWG        sync.WaitGroup
 	closers          []io.Closer // credential sources that hold resources
 
 	// resolveSource overrides ResolveSource for testing. When non-nil,
@@ -738,7 +739,9 @@ func (s *Server) loadPostgresCredential(ctx context.Context, cred CredentialConf
 // api.github.com and github.com both using the same github-app), a single
 // goroutine refreshes the token and applies it to all of them.
 func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsource.RefreshingSource, creds []CredentialConfig) {
+	s.refreshWG.Add(1)
 	go func() {
+		defer s.refreshWG.Done()
 		backoff := time.Duration(0)
 		const maxBackoff = 60 * time.Second
 
@@ -762,6 +765,9 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 			rawVal, err := src.Fetch(fetchCtx)
 			cancel()
 
+			if ctx.Err() != nil {
+				return
+			}
 			if err != nil {
 				if backoff == 0 {
 					backoff = time.Second
@@ -807,9 +813,11 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 	}()
 }
 
-// refreshInterval returns 75% of TTL, floored at 30 seconds.
+var refreshFloor = 30 * time.Second
+
+// refreshInterval returns 75% of TTL, floored at refreshFloor.
 func refreshInterval(ttl time.Duration) time.Duration {
-	return max(ttl*3/4, 30*time.Second)
+	return max(ttl*3/4, refreshFloor)
 }
 
 // ensureAuthScheme ensures a credential value has an auth scheme prefix
@@ -1038,6 +1046,7 @@ func (s *Server) Stop(ctx context.Context) error {
 	if s.refreshCancel != nil {
 		s.refreshCancel()
 	}
+	s.refreshWG.Wait()
 	for _, c := range s.closers {
 		if err := c.Close(); err != nil {
 			slog.Warn("credential source close failed", "error", err)
