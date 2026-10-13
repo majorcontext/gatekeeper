@@ -80,14 +80,21 @@ func (s *Server) Stop(ctx context.Context) error {
 	if s.proxy != nil {
 		defer s.proxy.CloseIdleConnections()
 	}
+	var connsErr error
+	connsDone := make(chan struct{})
+	go func() {
+		defer close(connsDone)
+		if s.proxy != nil {
+			connsErr = s.proxy.CloseConnections(ctx)
+		}
+	}()
 	var err error
 	if s.server != nil {
 		err = s.server.Shutdown(ctx)
 	}
-	if s.proxy != nil {
-		if cerr := s.proxy.CloseConnections(ctx); err == nil {
-			err = cerr
-		}
+	<-connsDone
+	if err == nil {
+		err = connsErr
 	}
 	return err
 }

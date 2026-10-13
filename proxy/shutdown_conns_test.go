@@ -135,33 +135,44 @@ func TestProxyRefusesConnectionsAfterCloseConnections(t *testing.T) {
 	}
 }
 
-func TestCAGenerateCertCacheIsBounded(t *testing.T) {
+func TestCAGenerateCertCacheEvictsLeastRecentlyUsed(t *testing.T) {
 	ca, err := generateCA()
 	if err != nil {
 		t.Fatal(err)
 	}
 	ca.certCacheMax = 3
-	hosts := []string{"a.example", "b.example", "c.example", "d.example", "e.example"}
-	for _, h := range hosts {
-		if _, err := ca.GenerateCert(h); err != nil {
+	gen := func(h string) *tls.Certificate {
+		t.Helper()
+		c, err := ca.GenerateCert(h)
+		if err != nil {
 			t.Fatal(err)
 		}
+		return c
 	}
-	if n := len(ca.certCache); n > 3 {
-		t.Fatalf("cert cache holds %d entries after %d hosts, want at most 3", n, len(hosts))
+	a := gen("a.example")
+	b := gen("b.example")
+	gen("c.example")
+	if gen("a.example") != a {
+		t.Fatal("a.example regenerated while cached")
 	}
-
-	cert, err := ca.GenerateCert("a.example")
-	if err != nil {
-		t.Fatal(err)
+	gen("d.example")
+	if n := len(ca.certCache); n != 3 {
+		t.Fatalf("cert cache holds %d entries, want 3", n)
 	}
-	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if gen("a.example") != a {
+		t.Error("recently used a.example was evicted")
+	}
+	b2 := gen("b.example")
+	if b2 == b {
+		t.Error("least recently used b.example was not evicted")
+	}
+	leaf, err := x509.ParseCertificate(b2.Certificate[0])
 	if err != nil {
 		t.Fatal(err)
 	}
 	pool := x509.NewCertPool()
 	pool.AppendCertsFromPEM(ca.CertPEM())
-	if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: "a.example"}); err != nil {
-		t.Fatalf("regenerated cert for evicted host does not verify: %v", err)
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: "b.example"}); err != nil {
+		t.Fatalf("regenerated cert does not verify: %v", err)
 	}
 }
