@@ -836,7 +836,7 @@ func (s *PostgresServer) serveAuthenticated(ctx context.Context, clientConn net.
 	// public DNS, so host-gateway routing does not apply to the Postgres data plane.
 	var allowed bool
 	if rc != nil {
-		allowed = rc.Policy != "strict" || matchHostPostgres(rc.AllowedHosts, sniHost)
+		allowed = rc.permissive() || matchHostPostgres(rc.AllowedHosts, sniHost)
 	} else {
 		allowed = s.proxy.checkNetworkPolicyPostgres(sniHost)
 	}

@@ -114,7 +114,7 @@ func (p *Proxy) checkNetworkPolicyForRequest(r *http.Request, host string, port 
 		if method != "CONNECT" && rc.RequestCheck != nil {
 			return rc.RequestCheck(host, port, method, path)
 		}
-		if rc.Policy != "strict" {
+		if rc.permissive() {
 			return true
 		}
 		return matchHost(rc.AllowedHosts, host, port)

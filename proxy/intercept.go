@@ -181,7 +181,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 
 	var transport http.RoundTripper
 	if tlsClientConn.ConnectionState().NegotiatedProtocol == http2.NextProtoTLS {
-		transport, err = p.getH2UpstreamTransport()
+		transport, err = p.getH2UpstreamTransportFor(getRunContext(r))
 		if err != nil {
 			slog.Debug("failed to configure upstream transport",
 				"subsystem", "proxy", "host", host, "error", err)

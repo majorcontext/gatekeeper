@@ -52,7 +52,9 @@ func main() {
 	p := proxy.NewProxy()
 	p.SetCA(ca)
 	p.SetCredentialWithGrant("api.github.com", "Authorization", "Bearer ghp_xxxx", "github")
-	p.SetNetworkPolicy("strict", []string{"api.github.com"}, nil)
+	if err := p.SetNetworkPolicy("strict", []string{"api.github.com"}, nil); err != nil {
+		log.Fatal(err)
+	}
 
 	// Start HTTP server.
 	log.Fatal(http.ListenAndServe("127.0.0.1:9080", p))
@@ -85,7 +87,8 @@ _ = p.CloseConnections(ctx)
 | `SetCredentialWithGrant(host, header, value, grant)` | Set a static credential for a host  |
 | `SetCredentialResolver(host, resolver)`               | Set a dynamic per-request resolver  |
 | `SetCredentialResolverWithStripHeaders(host, resolver, headers...)` | Set a dynamic resolver that also removes request headers it consumes; prefer this over `SetCredentialResolver` when the resolver reads a subject-identity or other header that must not reach the upstream, since the proxy strips those headers even when a better-matched static credential skips calling the resolver |
-| `SetNetworkPolicy(policy, allows, grants)`            | Configure network allow/deny        |
+| `SetNetworkPolicy(policy, allows, grants)`            | Configure network allow/deny; returns an error unless `policy` is `permissive`, `strict`, or empty |
+| `SetDelegateAuth(true)`      | Delegate password checks to resolvers; returns an error, and the proxy refuses every request, until `SetAuthToken` sets a token |
 | `CloseConnections(ctx)`      | Close open CONNECT tunnels and refuse new ones; call on shutdown |
 | `SetAuthToken(token)`        | Require proxy authentication                         |
 | `SetContextResolver(fn)`     | Map proxy auth tokens to per-caller contexts         |

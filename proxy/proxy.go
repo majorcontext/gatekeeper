@@ -81,12 +81,16 @@ type MCPAuthConfig struct {
 // sane timeout defaults. No client-level Timeout is set because the proxy may
 // handle streaming responses. Typed as http.RoundTripper so tests can swap
 // in a recording transport.
-var httpTransport http.RoundTripper = &http.Transport{
-	Proxy:                 nil,
-	DialContext:           dialContext,
-	TLSHandshakeTimeout:   10 * time.Second,
-	ResponseHeaderTimeout: 5 * time.Minute,
-	IdleConnTimeout:       90 * time.Second,
+var httpTransport http.RoundTripper = newHTTPTransport()
+
+func newHTTPTransport() *http.Transport {
+	return &http.Transport{
+		Proxy:                 nil,
+		DialContext:           dialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Minute,
+		IdleConnTimeout:       90 * time.Second,
+	}
 }
 
 // MaxBodySize is the maximum size of request/response bodies to capture (8KB).
@@ -309,7 +313,7 @@ type Proxy struct {
 	captureHeaders     []string                                   // headers to capture in logs and strip before forwarding
 	branding           Branding                                   // client-visible wording of blocks and errors
 
-	h2UpstreamTransport *http.Transport
+	h2UpstreamTransports map[poolKey]*http.Transport
 
 	conns connTracker
 }

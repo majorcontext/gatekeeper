@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -172,5 +173,118 @@ func TestInterceptDialRefusesNameResolvingToLoopback(t *testing.T) {
 	}
 	if n := hits.Load(); n != 0 {
 		t.Errorf("backend reached %d times through intercepted name resolving to loopback", n)
+	}
+}
+
+func TestDialRefusesRestrictedIPLiteralOutsideGateway(t *testing.T) {
+	var hits atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+	}))
+	defer backend.Close()
+	proxySrv := gatewayProxy(t)
+
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxySrv.URL))}}
+	req, _ := http.NewRequest("GET", backend.URL, nil)
+	req.Header.Set("Proxy-Authorization", "Bearer run")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 for %s with gateway 10.254.254.254", resp.StatusCode, backend.URL)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("backend reached %d times through a loopback literal", n)
+	}
+}
+
+func TestGuardedRunCannotReuseUnguardedConnection(t *testing.T) {
+	var hits atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		if token == "guarded" {
+			return &RunContextData{Policy: "permissive", HostGateway: "host.docker.internal", HostGatewayIP: "10.254.254.254"}, true
+		}
+		return &RunContextData{Policy: "permissive"}, token == "open"
+	})
+	s := httptest.NewServer(p)
+	defer s.Close()
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(s.URL))}}
+
+	get := func(token string) int {
+		req, _ := http.NewRequest("GET", backend.URL, nil)
+		req.Header.Set("Proxy-Authorization", "Bearer "+token)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := get("open"); got != http.StatusOK {
+		t.Fatalf("unguarded status = %d, want 200", got)
+	}
+	if got := get("guarded"); got != http.StatusBadGateway {
+		t.Errorf("guarded status = %d, want 502; it reused a connection dialed without the guard", got)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("backend hits = %d, want 1 (the unguarded request only)", n)
+	}
+}
+
+func TestDialContextRefusesRestrictedResolution(t *testing.T) {
+	rc := &RunContextData{Policy: "permissive", HostGateway: "host.docker.internal", HostGatewayIP: "172.17.0.1"}
+	ctx := context.WithValue(context.Background(), runContextKey, rc)
+	resolver := useFakeResolver(t, map[string][]string{
+		"loopback.example":   {"127.0.0.1"},
+		"mapped.example":     {"::ffff:127.0.0.1"},
+		"linklocal.example":  {"169.254.169.254"},
+		"linklocal6.example": {"fe80::1"},
+		"any.example":        {"0.0.0.0"},
+		"mixed.example":      {"93.184.216.34", "127.0.0.1"},
+		"gateway.example":    {"172.17.0.1"},
+	})
+	for _, name := range []string{"loopback.example", "mapped.example", "linklocal.example", "linklocal6.example", "any.example", "mixed.example", "gateway.example", "127.0.0.1", "169.254.169.254", "[::ffff:127.0.0.1]", "0.0.0.0"} {
+		conn, err := dialContext(ctx, "tcp", name+":9")
+		if err == nil {
+			conn.Close()
+		}
+		if !errors.Is(err, errRestrictedDial) {
+			t.Errorf("dialContext(%q) error = %v, want errRestrictedDial", name, err)
+		}
+	}
+	if resolver.lookups.Load() == 0 {
+		t.Error("guard never consulted the resolver")
+	}
+}
+
+func TestRunContextPolicyUnknownValueIsStrict(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer backend.Close()
+	for _, policy := range []string{"Strict", "deny"} {
+		p := NewProxy()
+		p.SetContextResolver(func(string) (*RunContextData, bool) {
+			return &RunContextData{Policy: policy}, true
+		})
+		s := httptest.NewServer(p)
+		client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(s.URL))}}
+		req, _ := http.NewRequest("GET", backend.URL, nil)
+		req.Header.Set("Proxy-Authorization", "Bearer run")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		s.Close()
+		if resp.StatusCode != http.StatusProxyAuthRequired {
+			t.Errorf("RunContextData.Policy %q: status = %d, want 407", policy, resp.StatusCode)
+		}
 	}
 }

@@ -3051,9 +3051,9 @@ func TestProxy_HostGatewayStrictModeAlsoBlocks(t *testing.T) {
 	}
 }
 
-// TestProxy_NonHostGatewayUnaffected verifies that requests to non-host-gateway
-// addresses are unaffected by the host gateway blocking logic.
-func TestProxy_NonHostGatewayUnaffected(t *testing.T) {
+// TestProxy_NonGatewayLoopbackLiteralRefused verifies that a loopback literal
+// that is not the host gateway is refused when the run sets a different gateway.
+func TestProxy_NonGatewayLoopbackLiteralRefused(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	}))
@@ -3084,8 +3084,8 @@ func TestProxy_NonHostGatewayUnaffected(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("expected 502, got %d", resp.StatusCode)
 	}
 }
 

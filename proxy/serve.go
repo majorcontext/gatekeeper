@@ -323,7 +323,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Forward request
-	resp, err := httpTransport.RoundTrip(outReq)
+	resp, err := httpTransportFor(getRunContext(r)).RoundTrip(outReq)
 
 	// Fields shared by the error and success log lines.
 	logData := RequestLogData{

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
 	"net/netip"
+	"sync"
 	"time"
 )
 
@@ -25,12 +27,13 @@ func restrictedAddr(a netip.Addr) bool {
 }
 
 // dialContext connects to addr. When the run context carries a host gateway,
-// it resolves a hostname itself (IP literals are left to the
-// host-gateway policy check), refuses the dial if any resolved address is
+// it resolves a hostname itself, refuses the dial if any resolved address is
 // loopback, unspecified or link-local, and dials the checked IP so a second
 // lookup cannot change the answer. The gateway itself is exempt.
 func dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	d := net.Dialer{Timeout: upstreamDialTimeout, KeepAlive: 30 * time.Second}
+	ctx, cancel := context.WithTimeout(ctx, upstreamDialTimeout)
+	defer cancel()
+	d := net.Dialer{KeepAlive: 30 * time.Second}
 	rc, _ := ctx.Value(runContextKey).(*RunContextData)
 	if rc == nil || rc.HostGateway == "" {
 		return d.DialContext(ctx, network, addr)
@@ -42,18 +45,18 @@ func dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	if isHostGateway(rc, host) || (rc.HostGatewayIP != "" && host == rc.HostGatewayIP) {
 		return d.DialContext(ctx, network, addr)
 	}
-	if _, err := netip.ParseAddr(host); err == nil {
-		return d.DialContext(ctx, network, addr)
-	}
-	addrs, err := dialResolver.LookupNetIP(ctx, "ip", host)
-	if err != nil {
+	var addrs []netip.Addr
+	if a, err := netip.ParseAddr(host); err == nil {
+		addrs = []netip.Addr{a}
+	} else if addrs, err = dialResolver.LookupNetIP(ctx, "ip", host); err != nil {
 		return nil, err
 	}
 	if len(addrs) == 0 {
 		return nil, &net.DNSError{Err: "no addresses", Name: host, IsNotFound: true}
 	}
+	gatewayIP, _ := netip.ParseAddr(rc.HostGatewayIP)
 	for _, a := range addrs {
-		if restrictedAddr(a) {
+		if restrictedAddr(a) || (gatewayIP.IsValid() && a.Unmap() == gatewayIP.Unmap()) {
 			return nil, errRestrictedDial
 		}
 	}
@@ -66,4 +69,30 @@ func dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 		lastErr = err
 	}
 	return nil, lastErr
+}
+
+// poolKey names the connection pool a request may use. Idle connections skip
+// dialContext, so a request that must pass the dial guard never shares a pool
+// with one that did not, nor with a run whose host gateway differs.
+type poolKey struct{ gateway, gatewayIP string }
+
+func poolKeyFor(rc *RunContextData) poolKey {
+	if rc == nil || rc.HostGateway == "" {
+		return poolKey{}
+	}
+	return poolKey{rc.HostGateway, rc.HostGatewayIP}
+}
+
+var guardedHTTPTransports sync.Map
+
+func httpTransportFor(rc *RunContextData) http.RoundTripper {
+	k := poolKeyFor(rc)
+	if k == (poolKey{}) {
+		return httpTransport
+	}
+	if t, ok := guardedHTTPTransports.Load(k); ok {
+		return t.(*http.Transport)
+	}
+	t, _ := guardedHTTPTransports.LoadOrStore(k, newHTTPTransport())
+	return t.(*http.Transport)
 }

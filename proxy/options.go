@@ -54,10 +54,10 @@ func (p *Proxy) SetCA(ca *CA) {
 func (p *Proxy) SetUpstreamCAs(pool *x509.CertPool) {
 	p.mu.Lock()
 	p.upstreamCAs = pool
-	transport := p.h2UpstreamTransport
-	p.h2UpstreamTransport = nil
+	transports := p.h2UpstreamTransports
+	p.h2UpstreamTransports = nil
 	p.mu.Unlock()
-	if transport != nil {
+	for _, transport := range transports {
 		// Existing tunnels retain their trust settings. Retired connections
 		// still in use are reclaimed by the transport's timeout once idle.
 		transport.CloseIdleConnections()
@@ -334,4 +334,10 @@ func (p *Proxy) SetNetworkPolicyWithRules(policy string, allows []string, grants
 		}
 	}
 	return nil
+}
+
+// permissive reports whether the run allows hosts outside AllowedHosts. Any
+// value other than "" or "permissive" is strict.
+func (rc *RunContextData) permissive() bool {
+	return rc.Policy == "" || rc.Policy == "permissive"
 }
