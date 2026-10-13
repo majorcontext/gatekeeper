@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/majorcontext/gatekeeper/proxy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -198,7 +199,24 @@ func ParseConfig(data []byte) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
+	if err := cfg.Network.validate(); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+func (n NetworkConfig) validate() error {
+	switch n.Policy {
+	case "", "permissive", "strict":
+	default:
+		return fmt.Errorf("network.policy %q is not one of \"permissive\" or \"strict\"", n.Policy)
+	}
+	for _, pattern := range n.Allow {
+		if err := proxy.ValidateHostPattern(pattern); err != nil {
+			return fmt.Errorf("network.allow: %w", err)
+		}
+	}
+	return nil
 }
 
 // LoadConfig reads and parses a Gate Keeper config from a file path.

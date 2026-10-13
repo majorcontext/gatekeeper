@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -20,10 +21,24 @@ type hostPattern struct {
 //   - *.example.com
 //   - *.example.com:443
 func parseHostPattern(s string) hostPattern {
+	p, _ := parseHostPatternChecked(s)
+	return p
+}
+
+// ValidateHostPattern reports why s is not a usable host pattern. Unlike
+// ParseHostPattern, which treats an unparsable port as "ports 80 and 443",
+// it rejects the pattern.
+func ValidateHostPattern(s string) error {
+	_, err := parseHostPatternChecked(s)
+	return err
+}
+
+func parseHostPatternChecked(s string) (hostPattern, error) {
 	p := hostPattern{
 		pattern: s,
 		port:    0, // 0 = unspecified, will match only ports 80 and 443
 	}
+	orig := s
 
 	// Check for wildcard prefix
 	if strings.HasPrefix(s, "*.") {
@@ -35,14 +50,20 @@ func parseHostPattern(s string) hostPattern {
 	host, portStr, hasPort := strings.Cut(s, ":")
 	p.host = strings.ToLower(host)
 
+	var err error
+	if host == "" {
+		err = fmt.Errorf("host pattern %q has no host", orig)
+	}
 	if hasPort {
-		port, err := strconv.Atoi(portStr)
-		if err == nil && port > 0 && port <= 65535 {
+		port, perr := strconv.Atoi(portStr)
+		if perr == nil && port > 0 && port <= 65535 {
 			p.port = port
+		} else if err == nil {
+			err = fmt.Errorf("host pattern %q has an invalid port", orig)
 		}
 	}
 
-	return p
+	return p, err
 }
 
 // matchHost checks if the given host:port matches any of the patterns.

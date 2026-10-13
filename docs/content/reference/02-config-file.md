@@ -443,6 +443,8 @@ network:
 | `permissive` | All hosts allowed. `allow` list is ignored. |
 | `strict` | Only hosts matching `allow` patterns are permitted. All other requests are denied. |
 
+Values are case-sensitive and exact. Any other value, and any `allow` pattern with an empty host or an invalid port, is a config error.
+
 ### network.allow
 
 List of hostname glob patterns permitted under `strict` policy.
@@ -460,7 +462,7 @@ network:
 - **Required:** No (only meaningful with `policy: strict`)
 - **Default:** `[]`
 
-Patterns support glob syntax. Port numbers are stripped before matching.
+Patterns support glob syntax. A pattern without a port matches ports 80 and 443. A pattern with a port, such as `api.example.com:8080`, matches only that port.
 
 ---
 
