@@ -204,6 +204,17 @@ func ParseConfig(data []byte) (*Config, error) {
 	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
+	for {
+		var extra yaml.Node
+		if err := dec.Decode(&extra); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return nil, err
+		}
+		if len(extra.Content) > 0 && extra.Content[0].Tag != "!!null" {
+			return nil, errors.New("config must contain a single YAML document")
+		}
+	}
 	if err := cfg.Network.validate(); err != nil {
 		return nil, err
 	}

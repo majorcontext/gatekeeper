@@ -427,8 +427,15 @@ func TestParseConfig_RejectsUnknownKeys(t *testing.T) {
 	}
 }
 
+func TestParseConfig_RejectsSecondDocument(t *testing.T) {
+	in := "network:\n  policy: strict\n---\nnetwrk:\n  policy: strict\n"
+	if _, err := ParseConfig([]byte(in)); err == nil {
+		t.Fatal("ParseConfig ignored a second YAML document")
+	}
+}
+
 func TestParseConfig_EmptyDocuments(t *testing.T) {
-	for _, in := range []string{"", "\n", "# only a comment\n", "---\n"} {
+	for _, in := range []string{"", "\n", "# only a comment\n", "---\n", "network:\n  policy: strict\n---\n"} {
 		cfg, err := ParseConfig([]byte(in))
 		if err != nil {
 			t.Errorf("ParseConfig(%q): %v", in, err)
