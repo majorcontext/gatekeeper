@@ -109,7 +109,7 @@ func matchesPattern(pattern hostPattern, host string, port int) bool {
 
 // hostHasSuffixFold reports whether host ends with suffix, ignoring case.
 // This is the wildcard-suffix rule for network allow patterns
-// (matchesPattern); matchWildcardHostKey in proxy.go applies the same rule
+// (matchesPattern); matchWildcardHostKey applies the same rule
 // against pre-lowered inputs for its per-key scan — a semantic change to
 // one must be mirrored in the other. Implemented via ToLower rather than
 // byte-length slicing: characters whose lowercase form has a different byte

@@ -276,7 +276,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	//
 	// Every exit below calls both p.logPolicy (the policy-decision log) and
 	// p.logRequest (the canonical per-request log), mirroring the http-scope
-	// Keep denial handling in proxy.go's denyHTTP closure: the two logs serve
+	// Keep denial handling in the denyHTTP closure: the two logs serve
 	// different audiences (policy audit trail vs. request-level
 	// observability) and neither substitutes for the other.
 	if rc := getRunContext(r); rc != nil && rc.KeepEngines != nil {

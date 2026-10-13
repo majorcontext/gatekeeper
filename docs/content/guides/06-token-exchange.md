@@ -97,7 +97,7 @@ curl --cacert ca.crt https://api.github.com/user
 
 ## Bot/service fallback
 
-An empty subject already falls through to the next matching credential rule for a host instead of calling the STS -- `getCredentialsForRequest` (`proxy/proxy.go`) treats a resolver's `(nil, nil)` return as "try the next rule," which is how a per-host `github-app` (bot) credential is meant to take over when there is no per-user identity for the STS to exchange. This is what makes the common two-rule pattern work: a `token-exchange` rule for real users, then a `github-app` rule beneath it as the bot fallback.
+An empty subject already falls through to the next matching credential rule for a host instead of calling the STS -- `getCredentialsForRequest` (`proxy/inject.go`) treats a resolver's `(nil, nil)` return as "try the next rule," which is how a per-host `github-app` (bot) credential is meant to take over when there is no per-user identity for the STS to exchange. This is what makes the common two-rule pattern work: a `token-exchange` rule for real users, then a `github-app` rule beneath it as the bot fallback.
 
 A caller building the proxy-auth URL with `undici`'s `ProxyAgent` (Node.js) cannot express that fallback cleanly: undici only sends `Proxy-Authorization` when the proxy URL's username is non-empty (`username && password`, no password-only branch) -- an empty-username proxy URL, the natural way to say "no subject, use the bot," silently sends no proxy auth at all, which most gatekeeper deployments require.
 
