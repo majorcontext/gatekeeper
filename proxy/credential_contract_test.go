@@ -389,10 +389,14 @@ func contractRows() []contractRow {
 			host: "other.box.test",
 			proxy: func(p *Proxy, _ hostKeys, c *atomic.Int32) {
 				p.SetCredentialWithGrant("api.box.test", "Authorization", "Bearer static", "static")
-				p.SetCredentialResolverWithStripHeaders("*.box.test", resolverReturning(c, "Bearer resolver", "resolver"), "X-Subject-Token")
+				p.SetCredentialResolverWithStripHeaders("*.box.test", func(ctx context.Context, _, innerReq *http.Request, _ string) ([]credentialHeader, error) {
+					c.Add(1)
+					innerReq.Header.Del("X-Subject-Token")
+					return authCred("Bearer resolver", "resolver"), nil
+				}, "X-Subject-Token")
 			},
 			headers:   map[string]string{"X-Subject-Token": "caller-identity"},
-			want:      map[string]string{"Authorization": "Bearer resolver", "X-Subject-Token": "caller-identity"},
+			want:      map[string]string{"Authorization": "Bearer resolver"},
 			wantCalls: 1,
 		},
 		{
