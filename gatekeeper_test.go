@@ -2163,7 +2163,7 @@ func TestHTTPSTokenExchangeActorToken(t *testing.T) {
 	t.Setenv("TEST_TE_SECRET_ACTOR", "gk-secret")
 
 	cfg := &Config{
-		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1", AuthToken: "ak_alice_xxx"},
 		TLS: TLSConfig{
 			CACert: filepath.Join(caDir, "ca.crt"),
 			CAKey:  filepath.Join(caDir, "ca.key"),

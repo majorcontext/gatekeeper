@@ -32,7 +32,7 @@ Authorization: Basic base64(client_id:client_secret)
 | `subject_token`      | The subject identity (e.g., `usr_alice` or `alice@example.com`)    | Yes            |
 | `subject_token_type` | A token type URI (default: `urn:ietf:params:oauth:token-type:access_token`) | Yes  |
 | `resource`           | Target resource URI (e.g., `https://api.github.com`)               | Only if configured |
-| `actor_token`        | Caller proof token (e.g., the proxy auth password)                 | Only if `actor_token_from` is configured |
+| `actor_token`        | Caller proof token (the proxy auth password, which is the shared proxy token)                 | Only if `actor_token_from` is configured |
 | `actor_token_type`   | Token type URI (default: `urn:ietf:params:oauth:token-type:access_token`; configurable via `actor_token_type`) | Only if `actor_token` is present |
 
 ### Example Request
@@ -141,14 +141,14 @@ With `subject_from: proxy-auth`, a config may also set `bot_subject` to a sentin
 
 By default, subject identities are self-asserted — any caller can claim to be any user via the subject header or proxy auth username. This is acceptable when callers are isolated (separate containers with pre-configured `HTTP_PROXY` values), but in shared environments you may want the STS to verify the caller's identity.
 
-The recommended pattern uses the proxy auth **password** as a per-user proof token. With `subject_from: proxy-auth`, gatekeeper extracts the username as the subject, but the password is also available to the STS via the RFC 8693 `actor_token` parameter (requires gatekeeper configuration to forward it — see below). The STS validates that the password belongs to the claimed subject before issuing tokens.
+The recommended pattern uses the proxy auth **password** as a proof token. With `subject_from: proxy-auth`, gatekeeper extracts the username as the subject, and the password reaches the STS as the RFC 8693 `actor_token` parameter (requires gatekeeper configuration to forward it -- see below). Gatekeeper requires `proxy.auth_token` or `proxy.auth_token_env` in this mode and rejects any other password with `407`, so the `actor_token` is the shared proxy token.
 
-### Example: per-user API keys as proof tokens
+### Example: the shared proxy token as the actor token
 
-Each user receives a unique API key. The client configures:
+The client configures:
 
 ```
-HTTP_PROXY=http://alice%40example.com:ak_alice_xxxxx@proxy:port
+HTTP_PROXY=http://alice%40example.com:shared-proxy-token@proxy:port
 ```
 
 Gatekeeper sends the STS:
@@ -157,7 +157,7 @@ Gatekeeper sends the STS:
 grant_type=urn:ietf:params:oauth:grant-type:token-exchange
 &subject_token=alice@example.com
 &subject_token_type=urn:ietf:params:oauth:token-type:access_token
-&actor_token=ak_alice_xxxxx
+&actor_token=shared-proxy-token
 &actor_token_type=urn:ietf:params:oauth:token-type:access_token
 &resource=https://api.github.com
 ```
@@ -171,25 +171,28 @@ def handle_token_exchange(request):
         return error_response(401, "unauthorized")
 
     subject = request.form["subject_token"]      # alice@example.com
-    actor   = request.form.get("actor_token")     # ak_alice_xxxxx
+    actor   = request.form.get("actor_token")     # shared-proxy-token
 
-    # Verify the actor token belongs to this subject
-    if not verify_api_key(subject, actor):
+    # Verify the caller holds the shared proxy token
+    if not verify_proxy_token(actor):
         return error_response(403, "invalid_grant",
-            "actor_token does not match subject")
+            "actor_token is not the gatekeeper proxy token")
 
     # Issue scoped token as before
     token = mint_token_for(subject, request.form.get("resource"))
     return {"access_token": token, "expires_in": 3600}
 ```
 
-Without a valid API key for `alice@example.com`, another user cannot exchange tokens on Alice's behalf — even if they control the proxy auth username.
+The actor token proves the caller reached gatekeeper with its shared token. It does not bind a subject to one caller: gatekeeper has no per-caller password mode.
 
 ### Gatekeeper Configuration
 
 To enable actor token forwarding, add `actor_token_from: proxy-auth-password` to the token-exchange source config. This requires `subject_from: proxy-auth`. When `actor_token_from` is configured, gatekeeper rejects requests that do not include a proxy auth password — the STS is never called without an actor token.
 
 ```yaml
+proxy:
+  auth_token_env: GATEKEEPER_PROXY_AUTH_TOKEN
+
 credentials:
   - host: api.github.com
     grant: github
@@ -208,7 +211,7 @@ When `actor_token_from` is not set, the proxy auth password is ignored and no `a
 
 By default, `actor_token_type` is `urn:ietf:params:oauth:token-type:access_token`. To override (e.g., if your actor tokens are JWTs), set `actor_token_type` in the source config.
 
-**Important:** When `actor_token_from` is configured on any credential, gatekeeper requires clients to provide Basic proxy auth with a non-empty password. **If `proxy.auth_token`/`auth_token_env` is left unset**, that password is not compared against a static value — it is forwarded to the STS as the actor token, whichever caller it belongs to; this is the intended shape for one instance serving many callers, each with their own STS-validated password. **If `proxy.auth_token`/`auth_token_env` is set**, a password that does not equal it is rejected with `407` before it ever reaches your endpoint — a deployment that needs distinct per-caller passwords through one instance must leave `auth_token` unset. If your config mixes `actor_token_from` credentials with non-token-exchange credentials, use `network.policy: strict` with a tight `allow` list to restrict which hosts the proxy can reach.
+**Important:** `actor_token_from` requires `proxy.auth_token` or `proxy.auth_token_env`; gatekeeper fails at config load without one. Gatekeeper requires clients to provide Basic proxy auth with a non-empty password, and rejects a password that does not equal the shared token with `407` before it reaches your endpoint. The `actor_token` your endpoint receives is therefore that shared token. If your config mixes `actor_token_from` credentials with non-token-exchange credentials, use `network.policy: strict` with a tight `allow` list to restrict which hosts the proxy can reach.
 
 ## Implementation Checklist
 
@@ -222,7 +225,7 @@ By default, `actor_token_type` is `urn:ietf:params:oauth:token-type:access_token
 - [ ] Set `expires_in` to enable client-side caching (gatekeeper caps it at 60s)
 - [ ] Return non-200 with an error body for invalid/expired/unknown subjects
 - [ ] Handle concurrent requests for the same subject (idempotency or internal locking)
-- [ ] *(Optional)* Validate `actor_token` against `subject_token` to prevent impersonation (see [Preventing Subject Impersonation](#preventing-subject-impersonation))
+- [ ] *(Optional)* Validate `actor_token` as the gatekeeper proxy token (see [Preventing Subject Impersonation](#preventing-subject-impersonation))
 
 ## Testing
 
