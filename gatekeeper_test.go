@@ -1149,7 +1149,7 @@ func TestServerProxyProtocol_DisabledDefault(t *testing.T) {
 // TestServerProxyProtocol_ConnectIntercepted verifies PROXY protocol parsing
 // also covers CONNECT-intercepted HTTPS traffic. Every request path
 // (including intercepted inner requests) logs from the outer, tunnel-opening
-// request's RemoteAddr (see proxy/proxy.go:191-196), so rewriting the
+// request's RemoteAddr, so rewriting the
 // accepted net.Conn's RemoteAddr at the listener is sufficient here too: the
 // inner request's canonical log line must carry the PROXY header's source
 // address.

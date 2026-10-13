@@ -67,7 +67,7 @@ func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialR
 
 		// A configured bot_subject sentinel gets the exact same treatment as
 		// an empty subject: skip the STS round trip entirely and let
-		// getCredentialsForRequest (proxy/proxy.go) fall through to the next
+		// getCredentialsForRequest fall through to the next
 		// matching credential for this host -- typically a github-app (bot)
 		// rule. The cfg.BotSubject != "" guard keeps this inert when
 		// unconfigured (the zero value, every config written before this

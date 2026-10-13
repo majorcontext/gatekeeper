@@ -23,7 +23,17 @@ Key capabilities:
 
 ```
 proxy/              Core TLS-intercepting proxy engine
-  proxy.go            Main proxy: CONNECT handling, TLS interception, credential injection
+  doc.go              Package documentation (security model, firewall integration)
+  proxy.go            Proxy type, NewProxy, run-context and callback types, log data types
+  options.go          Set*/Add* configuration API (credentials, network policy, CA, loggers)
+  inject.go           Credential lookup, per-request resolution, bundles, header injection
+  serve.go            ServeHTTP entry point and plain-HTTP request handling
+  auth.go             Proxy-Authorization parsing, network policy checks, deny responses
+  connect.go          CONNECT handling, tunnels, interception context keys
+  intercept.go        TLS interception, LLM response policy, intercepted request handling
+  gateway.go          Host gateway rewriting, per-request policy lookups, /_aws/ and MCP relay routes
+  httppolicy.go       Content-type checks, Keep HTTP policy call, duplicate JSON key detection
+  logging.go          Request/policy logging, body capture, header filtering and sanitizing
   ca.go              CA certificate loading and per-host cert generation
   hosts.go           Hostname matching (glob patterns, port stripping)
   mcp.go             MCP relay handler (SSE streaming, tool credential injection)
@@ -84,7 +94,7 @@ The `HostGateway` field in `RunContextData` maps a synthetic hostname (used insi
 
 ### OpenTelemetry Instrumentation
 
-OTel integration uses a callback-based architecture — the proxy core (`proxy/proxy.go`) has no OTel imports. Instrumentation is layered on externally:
+OTel integration uses a callback-based architecture — no non-test file in `proxy/` other than `otel.go` imports OTel. Instrumentation is layered on externally:
 
 - **`proxy.NewOTelHandler`** wraps the proxy as HTTP middleware, creating root spans and recording request duration/count metrics. Its `statusRecorder` implements `http.Hijacker` so CONNECT requests still work after hijack.
 - **Request/policy loggers** (set in `gatekeeper.go`) attach span events and record credential injection/policy denial metrics via exported functions `proxy.RecordCredentialInjection` and `proxy.RecordPolicyDenial`.
