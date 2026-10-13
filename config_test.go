@@ -3,8 +3,10 @@ package gatekeeper
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -397,5 +399,86 @@ func TestNew_RejectsBadNetworkPolicy(t *testing.T) {
 				t.Fatal("New accepted an invalid network config")
 			}
 		})
+	}
+}
+
+func TestParseConfig_RejectsUnknownKeys(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{"typo in network", "network:\n  polcy: strict\n", "polcy"},
+		{"top level", "netwrk:\n  policy: strict\n", "netwrk"},
+		{"credential field", "credentials:\n  - host: a.example.com\n    sorce:\n      type: env\n", "sorce"},
+		{"source field", "credentials:\n  - host: a.example.com\n    source:\n      type: env\n      vr: X\n", "vr"},
+		{"postgres field", "postgres:\n  prot: 5432\n", "prot"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseConfig([]byte(tt.yaml))
+			if err == nil {
+				t.Fatalf("ParseConfig accepted unknown key in %q", tt.yaml)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error %q does not name %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseConfig_EmptyDocuments(t *testing.T) {
+	for _, in := range []string{"", "\n", "# only a comment\n", "---\n"} {
+		cfg, err := ParseConfig([]byte(in))
+		if err != nil {
+			t.Errorf("ParseConfig(%q): %v", in, err)
+			continue
+		}
+		if cfg == nil {
+			t.Errorf("ParseConfig(%q) returned nil config", in)
+		}
+	}
+}
+
+func TestParseConfig_ExampleConfigs(t *testing.T) {
+	files, err := filepath.Glob("examples/*.yaml")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no example configs found: %v", err)
+	}
+	for _, f := range files {
+		if _, err := LoadConfig(f); err != nil {
+			t.Errorf("%s: %v", f, err)
+		}
+	}
+}
+
+func TestParseConfig_DocumentedConfigs(t *testing.T) {
+	block := regexp.MustCompile("(?s)```ya?ml\n(.*?)```")
+	topLevel := regexp.MustCompile(`(?m)^(proxy|tls|credentials|network|log|postgres):`)
+	parsed := 0
+	err := filepath.WalkDir("docs/content", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".md") {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for i, m := range block.FindAllStringSubmatch(string(data), -1) {
+			if !topLevel.MatchString(m[1]) {
+				continue
+			}
+			parsed++
+			if _, err := ParseConfig([]byte(m[1])); err != nil {
+				t.Errorf("%s yaml block %d: %v", path, i+1, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed == 0 {
+		t.Fatal("no documented config blocks found")
 	}
 }
