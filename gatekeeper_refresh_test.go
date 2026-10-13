@@ -19,8 +19,7 @@ import (
 
 const refreshTestTTL = 4 * time.Minute
 
-// refreshTestInterval is 75% of refreshTestTTL.
-const refreshTestInterval = 3 * time.Minute
+const refreshTestInterval = refreshTestTTL * 3 / 4
 
 type scriptedRefreshSource struct {
 	ttl   time.Duration
@@ -108,8 +107,6 @@ func runRefreshBubble(t *testing.T, body func(t *testing.T, f *refreshFixture)) 
 	})
 }
 
-// wantInjected compares what the backend saw with the token both credentials
-// should carry.
 func (f *refreshFixture) wantInjected(t *testing.T, when, token string) {
 	t.Helper()
 	authorization, apiKey := f.injected(t)
@@ -233,15 +230,25 @@ func TestStartCredentialRefresh_CancelEndsTheLoop(t *testing.T) {
 		name     string
 		fetch    func(ctx context.Context, n int) (string, error)
 		cancelAt time.Duration
+		inFlight bool
 	}{
-		{"waiting for the first refresh", nil, time.Minute},
-		{"waiting out a backoff", alwaysFail, refreshTestInterval + 500*time.Millisecond},
-		{"fetch in flight", blockUntilCancel, refreshTestInterval + time.Second},
+		{"waiting for the first refresh", nil, time.Minute, false},
+		{"waiting out a backoff", alwaysFail, refreshTestInterval + 500*time.Millisecond, false},
+		{"fetch in flight", blockUntilCancel, refreshTestInterval + time.Second, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			runRefreshBubble(t, func(t *testing.T, f *refreshFixture) {
-				src := &scriptedRefreshSource{ttl: refreshTestTTL, fetch: tt.fetch}
+				var fetchEnd atomic.Pointer[error]
+				fetch := tt.fetch
+				if tt.inFlight {
+					fetch = func(ctx context.Context, n int) (string, error) {
+						v, err := tt.fetch(ctx, n)
+						fetchEnd.Store(&err)
+						return v, err
+					}
+				}
+				src := &scriptedRefreshSource{ttl: refreshTestTTL, fetch: fetch}
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
 				f.srv.startCredentialRefresh(ctx, src, f.creds)
@@ -251,6 +258,11 @@ func TestStartCredentialRefresh_CancelEndsTheLoop(t *testing.T) {
 				src.stopped.Store(true)
 				cancel()
 				synctest.Wait()
+				if tt.inFlight {
+					if err := fetchEnd.Load(); err == nil || !errors.Is(*err, context.Canceled) {
+						t.Errorf("in-flight fetch ended with %v, want context.Canceled", err)
+					}
+				}
 				time.Sleep(time.Hour)
 				synctest.Wait()
 				if n := src.late.Load(); n != 0 {

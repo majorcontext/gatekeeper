@@ -3531,7 +3531,6 @@ func TestServerStopClosesIdleHTTP2Upstream(t *testing.T) {
 	}
 }
 
-// gateSource reports each Fetch on arrived, then blocks until gate closes.
 type gateSource struct {
 	arrived chan<- struct{}
 	gate    <-chan struct{}
