@@ -35,9 +35,17 @@ type otelInstruments struct {
 	policyDenials   metric.Int64Counter
 }
 
+// otelScope selects which instruments newOTelInstruments creates.
+type otelScope int
+
+const (
+	scopeRequest otelScope = iota // handler: spans, request duration and count
+	scopeRecord                   // Record* functions: injection and denial counters
+)
+
 // newOTelInstruments never returns nil. An instrument that cannot be created
 // is a no-op, and the joined creation errors are returned.
-func newOTelInstruments(opts OTelOptions) (*otelInstruments, error) {
+func newOTelInstruments(opts OTelOptions, scope otelScope) (*otelInstruments, error) {
 	tp := opts.TracerProvider
 	if tp == nil {
 		tp = otel.GetTracerProvider()
@@ -59,6 +67,11 @@ func newOTelInstruments(opts OTelOptions) (*otelInstruments, error) {
 		}
 		return c
 	}
+	if scope == scopeRecord {
+		in.credInjections = counter("proxy.credential.injections", "Total number of credential injections")
+		in.policyDenials = counter("proxy.policy.denials", "Total number of policy denials")
+		return in, errors.Join(errs...)
+	}
 	h, err := meter.Float64Histogram("proxy.request.duration",
 		metric.WithDescription("Duration of proxy requests"),
 		metric.WithUnit("s"),
@@ -69,15 +82,13 @@ func newOTelInstruments(opts OTelOptions) (*otelInstruments, error) {
 	}
 	in.requestDuration = h
 	in.requestCount = counter("proxy.request.count", "Total number of proxy requests")
-	in.credInjections = counter("proxy.credential.injections", "Total number of credential injections")
-	in.policyDenials = counter("proxy.policy.denials", "Total number of policy denials")
 	return in, errors.Join(errs...)
 }
 
 // globalInstruments back RecordCredentialInjection and RecordPolicyDenial,
 // which always use the global providers.
 var globalInstruments = sync.OnceValue(func() *otelInstruments {
-	in, err := newOTelInstruments(OTelOptions{})
+	in, err := newOTelInstruments(OTelOptions{}, scopeRecord)
 	if err != nil {
 		slog.Warn("otel instruments unavailable", "error", err)
 	}
@@ -197,7 +208,7 @@ func spanName(rt string) string {
 // metrics. If an instrument cannot be created, the handler still works with
 // that instrument disabled and the error reports which ones failed.
 func NewOTelHandler(next http.Handler, opts OTelOptions) (http.Handler, error) {
-	in, err := newOTelInstruments(opts)
+	in, err := newOTelInstruments(opts, scopeRequest)
 	return in.handler(next), err
 }
 
