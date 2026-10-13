@@ -34,11 +34,13 @@ type TokenExchangeResolverConfig struct {
 	Format         string
 
 	// ProxyAuth returns the user and password of the request's proxy
-	// authentication, or empty strings when it has none.
+	// authentication, or empty strings when it has none. Nil means no
+	// request has proxy authentication.
 	ProxyAuth func(*http.Request) (user, password string)
-	// RequestID returns the request ID carried by ctx, or an empty string.
+	// RequestID returns the request ID carried by ctx. Nil means no ID.
 	RequestID func(context.Context) string
-	// AuthValue turns an exchanged token into the header value.
+	// AuthValue turns an exchanged token into the header value. Nil uses
+	// the token as is.
 	AuthValue func(token, prefix, format string) string
 }
 
@@ -46,6 +48,16 @@ type TokenExchangeResolverConfig struct {
 // caller's subject for an access token through one shared TokenExchangeSource.
 func TokenExchangeResolver(cfg TokenExchangeResolverConfig) HeaderResolver {
 	src := NewTokenExchangeSource(cfg.TokenExchangeConfig)
+
+	if cfg.ProxyAuth == nil {
+		cfg.ProxyAuth = func(*http.Request) (string, string) { return "", "" }
+	}
+	if cfg.RequestID == nil {
+		cfg.RequestID = func(context.Context) string { return "" }
+	}
+	if cfg.AuthValue == nil {
+		cfg.AuthValue = func(token, _, _ string) string { return token }
+	}
 
 	header := cfg.Header
 	if header == "" {
