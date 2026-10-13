@@ -77,7 +77,7 @@ func (h *recordingHandler) refreshMessages() []string {
 	return out
 }
 
-func startBlockedRefresh(t *testing.T, result error) (*Server, *blockingSource, *recordingHandler) {
+func newRefreshServer(t *testing.T, result error) (*Server, *blockingSource, *recordingHandler) {
 	t.Helper()
 	prevFloor := refreshFloor
 	refreshFloor = time.Millisecond
@@ -108,6 +108,12 @@ func startBlockedRefresh(t *testing.T, result error) (*Server, *blockingSource, 
 	}); err != nil {
 		t.Fatal(err)
 	}
+	return srv, src, logs
+}
+
+func startBlockedRefresh(t *testing.T, result error) (*Server, *blockingSource, *recordingHandler) {
+	t.Helper()
+	srv, src, logs := newRefreshServer(t, result)
 	ctx, cancel := context.WithCancel(context.Background())
 	startDone := make(chan struct{})
 	go func() { defer close(startDone); _ = srv.Start(ctx) }()
@@ -145,6 +151,9 @@ func TestStop_WaitsForInFlightRefresh(t *testing.T) {
 			if src.closedMid.Load() {
 				t.Error("source closed while a refresh Fetch was in flight")
 			}
+			if !src.closed.Load() {
+				t.Error("source not closed after refreshes drained")
+			}
 			if got := logs.refreshMessages(); len(got) != 0 {
 				t.Errorf("refresh activity logged after Stop: %q", got)
 			}
@@ -163,4 +172,23 @@ func TestStop_DeadlineBoundsRefreshWait(t *testing.T) {
 		t.Error("source closed although a refresh Fetch was still in flight at the Stop deadline")
 	}
 	close(src.release)
+}
+
+func TestStop_BeforeStartPreventsRefresh(t *testing.T) {
+	srv, src, _ := newRefreshServer(t, nil)
+	if err := srv.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fetches := src.calls.Load()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	startDone := make(chan struct{})
+	go func() { defer close(startDone); _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+	cancel()
+	<-startDone
+
+	if got := src.calls.Load(); got != fetches {
+		t.Errorf("Fetch calls after Stop = %d, want %d: Start launched a refresh against a closed source", got, fetches)
+	}
 }

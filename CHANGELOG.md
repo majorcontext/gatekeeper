@@ -10,8 +10,6 @@ Gatekeeper is pre-1.0. The configuration schema and credential source interface 
 
 - **One outbound preparation for plain HTTP, CONNECT interception, and `/relay/`** (`proxy/proxy.go`, `proxy/relay.go`) — the credential, extra-header, header-removal, capture-header, and token-substitution sequence was written three times, and the relay copy had drifted. Relay requests now strip the configured capture headers and apply token substitution (URL path, `Authorization`, and request body of up to 64 KiB) like the other paths. Previously capture headers reached relay targets and placeholders were forwarded unreplaced. Plain-HTTP requests now substitute tokens in the request body too, as CONNECT interception already did; before, the body went upstream with the placeholder.
 
-## Unreleased
-
 ### Fixed
 
 - **`Server.Stop` waits for credential refreshes before closing sources** (`gatekeeper.go`) — `Stop` cancelled the refresh goroutines but did not wait, then closed the sources, so a refresh could run `Fetch` on a closed source, log a false "credential refresh failed", or set a credential after `Stop` returned. `Stop` now waits for the goroutines, bounded by its context; if the context expires first the sources are left open.
