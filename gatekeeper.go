@@ -216,18 +216,14 @@ func (s *Server) configurePolicy(cfg *Config) error {
 // token exchange) one cache. Sources are built in config order, fetched
 // concurrently (each fetch is a network round trip, and a production config
 // has about a dozen), and applied in config order. The first fetch failure
-// cancels the other fetches. Build errors come before fetch errors; among
-// fetch errors the first credential in the file that did not merely lose to
-// the cancellation is the one reported.
+// cancels the other fetches. Build errors come before fetch errors, and the
+// fetch error reported is the one that caused the cancellation.
 func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 	type pendingSource struct {
 		src   credentialsource.CredentialSource
 		fetch bool
 		val   string
 		err   error
-		// canceled marks a fetch that ended because another fetch failed;
-		// its error need not wrap context.Canceled.
-		canceled bool
 	}
 	type credEntry struct {
 		cred   CredentialConfig
@@ -356,6 +352,8 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 	fetchCtx, cancelFetches := context.WithCancel(ctx)
 	defer cancelFetches()
 	var wg sync.WaitGroup
+	var firstFailure sync.Once
+	var failed *pendingSource
 	slots := make(chan struct{}, maxConcurrentFetches)
 	for _, ps := range unique {
 		if !ps.fetch {
@@ -364,7 +362,7 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 		slots <- struct{}{}
 		if fetchCtx.Err() != nil {
 			<-slots
-			ps.err, ps.canceled = fetchCtx.Err(), true
+			ps.err = fetchCtx.Err()
 			continue
 		}
 		wg.Add(1)
@@ -375,23 +373,17 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 			defer cancel()
 			ps.val, ps.err = ps.src.Fetch(c)
 			if ps.err != nil {
-				if fetchCtx.Err() != nil {
-					ps.canceled = true
-				} else {
+				firstFailure.Do(func() {
+					failed = ps
 					cancelFetches()
-				}
+				})
 			}
 		}()
 	}
 	wg.Wait()
 
 	for _, e := range entries {
-		if e.source != nil && e.source.err != nil && !e.source.canceled {
-			return fetchError(e.cred, e.pg, e.source.err)
-		}
-	}
-	for _, e := range entries {
-		if e.source != nil && e.source.err != nil {
+		if e.source != nil && e.source.err != nil && (failed == nil || e.source == failed) {
 			return fetchError(e.cred, e.pg, e.source.err)
 		}
 	}

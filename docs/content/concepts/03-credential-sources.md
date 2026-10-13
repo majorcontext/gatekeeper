@@ -61,7 +61,7 @@ The `github-app` and `gcp-service-account` sources are `RefreshingSource`s. Both
 
 ## Source deduplication
 
-When multiple credential entries share the same `SourceConfig` (identical `type`, `var`, `secret`, etc.), gatekeeper fetches the credential once and applies it to all matching hosts. A single background refresh goroutine updates every host that shares the source. Header, `static` Postgres, `neon` Postgres, and `token-exchange` credentials all take part: hosts with identical `token-exchange` blocks share one token cache, and all startup fetches run concurrently. The first fetch that fails cancels the others and fails startup.
+When multiple credential entries share the same `SourceConfig` (identical `type`, `var`, `secret`, etc.), gatekeeper fetches the credential once and applies it to all matching hosts. A single background refresh goroutine updates every host that shares the source. Header and `static` Postgres credentials with an identical source share one startup fetch (only header credentials are refreshed in the background; `static` Postgres passwords are fetched once). `neon` Postgres credentials share the source instance but fetch their API key lazily. Hosts with identical `token-exchange` blocks share one token cache. All startup fetches run concurrently, and the first one that fails cancels the others and fails startup.
 
 ```yaml
 credentials:

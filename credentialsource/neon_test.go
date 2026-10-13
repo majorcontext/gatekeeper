@@ -680,3 +680,46 @@ func TestNeonResolverRefetchesAPIKeyAfterUnauthorized(t *testing.T) {
 		}
 	})
 }
+
+type gatedKeySource struct {
+	fetches *atomic.Int64
+	gate    <-chan struct{}
+}
+
+func (g gatedKeySource) Fetch(ctx context.Context) (string, error) {
+	g.fetches.Add(1)
+	select {
+	case <-g.gate:
+		return testNeonAPIKey, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+func (g gatedKeySource) Type() string { return "gated" }
+
+func TestNeonResolverConcurrentResolvesShareOneAPIKeyFetch(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := &fakeNeonAPI{t: t, password: "s3cret", branchID: "br-9"}
+		var fetches atomic.Int64
+		gate := make(chan struct{})
+		r := &NeonResolver{
+			APIKey:     gatedKeySource{fetches: &fetches, gate: gate},
+			BaseURL:    "http://neon.test",
+			HTTPClient: &http.Client{Transport: recorderTransport{f}},
+		}
+		var wg sync.WaitGroup
+		for _, host := range []string{"ep-aaa-111111.us-east-2.aws.neon.tech", "ep-bbb-222222.us-east-2.aws.neon.tech"} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, _ = r.ResolvePassword(context.Background(), host, testNeonRole, testNeonDatabase)
+			}()
+		}
+		synctest.Wait()
+		close(gate)
+		wg.Wait()
+		if got := fetches.Load(); got != 1 {
+			t.Errorf("API key fetches for two concurrent resolves on cold start = %d, want 1", got)
+		}
+	})
+}

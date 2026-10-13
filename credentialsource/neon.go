@@ -71,6 +71,7 @@ type NeonResolver struct {
 	// the same for the connection_uri fetch, keyed on (endpoint, role, database).
 	findGroup     singleflight.Group
 	passwordGroup singleflight.Group
+	keyGroup      singleflight.Group
 	// baseCtx is the resolver's lifetime context. The singleflight closures
 	// derive their per-call deadline from it (not from any one caller's context,
 	// which would let one caller's cancellation cascade to all waiters), and
@@ -351,29 +352,46 @@ func (r *NeonResolver) fetchPassword(ctx context.Context, info neonEndpointInfo,
 // TTL, as the server's refresh loop does); any other source uses the
 // password TTL.
 func (r *NeonResolver) cachedAPIKey(ctx context.Context) (string, error) {
-	r.mu.Lock()
-	if r.apiKey != "" && time.Now().Before(r.keyExpiry) {
-		key := r.apiKey
-		r.mu.Unlock()
+	if key, ok := r.freshAPIKey(); ok {
 		return key, nil
 	}
-	r.mu.Unlock()
-
-	key, err := r.APIKey.Fetch(ctx)
+	// Concurrent misses share one Fetch, which runs on the resolver's own
+	// deadline so one caller giving up does not fail the others.
+	v, err, _ := r.keyGroup.Do("key", func() (any, error) {
+		if key, ok := r.freshAPIKey(); ok {
+			return key, nil
+		}
+		fctx, cancel := context.WithTimeout(r.baseContext(), neonResolveTimeout)
+		defer cancel()
+		key, err := r.APIKey.Fetch(fctx)
+		if err != nil {
+			return "", fmt.Errorf("fetch neon API key: %w", err)
+		}
+		life := r.TTL
+		if life <= 0 {
+			life = defaultNeonPasswordTTL
+		}
+		if rs, ok := r.APIKey.(RefreshingSource); ok {
+			life = rs.TTL() * 3 / 4
+		}
+		r.mu.Lock()
+		r.apiKey, r.keyExpiry = key, time.Now().Add(life)
+		r.mu.Unlock()
+		return key, nil
+	})
 	if err != nil {
-		return "", fmt.Errorf("fetch neon API key: %w", err)
+		return "", err
 	}
-	life := r.TTL
-	if life <= 0 {
-		life = defaultNeonPasswordTTL
-	}
-	if rs, ok := r.APIKey.(RefreshingSource); ok {
-		life = rs.TTL() * 3 / 4
-	}
+	return v.(string), nil
+}
+
+func (r *NeonResolver) freshAPIKey() (string, bool) {
 	r.mu.Lock()
-	r.apiKey, r.keyExpiry = key, time.Now().Add(life)
-	r.mu.Unlock()
-	return key, nil
+	defer r.mu.Unlock()
+	if r.apiKey != "" && time.Now().Before(r.keyExpiry) {
+		return r.apiKey, true
+	}
+	return "", false
 }
 
 // dropAPIKey forgets key if it is still the cached one, so a rejected key is
