@@ -3756,7 +3756,7 @@ func TestLoadCredentials_ClosesPostgresResolversWhenALaterFetchFails(t *testing.
 	}
 }
 
-func startNeonRelay(t *testing.T, pg *PostgresCredentialConfig, neonAPI string, mutate func(*Server)) (*Server, *x509.CertPool) {
+func startNeonRelay(t *testing.T, pg *PostgresCredentialConfig, neonAPI string) (*Server, *x509.CertPool) {
 	t.Helper()
 	caDir := t.TempDir()
 	ca, err := proxy.NewCA(caDir)
@@ -3778,9 +3778,6 @@ func startNeonRelay(t *testing.T, pg *PostgresCredentialConfig, neonAPI string, 
 	srv, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
-	}
-	if mutate != nil {
-		mutate(srv)
 	}
 	srv.neonBaseURL = neonAPI
 	if err := srv.loadCredentials(context.Background(), cfg); err != nil {
@@ -3857,7 +3854,7 @@ func TestPostgresCredentialProjectEnv_OtherProjectEndpointDenied(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	t.Cleanup(api.Close)
-	srv, pool := startNeonRelay(t, &PostgresCredentialConfig{Resolver: "neon", ProjectEnv: "TEST_NEON_PROJECT"}, api.URL, nil)
+	srv, pool := startNeonRelay(t, &PostgresCredentialConfig{Resolver: "neon", ProjectEnv: "TEST_NEON_PROJECT"}, api.URL)
 
 	if got := relayErrorCode(t, srv, pool, "ep-cool-darkness-123456.us-east-2.aws.neon.tech"); got != "28P01" {
 		t.Errorf("error code = %q, want 28P01", got)
@@ -3879,7 +3876,7 @@ func TestPostgresCredentialProjectEnv_EmptyValueRegistersNothing(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	t.Cleanup(api.Close)
-	srv, pool := startNeonRelay(t, &PostgresCredentialConfig{Resolver: "neon", ProjectEnv: "TEST_NEON_PROJECT"}, api.URL, nil)
+	srv, pool := startNeonRelay(t, &PostgresCredentialConfig{Resolver: "neon", ProjectEnv: "TEST_NEON_PROJECT"}, api.URL)
 
 	if got := relayErrorCode(t, srv, pool, "ep-cool-darkness-123456.us-east-2.aws.neon.tech"); got != "08004" {
 		t.Errorf("error code = %q, want 08004", got)
