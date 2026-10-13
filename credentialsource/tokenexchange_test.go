@@ -865,7 +865,7 @@ func TestTokenExchangeResolver_NilProxyAuthIssuesNothing(t *testing.T) {
 		SubjectFrom:         "proxy-auth",
 	})
 	proxyReq := httptest.NewRequest("CONNECT", "http://example.com/", nil)
-	proxyReq.SetBasicAuth("alice", "pw")
+	proxyReq.Header.Set("Proxy-Authorization", "Basic YWxpY2U6cHc=")
 	got, err := resolve(context.Background(), proxyReq, httptest.NewRequest("GET", "http://example.com/", nil), "example.com")
 	if err != nil || got != nil {
 		t.Fatalf("resolve = %+v, %v; want nil, nil", got, err)
