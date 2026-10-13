@@ -18,6 +18,22 @@ import (
 // the safe default.
 const drainLimit = 64 << 10
 
+// forwardStreaming writes resp's headers and status to w, flushes them so
+// streaming clients see the response start, and streams the body with
+// streamResponseBody. It returns the body bytes written and the stream error.
+func forwardStreaming(w http.ResponseWriter, resp *http.Response, ctx context.Context) (int64, error) {
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	if flusher, canFlush := w.(http.Flusher); canFlush {
+		flusher.Flush()
+	}
+	return streamResponseBody(w, resp.Body, ctx)
+}
+
 // streamResponseBody copies body to w with per-chunk flushing, returning
 // bytes written and the error to attribute (nil for EOF, client
 // cancellation, or client-side write failure; the upstream read error when

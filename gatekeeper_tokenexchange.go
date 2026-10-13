@@ -2,11 +2,9 @@ package gatekeeper
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"net/http"
 	"os"
-	"strings"
 
 	"github.com/majorcontext/gatekeeper/credentialsource"
 	"github.com/majorcontext/gatekeeper/proxy"
@@ -70,25 +68,8 @@ func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialR
 }
 
 func extractProxyAuthCredentials(r *http.Request) (username, password string) {
-	if r == nil {
-		return "", ""
-	}
-	auth := r.Header.Get("Proxy-Authorization")
-	if auth == "" {
-		return "", ""
-	}
-	if !strings.HasPrefix(auth, "Basic ") {
-		return "", ""
-	}
-	decoded, err := base64.StdEncoding.DecodeString(auth[6:])
-	if err != nil {
-		return "", ""
-	}
-	u, p, ok := strings.Cut(string(decoded), ":")
-	if !ok {
-		return "", ""
-	}
-	return u, p
+	username, password, _ = proxy.ProxyAuth(r)
+	return username, password
 }
 
 func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, error) {

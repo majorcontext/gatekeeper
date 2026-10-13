@@ -489,24 +489,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 
 	slog.Debug("MCP relay response", "server", serverName, "status", resp.StatusCode)
 
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-
-	// Copy status code
-	w.WriteHeader(resp.StatusCode)
-
-	// For SSE streaming, flush after headers
-	if flusher, canFlush := w.(http.Flusher); canFlush {
-		flusher.Flush()
-	}
-
-	// Copy response body with streaming support, mirroring handleRelay's
-	// stream loop. The byte count is the real response size — ContentLength
-	// is -1 for streams.
-	written, copyErr := streamResponseBody(w, resp.Body, r.Context())
+	written, copyErr := forwardStreaming(w, resp, r.Context())
 
 	p.logExit(r, logBase, start, resp.StatusCode, func(d *RequestLogData) {
 		d.Err = copyErr

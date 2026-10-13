@@ -351,7 +351,7 @@ func TestProxy_DelegateAuthRejectsBearerAuth(t *testing.T) {
 // TestProxy_MismatchedProxyPasswordRejected pins the fix for a companion
 // accepting another caller's valid-but-foreign proxy password under
 // delegateAuth: box B's companion answered 200 and served the request as
-// box A's identity because hasBasicProxyAuth only checked that a password
+// box A's identity because the delegateAuth check only checked that a password
 // was present, never that it equaled B's own authToken. Whenever authToken
 // is configured, a mismatched password is now rejected unconditionally,
 // without disturbing a request that presents no credentials at all (some
@@ -3850,7 +3850,7 @@ func TestProxy_CredentialResolverNoMatch(t *testing.T) {
 	}
 }
 
-func TestExtractProxyUsername(t *testing.T) {
+func TestProxyAuthUser(t *testing.T) {
 	tests := []struct {
 		name   string
 		header string
@@ -3868,9 +3868,9 @@ func TestExtractProxyUsername(t *testing.T) {
 			if tt.header != "" {
 				r.Header.Set("Proxy-Authorization", tt.header)
 			}
-			got := extractProxyUsername(r)
+			got, _, _ := ProxyAuth(r)
 			if got != tt.want {
-				t.Errorf("extractProxyUsername() = %q, want %q", got, tt.want)
+				t.Errorf("ProxyAuth() user = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -4602,5 +4602,34 @@ func TestProxy_HostGatewayLoopbackSpellingsRestricted(t *testing.T) {
 				t.Errorf("X-Moat-Blocked = %q, want host-service", got)
 			}
 		})
+	}
+}
+
+func TestProxy_ContextResolverRejectionBodiesAreIdentical(t *testing.T) {
+	p := NewProxy()
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		return nil, false
+	})
+
+	reject := func(header string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "http://example.com/", nil)
+		if header != "" {
+			req.Header.Set("Proxy-Authorization", header)
+		}
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+		return rec
+	}
+
+	missing := reject("")
+	wrong := reject("Bearer not-a-registered-token")
+	if missing.Code != http.StatusProxyAuthRequired || wrong.Code != http.StatusProxyAuthRequired {
+		t.Fatalf("status = %d and %d, want 407 for both", missing.Code, wrong.Code)
+	}
+	if wrong.Body.String() != missing.Body.String() {
+		t.Errorf("wrong-token body = %q, no-token body = %q, want identical", wrong.Body.String(), missing.Body.String())
+	}
+	if got := wrong.Header().Get("Proxy-Authenticate"); got != missing.Header().Get("Proxy-Authenticate") || got == "" {
+		t.Errorf("Proxy-Authenticate = %q, want the same non-empty challenge as the no-token response", got)
 	}
 }
