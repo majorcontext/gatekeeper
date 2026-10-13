@@ -22,6 +22,9 @@ type HeaderResolver func(ctx context.Context, proxyReq, innerReq *http.Request, 
 // TokenExchangeResolverConfig configures TokenExchangeResolver.
 type TokenExchangeResolverConfig struct {
 	TokenExchangeConfig
+	// Source, when set, serves the exchanges so several resolvers share one
+	// cache. Nil builds a source from TokenExchangeConfig.
+	Source *TokenExchangeSource
 
 	SubjectHeader  string
 	SubjectFrom    string
@@ -46,7 +49,10 @@ type TokenExchangeResolverConfig struct {
 // TokenExchangeResolver returns a per-request resolver that exchanges the
 // caller's subject for an access token through one shared TokenExchangeSource.
 func TokenExchangeResolver(cfg TokenExchangeResolverConfig) HeaderResolver {
-	src := NewTokenExchangeSource(cfg.TokenExchangeConfig)
+	src := cfg.Source
+	if src == nil {
+		src = NewTokenExchangeSource(cfg.TokenExchangeConfig)
+	}
 
 	if cfg.ProxyAuth == nil {
 		cfg.ProxyAuth = func(*http.Request) (string, string) { return "", "" }

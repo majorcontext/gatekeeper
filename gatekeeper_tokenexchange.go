@@ -13,6 +13,7 @@ import (
 )
 
 type tokenExchangeResolverConfig struct {
+	Source           *credentialsource.TokenExchangeSource
 	Endpoint         string
 	ClientID         string
 	ClientSecret     string
@@ -31,6 +32,7 @@ type tokenExchangeResolverConfig struct {
 
 func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialResolver {
 	resolve := credentialsource.TokenExchangeResolver(credentialsource.TokenExchangeResolverConfig{
+		Source: cfg.Source,
 		TokenExchangeConfig: credentialsource.TokenExchangeConfig{
 			Endpoint:         cfg.Endpoint,
 			ClientID:         cfg.ClientID,
@@ -90,6 +92,10 @@ func extractProxyAuthCredentials(r *http.Request) (username, password string) {
 }
 
 func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, error) {
+	return resolveSharedTokenExchange(cred, nil)
+}
+
+func resolveSharedTokenExchange(cred CredentialConfig, shared map[SourceConfig]*credentialsource.TokenExchangeSource) (proxy.CredentialResolver, error) {
 	cfg := cred.Source
 	if cfg.Endpoint == "" {
 		return nil, fmt.Errorf("token-exchange source requires 'endpoint' field")
@@ -150,7 +156,24 @@ func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, erro
 		header = "Authorization"
 	}
 
+	var src *credentialsource.TokenExchangeSource
+	if shared != nil {
+		src = shared[cred.Source]
+		if src == nil {
+			src = credentialsource.NewTokenExchangeSource(credentialsource.TokenExchangeConfig{
+				Endpoint:         cfg.Endpoint,
+				ClientID:         cfg.ClientID,
+				ClientSecret:     clientSecret,
+				Resource:         cfg.Resource,
+				SubjectTokenType: cfg.SubjectTokenType,
+				ActorTokenType:   cfg.ActorTokenType,
+			})
+			shared[cred.Source] = src
+		}
+	}
+
 	return newTokenExchangeResolver(tokenExchangeResolverConfig{
+		Source:           src,
 		Endpoint:         cfg.Endpoint,
 		ClientID:         cfg.ClientID,
 		ClientSecret:     clientSecret,

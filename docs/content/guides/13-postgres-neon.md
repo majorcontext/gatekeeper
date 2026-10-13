@@ -66,6 +66,8 @@ Omit the top-level `postgres` block to run gatekeeper without the data plane. A 
 
 Gatekeeper refuses to start if `postgres` is configured without `tls.ca_cert` and `tls.ca_key`: the listener terminates client TLS with a CA-minted certificate for the connection's SNI hostname, so there is no way to run it without a CA.
 
+Gatekeeper reads the API key from its source once per source lifetime (75% of the source TTL when the source reports one, otherwise the password TTL) and drops it when the Neon API answers `401`.
+
 ## Account-scoped vs. project-scoped API keys
 
 Gatekeeper locates the project and branch that own a Neon endpoint before it can fetch that branch's password. How it does this depends on the API key's scope:
