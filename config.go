@@ -217,10 +217,25 @@ func ParseConfig(data []byte) (*Config, error) {
 			return nil, errors.New("config must contain a single YAML document")
 		}
 	}
-	if err := cfg.Network.validate(); err != nil {
+	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+func (c *Config) validate() error {
+	if err := c.Network.validate(); err != nil {
+		return err
+	}
+	if c.Proxy.AuthToken != "" || c.Proxy.AuthTokenEnv != "" {
+		return nil
+	}
+	for _, cred := range c.Credentials {
+		if cred.Source.ActorTokenFrom != "" {
+			return fmt.Errorf("credential for host %q sets actor_token_from, which requires proxy.auth_token or proxy.auth_token_env", cred.Host)
+		}
+	}
+	return nil
 }
 
 func (n NetworkConfig) validate() error {

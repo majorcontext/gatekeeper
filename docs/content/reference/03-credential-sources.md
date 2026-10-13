@@ -440,7 +440,7 @@ Source for the optional RFC 8693 actor token.
 
 When set to `"proxy-auth-password"`, the actor token is extracted from the password in the `Proxy-Authorization` Basic auth header. Requires `subject_from: proxy-auth`.
 
-When `actor_token_from` is configured, gatekeeper requires clients to provide a non-empty proxy auth password, validated by the STS instead of a static value — but only when `proxy.auth_token`/`auth_token_env` is left unset. If `auth_token` (or `auth_token_env`) is set, a password that does not equal it is rejected with `407` before it ever reaches the STS; see [proxy.auth_token](02-config-file.md#proxyauth_token).
+When `actor_token_from` is configured, gatekeeper requires clients to provide a non-empty proxy auth password, and requires `proxy.auth_token` or `proxy.auth_token_env`: a config without one fails at load. A password that does not equal the shared token is rejected with `407` before it reaches the STS; see [proxy.auth_token](02-config-file.md#proxyauth_token).
 
 ### actor_token_type
 

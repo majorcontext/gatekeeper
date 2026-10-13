@@ -733,12 +733,10 @@ func (p *Proxy) SetAuthToken(token string) {
 	p.authToken = token
 }
 
-// SetDelegateAuth allows credential resolvers to validate caller identity
-// instead of a single shared authToken. Used when actor_token_from is
-// configured and each caller has a unique proxy auth password that the STS
-// validates. It only widens what ServeHTTP accepts when authToken is empty:
-// when authToken is set, ServeHTTP still requires a presented password to
-// equal it before delegateAuth or any resolver ever runs (see ServeHTTP).
+// SetDelegateAuth makes ServeHTTP require a non-empty proxy auth password and
+// leave its validation to credential resolvers. With authToken empty, no
+// static check applies to the password; with authToken set, ServeHTTP still
+// requires a presented password to equal it before any resolver runs.
 func (p *Proxy) SetDelegateAuth(delegate bool) {
 	p.delegateAuth = delegate
 }

@@ -143,11 +143,14 @@ The sentinel subject is exactly what shows up as `user_id` on the [canonical log
 
 ## Actor token forwarding
 
-By default, subject identities are self-asserted -- any caller can claim any identity. In shared environments, use **actor token forwarding** to let the STS verify caller identity.
+By default, subject identities are self-asserted -- any caller can claim any identity. In shared environments, use **actor token forwarding** to let the STS verify that the caller is an authorized gatekeeper client.
 
-Configure gatekeeper to forward the proxy auth password as the RFC 8693 `actor_token`:
+Configure gatekeeper to forward the proxy auth password as the RFC 8693 `actor_token`. `actor_token_from` requires `proxy.auth_token` or `proxy.auth_token_env`; gatekeeper fails at config load without one, naming the credential host.
 
 ```yaml
+proxy:
+  auth_token_env: GATEKEEPER_PROXY_AUTH_TOKEN
+
 credentials:
   - host: api.github.com
     grant: github
@@ -162,15 +165,15 @@ credentials:
       resource: https://api.github.com
 ```
 
-Each caller uses a unique API key as the proxy auth password:
+Each caller sends the shared proxy token as the proxy auth password and its subject as the username:
 
 ```bash
-HTTP_PROXY=http://alice%40example.com:ak_alice_xxxxx@127.0.0.1:9080
+HTTP_PROXY=http://alice%40example.com:shared-proxy-token@127.0.0.1:9080
 ```
 
-Gatekeeper sends both `subject_token=alice@example.com` and `actor_token=ak_alice_xxxxx` to the STS. The STS validates that the API key belongs to Alice before issuing tokens.
+Gatekeeper sends both `subject_token=alice@example.com` and `actor_token=shared-proxy-token` to the STS. The STS validates the actor token before issuing tokens.
 
-When `actor_token_from` is configured on any credential, gatekeeper requires all clients to provide Basic proxy auth with a non-empty password. **If `proxy.auth_token`/`auth_token_env` is left unset**, that password is not checked against a static value -- it is forwarded to the STS as-is, whichever caller it belongs to; this is the intended shape for one gatekeeper instance serving many callers, each with their own STS-validated password. **If `proxy.auth_token`/`auth_token_env` is set**, a password that does not equal it is rejected with `407` before it ever reaches the STS -- see [proxy.auth_token](../reference/02-config-file.md#proxyauth_token). A deployment that needs distinct per-caller passwords through one instance must leave `auth_token` unset.
+When `actor_token_from` is configured on any credential, gatekeeper requires all clients to provide Basic proxy auth with a non-empty password. A password that does not equal `proxy.auth_token`/`auth_token_env` is rejected with `407` before it reaches the STS -- see [proxy.auth_token](../reference/02-config-file.md#proxyauth_token). Gatekeeper has no per-caller password mode: with no shared token, any non-empty password would receive every static credential on non-token-exchange hosts, so the config is rejected.
 
 ## Caching behavior
 
@@ -247,7 +250,7 @@ Gatekeeper treats any non-200 status as a failure and returns HTTP 502 to the cl
 - [ ] Set `expires_in` to enable caching (values above 60s are capped)
 - [ ] Return non-200 for invalid/expired/unknown subjects
 - [ ] Handle concurrent requests (idempotency or internal locking)
-- [ ] *(Optional)* Validate `actor_token` against `subject_token` to prevent impersonation
+- [ ] *(Optional)* Validate `actor_token` as the gatekeeper proxy token
 
 ## Testing
 

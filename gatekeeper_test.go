@@ -2228,7 +2228,7 @@ func TestHTTPSTokenExchangeActorToken(t *testing.T) {
 	t.Setenv("TEST_TE_SECRET_ACTOR", "gk-secret")
 
 	cfg := &Config{
-		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1", AuthToken: "ak_alice_xxx"},
 		TLS: TLSConfig{
 			CACert: filepath.Join(caDir, "ca.crt"),
 			CAKey:  filepath.Join(caDir, "ca.key"),
@@ -2305,14 +2305,8 @@ func TestHTTPSTokenExchangeActorToken(t *testing.T) {
 	}
 }
 
-// TestHTTPSTokenExchangeActorTokenWithAuthTokenMismatchRejected pins a
-// genuine behavior change end-to-end: auth_token together with
-// actor_token_from used to let any different, STS-validated password pass,
-// because delegateAuth skipped the static auth_token comparison entirely.
-// A caller's request now gets 407 before the STS or the backend ever see
-// it, so a deployment needing distinct per-caller passwords through
-// actor_token_from must leave auth_token unset (see
-// TestHTTPSTokenExchangeActorToken above).
+// A password that differs from auth_token gets 407 before the STS or the
+// backend see the request, even with actor_token_from set.
 func TestHTTPSTokenExchangeActorTokenWithAuthTokenMismatchRejected(t *testing.T) {
 	caDir := t.TempDir()
 	ca, err := proxy.NewCA(caDir)

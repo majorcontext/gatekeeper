@@ -491,3 +491,43 @@ func TestParseConfig_DocumentedConfigs(t *testing.T) {
 		t.Fatal("no documented config blocks found")
 	}
 }
+
+func TestActorTokenFromRequiresSharedProxyToken(t *testing.T) {
+	cred := CredentialConfig{
+		Host: "api.github.com",
+		Source: SourceConfig{
+			Type:           "token-exchange",
+			Endpoint:       "https://sts.example.com/token",
+			ClientID:       "gk-client",
+			ClientSecret:   "s",
+			SubjectFrom:    "proxy-auth",
+			ActorTokenFrom: "proxy-auth-password",
+		},
+	}
+	t.Run("rejected without a token", func(t *testing.T) {
+		srv, err := New(context.Background(), &Config{Credentials: []CredentialConfig{cred}}, Options{})
+		if err == nil {
+			_ = srv.Stop(context.Background())
+			t.Fatal("New accepted actor_token_from without proxy.auth_token or proxy.auth_token_env")
+		}
+		if !strings.Contains(err.Error(), "api.github.com") {
+			t.Errorf("error %q does not name the credential host", err)
+		}
+	})
+	t.Run("rejected by ParseConfig", func(t *testing.T) {
+		y := "credentials:\n  - host: api.github.com\n    source:\n      type: token-exchange\n      endpoint: https://sts.example.com/token\n      client_id: gk-client\n      client_secret: s\n      subject_from: proxy-auth\n      actor_token_from: proxy-auth-password\n"
+		if _, err := ParseConfig([]byte(y)); err == nil || !strings.Contains(err.Error(), "api.github.com") {
+			t.Errorf("ParseConfig error = %v, want one naming api.github.com", err)
+		}
+	})
+	for name, proxyCfg := range map[string]ProxyConfig{
+		"auth_token":     {AuthToken: "shared"},
+		"auth_token_env": {AuthTokenEnv: "GK_ACTOR_TEST_TOKEN"},
+	} {
+		t.Run("accepted with "+name, func(t *testing.T) {
+			if err := (&Config{Proxy: proxyCfg, Credentials: []CredentialConfig{cred}}).validate(); err != nil {
+				t.Errorf("validate: %v", err)
+			}
+		})
+	}
+}

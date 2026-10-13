@@ -207,7 +207,8 @@ Two ways to supply the subject:
 
 By default subjects are self-asserted. Set `actor_token_from:
 proxy-auth-password` so the STS can verify the caller (it then requires Basic
-proxy auth with a non-empty password). Tokens cache by `(subject, actor)`;
+proxy auth with a non-empty password, and `proxy.auth_token` or
+`proxy.auth_token_env` must be set). Tokens cache by `(subject, actor)`;
 `expires_in` from the STS controls TTL (default 300s). For the full STS request/
 response contract and an implementation checklist, see the repo's
 `docs/content/guides/06-token-exchange.md`.
