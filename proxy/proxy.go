@@ -43,6 +43,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -1904,8 +1905,12 @@ func isLoopbackAlias(host string) bool {
 	if host == "localhost" {
 		return true
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
+	a, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	a = a.WithZone("").Unmap()
+	return a.IsLoopback() || a.IsUnspecified()
 }
 
 // gatewayRoutesToLoopback reports whether the host gateway ultimately routes
