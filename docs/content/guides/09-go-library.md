@@ -61,7 +61,20 @@ func main() {
 
 `proxy.Proxy` implements `http.Handler`. Serve it with any `http.Server` or wrap it with middleware.
 
-`http.Server.Shutdown` does not close CONNECT tunnels or intercepted connections, because the proxy hijacks them. To stop cleanly, call `Shutdown` and then `Proxy.CloseConnections(ctx)`, or call both at once. `CloseConnections` closes the open tunnels, waits for them to exit until `ctx` ends, and makes the proxy refuse later CONNECT requests. `proxy.Server.Stop` does this for you.
+`http.Server.Shutdown` does not close CONNECT tunnels or intercepted connections, because the proxy hijacks them. Call `Proxy.CloseConnections(ctx)` after `Shutdown`, or at the same time:
+
+```go
+srv := &http.Server{Addr: "127.0.0.1:9080", Handler: p}
+go srv.ListenAndServe()
+
+// On shutdown:
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+_ = srv.Shutdown(ctx)
+_ = p.CloseConnections(ctx)
+```
+
+`CloseConnections` closes the open tunnels and waits for them to exit until `ctx` ends, then returns `ctx.Err()` if any remain. It is safe to call more than once. It is permanent: the `Proxy` refuses every later CONNECT, so create a new `Proxy` to serve again. `proxy.Server.Stop` and the standalone server's `Stop` do this for you.
 
 ## Key API
 
