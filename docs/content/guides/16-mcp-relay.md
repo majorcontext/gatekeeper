@@ -146,6 +146,10 @@ Gatekeeper matches the request host against a configured server's `URL` host, se
 
 When a grant name starts with `oauth:` (e.g., `oauth:notion`), gatekeeper prepends `Bearer ` to the resolved credential value automatically, in both modes. Grants that don't start with `oauth:` are injected as-is — set `Header` to `Authorization` and give the credential value its own scheme prefix if one is needed.
 
+### Plain-HTTP MCP servers
+
+A server whose `URL` starts with `http://` gets no credential by default. The relay answers `403`, and stub replacement leaves the stub in place. Set `AllowInsecure: true` on its `MCPAuthConfig` to inject over plain HTTP. In daemon mode, a request that reaches the server through the proxy is also checked against the matching `RunContextData.Credentials` entry, so set `AllowInsecure` on that `CredentialHeader` too.
+
 ## SSE streaming
 
 MCP responses that use Server-Sent Events stream through the relay as they arrive: gatekeeper reads the upstream body in 4096-byte chunks and flushes the `http.ResponseWriter` after each one, rather than buffering the full response. The relay's HTTP client has no client-level timeout, since MCP SSE connections may stay open indefinitely.
@@ -157,7 +161,7 @@ MCP responses that use Server-Sent Events stream through the relay as they arriv
 | `400` | Direct daemon-mode request (`/mcp/{token}/{server}`) with no server name after the token |
 | `401` | Direct daemon-mode request with an unrecognized proxy auth token |
 | `404` | `{server-name}` doesn't match any configured `MCPServerConfig` |
-| `403` | A `mcp-{server-name}` Keep policy denied the request, or the request body failed fail-closed inspection (non-JSON, or a redaction step failed) — see [Keep Policy Scopes](./18-keep-policy-scopes.md) |
+| `403` | The server `URL` is `http://` and its `MCPAuthConfig.AllowInsecure` is false, or a `mcp-{server-name}` Keep policy denied the request, or the request body failed fail-closed inspection (non-JSON, or a redaction step failed) — see [Keep Policy Scopes](./18-keep-policy-scopes.md) |
 | `500` | The server's configured `URL` failed to parse, reading the request body for Keep evaluation failed, the credential for the grant resolved empty, or building the outgoing request failed |
 | `502` | Gatekeeper reached out to the real MCP server and the connection failed |
 
