@@ -211,7 +211,7 @@ func ParseConfig(data []byte) (*Config, error) {
 		} else if err != nil {
 			return nil, err
 		}
-		if len(extra.Content) > 0 && extra.Content[0].Tag != "!!null" {
+		if len(extra.Content) > 0 && (extra.Content[0].Kind != yaml.ScalarNode || extra.Content[0].Tag != "!!null") {
 			return nil, errors.New("config must contain a single YAML document")
 		}
 	}
