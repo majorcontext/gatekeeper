@@ -74,6 +74,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		r = r.WithContext(ctx)
 	} else if p.delegateAuth {
+		if p.authToken == "" {
+			writeProxyAuthRequired(w, "Proxy authentication required")
+			return
+		}
 		// A password that mismatches a configured authToken is rejected even under delegateAuth.
 		if rejected, _ := p.rejectMismatchedAuth(w, r); rejected {
 			return

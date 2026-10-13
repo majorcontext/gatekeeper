@@ -3,7 +3,6 @@ package proxy
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"net"
 	"net/http"
 	"time"
 
@@ -12,11 +11,8 @@ import (
 
 func newUpstreamTransport(rootCAs *x509.CertPool) *http.Transport {
 	return &http.Transport{
-		Proxy: nil,
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		Proxy:       nil,
+		DialContext: dialContext,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			RootCAs:    rootCAs,

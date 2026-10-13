@@ -377,7 +377,7 @@ func TestProxy_MismatchedProxyPasswordRejected(t *testing.T) {
 		{"mismatched password from another box is rejected", true, false, "box-a-token", http.StatusProxyAuthRequired},
 		{"matching password passes", true, false, ownToken, http.StatusOK},
 		{"absent credentials unchanged", true, true, "", http.StatusProxyAuthRequired},
-		{"delegateAuth with no auth_token still passes any non-empty password", false, false, "not-checked-against-anything", http.StatusOK},
+		{"delegateAuth with no auth_token refuses every request", false, false, "not-checked-against-anything", http.StatusProxyAuthRequired},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

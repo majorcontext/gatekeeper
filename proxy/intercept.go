@@ -236,6 +236,9 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 
 			// Store credential result and pre-injection headers in context.
 			ctx := pr.Out.Context()
+			if rc := getRunContext(r); rc != nil {
+				ctx = context.WithValue(ctx, runContextKey, rc)
+			}
 			ctx = context.WithValue(ctx, interceptCredResultKey{}, credResult)
 			ctx = context.WithValue(ctx, interceptPreInjHeadersKey{}, preInjectionHeaders)
 			ctx = context.WithValue(ctx, interceptLogURLKey{}, logURL)

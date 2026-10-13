@@ -3,7 +3,6 @@ package proxy
 import (
 	"context"
 	"crypto/x509"
-	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -83,11 +82,8 @@ type MCPAuthConfig struct {
 // handle streaming responses. Typed as http.RoundTripper so tests can swap
 // in a recording transport.
 var httpTransport http.RoundTripper = &http.Transport{
-	Proxy: nil,
-	DialContext: (&net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}).DialContext,
+	Proxy:                 nil,
+	DialContext:           dialContext,
 	TLSHandshakeTimeout:   10 * time.Second,
 	ResponseHeaderTimeout: 5 * time.Minute,
 	IdleConnTimeout:       90 * time.Second,
