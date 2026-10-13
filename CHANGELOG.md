@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.26.0 — 2026-10-13
+
+### Added
+
+- **`postgres.project_env` reads the Neon project from an environment variable** (`config.go`, `gatekeeper.go`) — `postgres.project` is a literal in the config file, so instances that share one config file but each own a different Neon project could not be expressed. `project_env` names an environment variable read once at startup and used as the project filter of the `neon` resolver, so only endpoints of that project resolve. Setting both `project` and `project_env` is a config error. If the variable is empty or unset, gatekeeper registers no resolver for the host and logs at info level; the data plane then answers `08004` "no credentials configured for this host". It never builds a resolver with an empty project, which would list every project the API key can see.
+
 ## v0.25.2 — 2026-10-12
 
 ### Changed
