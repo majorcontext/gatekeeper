@@ -667,17 +667,9 @@ func (l *scriptedAcceptListener) acceptsAfterCloseCount() int {
 	return l.acceptsAfterClose
 }
 
-// TestDemux_AcceptLoopRetriesTransientErrors is the regression guard for the
-// availability bug PR #56's review surfaced: Demux.acceptLoop is the SOLE
-// caller of Accept on the real socket in multiplex mode (http.Server only
-// ever sees the virtual listener, which never surfaces OS-level errors), so
-// if the loop exits on the first transient Accept error — EMFILE/ENFILE
-// under fd exhaustion, ECONNABORTED — accept dies for BOTH planes until
-// process restart, silently removing the resilience http.Server.Serve's own
-// accept-retry loop gave the HTTP plane before it was multiplexed. The loop
-// must instead back off and retry (mirroring net/http.Server.Serve) while
-// the listener is live, so a good connection arriving after a burst of
-// transient errors is still dispatched.
+// TestDemux_AcceptLoopRetriesTransientErrors pins that a transient Accept error
+// (EMFILE, ECONNABORTED) backs off and retries instead of ending accept for
+// both planes, so a good connection after the burst is still dispatched.
 func TestDemux_AcceptLoopRetriesTransientErrors(t *testing.T) {
 	// Three transient failures, then a real, HTTP-classifiable connection.
 	transient := errors.New("simulated EMFILE: too many open files")

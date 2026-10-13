@@ -428,21 +428,10 @@ func TestResolveSourceScopesExtraneousOnOtherTypes(t *testing.T) {
 	}
 }
 
-// TestResolveSourceBotSubjectExtraneousOnAllTypes proves bot_subject
-// (token-exchange-only, gatekeeper_tokenexchange.go's fallthrough sentinel)
-// is rejected as extraneous by every one of the seven non-token-exchange
-// source types -- one case per type, covering all seven. Regression guard
-// for a review finding on this PR: BotSubject was added to config.go's
-// SourceConfig but not to any of ResolveSource's seven "only uses ...;
-// found extraneous fields" checks, so a bot_subject accidentally attached
-// to, say, the github-app rule sitting directly beneath a token-exchange
-// rule (the exact credential-rule pattern majorcontext/gatekeeper#61's own
-// docs recommend, and what meetneptune/boxes's gatekeeper-configmap.yaml
-// renders) was silently ignored at config load. The only symptom would
-// have surfaced much later and much worse: an operator believing
-// bot_subject took effect on the github-app rule, when it silently did
-// nothing there at all -- config-time rejection here is the loud failure
-// that replaces that silent one.
+// TestResolveSourceBotSubjectExtraneousOnAllTypes pins that bot_subject
+// (token-exchange-only) is rejected as extraneous by each of the seven other
+// source types. A bot_subject on, say, a github-app rule beneath a
+// token-exchange rule must fail at config load, not be silently ignored.
 func TestResolveSourceBotSubjectExtraneousOnAllTypes(t *testing.T) {
 	tests := []struct {
 		name string

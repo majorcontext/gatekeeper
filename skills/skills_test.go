@@ -1,16 +1,4 @@
-// Command skill-lint validates Agent Skills against the open specification at
-// https://agentskills.io/specification.
-//
-// It checks every skills/<name>/SKILL.md (and nested catalog layouts) for valid
-// frontmatter, the name/directory-name match, field constraints, body size, and
-// that every referenced file (references/, scripts/, assets/) actually exists.
-//
-// Usage:
-//
-//	go run ./cmd/skill-lint [dir ...]   # defaults to ./skills
-//
-// Exit code 0 means all skills are valid; 1 means at least one error.
-package main
+package skills
 
 import (
 	"fmt"
@@ -19,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"testing"
 
 	"gopkg.in/yaml.v3"
 )
@@ -38,47 +27,35 @@ const (
 	maxBodyLines      = 500
 )
 
-func main() {
-	roots := os.Args[1:]
-	if len(roots) == 0 {
-		roots = []string{"skills"}
-	}
-
-	skills, err := findSkills(roots)
+func TestSkillsMatchSpecification(t *testing.T) {
+	found, err := findSkills([]string{"."})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skill-lint: %v\n", err)
-		os.Exit(1)
+		t.Fatal(err)
 	}
-	if len(skills) == 0 {
-		fmt.Fprintf(os.Stderr, "skill-lint: no SKILL.md files found under %s\n", strings.Join(roots, ", "))
-		os.Exit(1)
+	if len(found) == 0 {
+		t.Fatal("no SKILL.md files found")
 	}
-
-	totalErrors := 0
-	for _, skillPath := range skills {
-		errs, warns := validate(skillPath)
-		rel := skillPath
-		if len(errs) == 0 && len(warns) == 0 {
-			fmt.Printf("ok    %s\n", rel)
-			continue
-		}
-		status := "warn"
-		if len(errs) > 0 {
-			status = "FAIL"
-		}
-		fmt.Printf("%s  %s\n", status, rel)
+	for _, path := range found {
+		errs, _ := validate(path)
 		for _, e := range errs {
-			fmt.Printf("        error: %s\n", e)
+			t.Errorf("%s: %s", path, e)
 		}
-		for _, w := range warns {
-			fmt.Printf("        warn:  %s\n", w)
-		}
-		totalErrors += len(errs)
 	}
+}
 
-	fmt.Printf("\n%d skill(s) checked, %d error(s)\n", len(skills), totalErrors)
-	if totalErrors > 0 {
-		os.Exit(1)
+func TestValidateRejectsBrokenSkill(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "my-skill")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "SKILL.md")
+	body := "---\nname: other-name\ndescription: x\n---\nSee references/missing.md\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	errs, _ := validate(path)
+	if len(errs) != 2 {
+		t.Fatalf("errors = %q, want name mismatch and missing reference", errs)
 	}
 }
 

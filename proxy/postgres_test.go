@@ -1374,12 +1374,8 @@ func TestCheckNetworkPolicyHTTPPortDefaultsUnchanged(t *testing.T) {
 
 // --- accept-loop resilience to transient Accept errors ---------------------
 //
-// These are the sibling of TestDemux_AcceptLoopRetriesTransientErrors and
-// TestDemux_AcceptLoopExitsCleanlyOnClose in demux_test.go: PostgresServer's
-// own acceptLoop had the identical unconditional-exit-on-any-Accept-error bug
-// that PR #56 fixed in Demux.acceptLoop, and was intentionally left out of
-// that PR's scope. scriptedAcceptListener (defined in demux_test.go, same
-// package) is reused here rather than duplicated.
+// These mirror the Demux accept-loop tests in demux_test.go and reuse its
+// scriptedAcceptListener.
 
 // TestPostgresServer_AcceptLoopRetriesTransientErrors is the regression guard
 // for PostgresServer.acceptLoop: a transient Accept error (EMFILE/ENFILE

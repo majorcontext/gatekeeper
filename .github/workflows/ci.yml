@@ -22,6 +22,3 @@ jobs:
       - run: go test -race ./...
 
       - run: go vet ./...
-
-      - name: Validate skills
-        run: go run ./cmd/skill-lint

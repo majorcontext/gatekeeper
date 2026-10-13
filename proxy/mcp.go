@@ -447,7 +447,6 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Inject the real credential
 		proxyReq.Header.Set(mcpServer.Auth.Header, formatCredValue(mcpServer.Auth.Grant, credValue))
 		injectedHeaders = map[string]bool{strings.ToLower(mcpServer.Auth.Header): true}
 		if mcpServer.Auth.Grant != "" {
@@ -473,7 +472,6 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 
 	slog.Debug("MCP relay response", "server", serverName, "status", resp.StatusCode)
 
-	// Copy response headers
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)

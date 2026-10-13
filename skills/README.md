@@ -28,12 +28,12 @@ Or copy `configuring-gatekeeper/` into your agent's skills directory (e.g.
 
 ## Validating
 
-The skills are checked against the open spec by a built-in linter, run in CI:
+The skills are checked against the open spec by a Go test, run in CI with the rest of the suite:
 
 ```bash
-go run ./cmd/skill-lint
+go test ./skills
 ```
 
-It enforces the [Agent Skills specification](https://agentskills.io/specification)
+The test enforces the [Agent Skills specification](https://agentskills.io/specification)
 (frontmatter rules, name/dir match, description length, body size) and verifies
 that every referenced `references/`, `scripts/`, and `assets/` file exists.

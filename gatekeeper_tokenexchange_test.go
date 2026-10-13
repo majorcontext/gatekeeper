@@ -80,12 +80,11 @@ func TestNewTokenExchangeResolver_InvalidateOnAuthFailureRecovers(t *testing.T) 
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token": token,
 			"token_type":   "Bearer",
-			"expires_in":   28573, // what Neptune's STS returned in the incident
+			"expires_in":   28573, // observed advertised lifetime
 		})
 	}))
 	defer srv.Close()
 
-	// The production config from the incident report.
 	resolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
 		Endpoint:       srv.URL,
 		ClientID:       "gk",
@@ -306,23 +305,11 @@ func TestResolveTokenExchange_BotSubjectWiring(t *testing.T) {
 	}
 }
 
-// TestNewTokenExchangeResolver_BotSubjectIgnoredOutsideProxyAuthMode is the
-// defense-in-depth regression guard for a claude[bot] review finding on
-// this PR (gatekeeper_tokenexchange.go:76, comment 3804897191): the
-// fallthrough check originally ran after the cfg.SubjectFrom switch
-// unconditionally, so subject_header mode (a header ANY caller controls --
-// self-asserted, not proxy-auth) combined with a configured bot_subject let
-// a caller simply send the sentinel value in the header to skip the STS
-// entirely and fall through to the broader credential rule below it (e.g.
-// a github-app bot credential), bypassing per-subject authentication for
-// that host. This test constructs the resolver directly -- bypassing
-// resolveTokenExchange's own config-level rejection of this combination
-// (TestResolveTokenExchange_BotSubjectRequiresProxyAuth below) -- to prove
-// the runtime gate on cfg.SubjectFrom == "proxy-auth" holds even if a
-// caller reaches newTokenExchangeResolver some other way. bot_subject must
-// be inert entirely outside proxy-auth mode: sending the configured
-// sentinel value in the subject header must still reach the STS like any
-// other subject, never fall through.
+// TestNewTokenExchangeResolver_BotSubjectIgnoredOutsideProxyAuthMode pins that
+// bot_subject is inert outside proxy-auth mode. In subject_header mode the
+// caller controls the header, so sending the sentinel must still reach the STS
+// and never fall through to a broader credential rule. The test builds the
+// resolver directly to bypass the config-level rejection.
 func TestNewTokenExchangeResolver_BotSubjectIgnoredOutsideProxyAuthMode(t *testing.T) {
 	var stsCalled atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -390,27 +377,10 @@ func TestResolveTokenExchange_BotSubjectRequiresProxyAuth(t *testing.T) {
 	}
 }
 
-// TestNewTokenExchangeResolver_BotSubjectActorTokenParityWithEmptySubject
-// tests the premise behind a claude[bot] review comment on this PR
-// (gatekeeper_tokenexchange.go:89, comment 3805148031): with
-// actor_token_from: proxy-auth-password AND bot_subject both configured,
-// a caller sending the sentinel with an EMPTY proxy-auth password hits the
-// "requires a proxy auth password" error (lines 53-58) before ever
-// reaching the bot_subject fallthrough check (line 89) -- the bot read
-// that as a bug and suggested reordering the fallthrough ahead of the
-// actor-token validation.
-//
-// That reordering would be wrong: this error fires unconditionally inside
-// the "proxy-auth" case of the cfg.SubjectFrom switch, for ANY subject
-// value the switch produces -- including a genuinely empty subject, which
-// predates bot_subject entirely (this exact check shipped with actor-token
-// forwarding, long before this PR). This test proves that by exercising
-// BOTH subjects side by side, with the SAME actor_token_from config: an
-// empty proxy-auth username and the configured bot_subject sentinel both
-// hit the identical hard error, never the fallthrough. That is exact
-// parity with pre-existing empty-subject treatment, not a new asymmetry
-// bot_subject introduced -- reordering here would be a behavior change to
-// that pre-existing empty-subject semantics, out of scope for this PR.
+// TestNewTokenExchangeResolver_BotSubjectActorTokenParityWithEmptySubject pins
+// that with actor_token_from: proxy-auth-password, an empty proxy-auth username
+// and the bot_subject sentinel both hit the same actor-token error and never
+// the fallthrough.
 func TestNewTokenExchangeResolver_BotSubjectActorTokenParityWithEmptySubject(t *testing.T) {
 	resolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
 		Endpoint:       "http://unused",

@@ -108,14 +108,8 @@ func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
 func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
 
-// TestLogOTelError_MarksAsOTelDiagnostic pins a feedback loop: newLogger fans
-// every slog record out to the otelslog bridge unconditionally, so logOTelError's own DEBUG record on a failed OTel
-// export was itself re-enqueued into the same failing OTel log-export
-// pipeline — failed export -> DEBUG diagnostic -> re-enqueued -> next
-// export fails carrying it -> another diagnostic, indefinitely while the
-// collector is unreachable. logOTelError must mark its record with
-// otelDiagnosticKey so newLogger's bridge filter can keep
-// it out of that pipeline.
+// TestLogOTelError_MarksAsOTelDiagnostic pins that logOTelError marks its
+// record with otelDiagnosticKey so newLogger's bridge filter drops it.
 func TestLogOTelError_MarksAsOTelDiagnostic(t *testing.T) {
 	var handler recordingHandler
 	prev := slog.Default()
