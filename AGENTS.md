@@ -36,6 +36,7 @@ proxy/              Core TLS-intercepting proxy engine
   logging.go          Request/policy logging, body capture, header filtering and sanitizing
   ca.go              CA certificate loading and per-host cert generation (LRU-bounded cache)
   conntrack.go       Hijacked CONNECT/intercepted connection set, closed on shutdown
+  branding.go        Client-visible wording of blocked responses and errors (neutral defaults, embedder override)
   hosts.go           Hostname matching (glob patterns, port policies, host-keyed map lookup)
   mcp.go             MCP relay handler (SSE streaming, tool credential injection)
   llmpolicy.go       LLM response policy evaluation via Keep

@@ -43,7 +43,7 @@ func proxyToken(r *http.Request) (string, bool) {
 }
 
 // checkAuth validates the Proxy-Authorization header against the required
-// token. Accepts both Basic auth (from HTTP_PROXY=http://moat:token@host)
+// token. Accepts both Basic auth (from HTTP_PROXY=http://user:token@host)
 // and Bearer format. Uses constant-time comparison to prevent timing
 // attacks. present is false when the request carries no proxy credentials
 // at all, in which case ok is meaningless; callers that only care whether
@@ -119,20 +119,19 @@ func writeProxyAuthRequired(w http.ResponseWriter, msg string) {
 
 // writeBlockedResponse writes a 407 response when a request is blocked by network policy.
 func (p *Proxy) writeBlockedResponse(w http.ResponseWriter, host string) {
-	w.Header().Set("X-Moat-Blocked", "request-rule")
-	w.Header().Set("Proxy-Authenticate", "Moat-Policy")
+	setBlocked(w.Header(), "request-rule")
+	w.Header().Set("Proxy-Authenticate", policyScheme)
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusProxyAuthRequired)
-	_, _ = w.Write([]byte("Moat: request blocked by network policy.\nHost \"" + host + "\" is not in the allow list.\nAdd it to network.rules in moat.yaml or use policy: permissive.\n"))
+	_, _ = w.Write([]byte(p.brandName() + ": request blocked by network policy.\nHost \"" + host + "\" is not in the allow list.\n" + p.networkHint()))
 }
 
 // writeHostBlockedResponse writes a 407 response when a request to the host gateway is blocked.
 func (p *Proxy) writeHostBlockedResponse(w http.ResponseWriter, host string, port int) {
-	w.Header().Set("X-Moat-Blocked", "host-service")
-	w.Header().Set("Proxy-Authenticate", "Moat-Policy")
+	setBlocked(w.Header(), "host-service")
+	w.Header().Set("Proxy-Authenticate", policyScheme)
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusProxyAuthRequired)
-	_, _ = fmt.Fprintf(w, "Moat: request blocked — host service access to %s:%d is not allowed by default.\n"+
-		"To allow port %d on the host, add to moat.yaml:\n\n"+
-		"  network:\n    host:\n      - %d\n", host, port, port, port)
+	_, _ = fmt.Fprintf(w, "%s: request blocked — host service access to %s:%d is not allowed by default.\n%s",
+		p.brandName(), host, port, p.hostHint(port))
 }

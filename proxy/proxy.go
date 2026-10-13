@@ -343,6 +343,7 @@ type Proxy struct {
 	policyLogger         PolicyLogger                  // optional policy decision logger
 	upstreamCAs          *x509.CertPool                // optional CA pool for upstream TLS verification
 	captureHeaders       []string                      // headers to capture in logs and strip before forwarding
+	branding             Branding                      // client-visible wording of blocks and errors
 
 	h2UpstreamTransport *http.Transport
 

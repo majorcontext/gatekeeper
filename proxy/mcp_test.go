@@ -47,7 +47,7 @@ func TestMCPCredentialInjection(t *testing.T) {
 
 	// Create test request with stub credential
 	req := httptest.NewRequest("GET", backend.URL, nil)
-	req.Header.Set("API_KEY", "moat-stub-mcp-context7")
+	req.Header.Set("API_KEY", "gatekeeper-stub-mcp-context7")
 
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
@@ -150,14 +150,14 @@ func TestMCPCredentialInjection_MissingCredential(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("GET", backend.URL, nil)
-	req.Header.Set("API_KEY", "moat-stub-mcp-context7")
+	req.Header.Set("API_KEY", "gatekeeper-stub-mcp-context7")
 
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 
 	// Should pass through stub since credential is missing
-	if rec.Body.String() != "moat-stub-mcp-context7" {
-		t.Errorf("expected body 'moat-stub-mcp-context7' (stub passed through), got %q", rec.Body.String())
+	if rec.Body.String() != "gatekeeper-stub-mcp-context7" {
+		t.Errorf("expected body 'gatekeeper-stub-mcp-context7' (stub passed through), got %q", rec.Body.String())
 	}
 }
 
@@ -381,7 +381,7 @@ func TestMCPOAuthCredentialInjection(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("GET", backend.URL, nil)
-	req.Header.Set("Authorization", "moat-stub-oauth:notion")
+	req.Header.Set("Authorization", "gatekeeper-stub-oauth:notion")
 
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
@@ -465,7 +465,7 @@ func TestMCPStaticCredentialStillRaw(t *testing.T) {
 
 	// Test via proxy injection path
 	req := httptest.NewRequest("GET", backend.URL, nil)
-	req.Header.Set("API_KEY", "moat-stub-mcp-context7")
+	req.Header.Set("API_KEY", "gatekeeper-stub-mcp-context7")
 
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)

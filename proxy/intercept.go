@@ -67,7 +67,7 @@ func (p *Proxy) evaluateAndReplaceLLMResponse(ctxReq *http.Request, req *http.Re
 		resp.StatusCode = http.StatusBadRequest
 		resp.Header = make(http.Header)
 		resp.Header.Set("Content-Type", "application/json")
-		resp.Header.Set("X-Moat-Blocked", "llm-policy")
+		setBlocked(resp.Header, "llm-policy")
 		resp.ContentLength = int64(len(errorBody))
 		resp.Body = io.NopCloser(bytes.NewReader(errorBody))
 		return true, "LLM policy read error"
@@ -78,7 +78,7 @@ func (p *Proxy) evaluateAndReplaceLLMResponse(ctxReq *http.Request, req *http.Re
 		resp.StatusCode = http.StatusBadRequest
 		resp.Header = make(http.Header)
 		resp.Header.Set("Content-Type", "application/json")
-		resp.Header.Set("X-Moat-Blocked", "llm-policy")
+		setBlocked(resp.Header, "llm-policy")
 		resp.ContentLength = int64(len(errorBody))
 		resp.Body = io.NopCloser(bytes.NewReader(errorBody))
 		return true, "LLM policy response too large"
@@ -90,7 +90,7 @@ func (p *Proxy) evaluateAndReplaceLLMResponse(ctxReq *http.Request, req *http.Re
 		resp.StatusCode = http.StatusBadRequest
 		resp.Header = make(http.Header)
 		resp.Header.Set("Content-Type", "application/json")
-		resp.Header.Set("X-Moat-Blocked", "llm-policy")
+		setBlocked(resp.Header, "llm-policy")
 		resp.ContentLength = int64(len(errorBody))
 		resp.Body = io.NopCloser(bytes.NewReader(errorBody))
 		return true, "LLM policy denied: " + result.Rule + " " + result.Message
@@ -403,10 +403,10 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				DenyReason:     "Request blocked by network policy: " + req.Method + " " + host + req.URL.Path,
 			})
 			p.logPolicy(r, "network", "http.request", "", req.Method+" "+host+req.URL.Path)
-			w.Header().Set("X-Moat-Blocked", "request-rule")
+			setBlocked(w.Header(), "request-rule")
 			w.Header().Set("Content-Type", "text/plain")
 			w.WriteHeader(http.StatusProxyAuthRequired)
-			fmt.Fprintf(w, "Moat: request blocked by network policy.\nHost: %s\nTo allow this request, update network.rules in moat.yaml.\n", host)
+			fmt.Fprintf(w, "%s: request blocked by network policy.\nHost: %s\n%s", p.brandName(), host, p.networkHint())
 			return
 		}
 
@@ -417,7 +417,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				// logMsg feeds the internal policy log only; clientHint is an
 				// optional detail line shown to the client (left empty for
 				// internal-only reasons). clientMsg fills the blank in
-				// "Moat: request blocked <clientMsg>".
+				// "<name>: request blocked <clientMsg>".
 				type httpDenial struct {
 					rule       string
 					logMsg     string
@@ -445,10 +445,10 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 						Err:            d.err,
 					})
 					p.logPolicy(r, "http", "http.request", d.rule, d.logMsg)
-					w.Header().Set("X-Moat-Blocked", "keep-policy")
+					setBlocked(w.Header(), "keep-policy")
 					w.Header().Set("Content-Type", "text/plain")
 					w.WriteHeader(http.StatusForbidden)
-					msg := fmt.Sprintf("Moat: request blocked %s.\nHost: %s\n", d.clientMsg, host)
+					msg := fmt.Sprintf("%s: request blocked %s.\nHost: %s\n", p.brandName(), d.clientMsg, host)
 					if d.clientHint != "" {
 						msg += d.clientHint + "\n"
 					}

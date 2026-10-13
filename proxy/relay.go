@@ -30,7 +30,7 @@ var relayClient = &http.Client{
 // AddRelay registers a named relay endpoint. Requests to /relay/{name}/{path...}
 // are forwarded to the target URL with credential injection. This is used when
 // the target host would be in NO_PROXY (e.g., a host-side proxy reachable via
-// the same address as the Moat proxy), which would cause direct connections to
+// the same address as the proxy), which would cause direct connections to
 // bypass credential injection.
 //
 // AddRelay must be called before the proxy starts serving.
@@ -51,7 +51,7 @@ func (p *Proxy) AddRelay(name, targetURL string) error {
 	return nil
 }
 
-// handleRelay proxies requests through the Moat proxy to a configured target
+// handleRelay proxies requests through the proxy to a configured target
 // URL with credential injection.
 //
 // Path format: /relay/{name}/{path...}
@@ -101,7 +101,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 		// identify it. Mirrors the parallel unknown-MCP-server 404 in
 		// mcp.go, which also carries no Err.
 		p.logExit(r, logBase, start, http.StatusNotFound, nil)
-		http.Error(w, "MOAT: Unknown relay endpoint '"+name+"'", http.StatusNotFound)
+		http.Error(w, p.errorPrefix()+": Unknown relay endpoint '"+name+"'", http.StatusNotFound)
 		return
 	}
 
@@ -109,7 +109,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	targetURL, err := url.Parse(target)
 	if err != nil {
 		p.logExit(r, logBase, start, http.StatusInternalServerError, func(d *RequestLogData) { d.Err = err })
-		http.Error(w, "MOAT: Invalid relay target URL", http.StatusInternalServerError)
+		http.Error(w, p.errorPrefix()+": Invalid relay target URL", http.StatusInternalServerError)
 		return
 	}
 	targetURL.Path = strings.TrimSuffix(targetURL.Path, "/") + rest
@@ -128,7 +128,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), r.Body)
 	if err != nil {
 		p.logExit(r, logBase, start, http.StatusInternalServerError, func(d *RequestLogData) { d.Err = err })
-		http.Error(w, "MOAT: Failed to create relay request", http.StatusInternalServerError)
+		http.Error(w, p.errorPrefix()+": Failed to create relay request", http.StatusInternalServerError)
 		return
 	}
 	proxyReq.ContentLength = r.ContentLength
@@ -192,7 +192,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 			d.InjectedHeaders = credResult.InjectedHeaders
 			d.Grants = credResult.Grants
 		})
-		http.Error(w, "MOAT: Relay '"+name+"' connection failed", http.StatusBadGateway)
+		http.Error(w, p.errorPrefix()+": Relay '"+name+"' connection failed", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()

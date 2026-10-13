@@ -69,6 +69,6 @@ When a Keep policy engine is configured for an MCP server (keyed as `mcp-{server
 ## Error handling
 
 - Unknown server name: `404` with a message listing available server count.
-- Credential resolution failure: `500` with the grant name and a suggested `moat grant` command.
+- Credential resolution failure: `500` with the grant name and the hint from `Branding.GrantHint`, if set.
 - Upstream connection failure: `502` with the target URL and error details.
 - Upstream redirect: the `3xx` response is returned to the caller unfollowed, so injected headers never reach a second host. The same applies to `/relay/` endpoints.
