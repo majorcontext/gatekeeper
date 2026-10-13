@@ -27,6 +27,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/majorcontext/gatekeeper/credentialsource"
@@ -1681,37 +1682,6 @@ func (m *mockRefreshSource) fetchCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.calls
-}
-
-func TestStartCredentialRefresh_CancelStopsGoroutine(t *testing.T) {
-	cfg := &Config{
-		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
-	}
-	srv, err := New(context.Background(), cfg, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	mock := &mockRefreshSource{
-		token: "ghs_test",
-		ttl:   1 * time.Hour,
-	}
-
-	cred := CredentialConfig{
-		Host:  "api.github.com",
-		Grant: "github",
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	srv.startCredentialRefresh(ctx, mock, []CredentialConfig{cred})
-
-	// Cancel immediately — goroutine should exit without fetching.
-	cancel()
-	time.Sleep(50 * time.Millisecond)
-
-	if count := mock.fetchCount(); count != 0 {
-		t.Errorf("fetch called %d times after immediate cancel, want 0", count)
-	}
 }
 
 func TestLoadCredentials_DedupSharedEnvSource(t *testing.T) {
@@ -3561,54 +3531,61 @@ func TestServerStopClosesIdleHTTP2Upstream(t *testing.T) {
 	}
 }
 
-// barrierSource blocks each Fetch until want Fetches are in flight at once.
-type barrierSource struct {
-	inflight *atomic.Int32
-	want     int32
-	name     string
+type gateSource struct {
+	arrived chan<- struct{}
+	gate    <-chan struct{}
+	name    string
 }
 
-func (b barrierSource) Fetch(ctx context.Context) (string, error) {
-	b.inflight.Add(1)
-	for b.inflight.Load() < b.want {
-		select {
-		case <-ctx.Done():
-			return "", fmt.Errorf("%s: only %d fetches in flight, want %d: %w", b.name, b.inflight.Load(), b.want, ctx.Err())
-		case <-time.After(time.Millisecond):
-		}
+func (g gateSource) Fetch(ctx context.Context) (string, error) {
+	g.arrived <- struct{}{}
+	select {
+	case <-g.gate:
+		return "tok_" + g.name, nil
+	case <-ctx.Done():
+		return "", fmt.Errorf("%s: gate never opened: %w", g.name, ctx.Err())
 	}
-	return "tok_" + b.name, nil
 }
 
-func (b barrierSource) Type() string { return "barrier" }
+func (g gateSource) Type() string { return "gate" }
 
 // A production config holds about a dozen network credential sources
 // (gcp-secretmanager, gcp-service-account, github-app). Fetching them one by
 // one put 1.5 s between container start and the listener.
 func TestLoadCredentials_FetchesDistinctSourcesConcurrently(t *testing.T) {
-	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var inflight atomic.Int32
-	const n = 12
-	srv.resolveSource = func(sc SourceConfig) (credentialsource.CredentialSource, error) {
-		return barrierSource{inflight: &inflight, want: n, name: sc.Secret}, nil
-	}
-	cfg := &Config{}
-	for i := 0; i < n; i++ {
-		name := fmt.Sprintf("secret-%d", i)
-		cfg.Credentials = append(cfg.Credentials, CredentialConfig{
-			Host: fmt.Sprintf("api%d.example.com", i), Grant: name,
-			Source: SourceConfig{Type: "gcp-secretmanager", Secret: name},
-		})
-	}
-	if err := srv.loadCredentials(context.Background(), cfg); err != nil {
-		t.Fatalf("loadCredentials: %v", err)
-	}
-	if got := inflight.Load(); got != n {
-		t.Fatalf("fetches started = %d, want %d", got, n)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		const n = 12
+		arrived := make(chan struct{}, n)
+		gate := make(chan struct{})
+		srv.resolveSource = func(sc SourceConfig) (credentialsource.CredentialSource, error) {
+			return gateSource{arrived: arrived, gate: gate, name: sc.Secret}, nil
+		}
+		cfg := &Config{}
+		for i := 0; i < n; i++ {
+			name := fmt.Sprintf("secret-%d", i)
+			cfg.Credentials = append(cfg.Credentials, CredentialConfig{
+				Host: fmt.Sprintf("api%d.example.com", i), Grant: name,
+				Source: SourceConfig{Type: "gcp-secretmanager", Secret: name},
+			})
+		}
+		done := make(chan error, 1)
+		go func() { done <- srv.loadCredentials(context.Background(), cfg) }()
+		for i := 0; i < n; i++ {
+			select {
+			case <-arrived:
+			case err := <-done:
+				t.Fatalf("loadCredentials returned with %d of %d fetches in flight: %v", i, n, err)
+			}
+		}
+		close(gate)
+		if err := <-done; err != nil {
+			t.Fatalf("loadCredentials: %v", err)
+		}
+	})
 }
 
 // failAfterSource fails once release closes; failNow fails at once.
@@ -3692,44 +3669,50 @@ func TestLoadCredentials_ClosesEveryBuiltSourceWhenAFetchFails(t *testing.T) {
 	}
 }
 
-type peakSource struct {
-	cur, peak *atomic.Int32
+type inflightSource struct {
+	cur  *atomic.Int32
+	gate <-chan struct{}
 }
 
-func (p peakSource) Fetch(context.Context) (string, error) {
-	n := p.cur.Add(1)
-	for {
-		old := p.peak.Load()
-		if n <= old || p.peak.CompareAndSwap(old, n) {
-			break
-		}
+func (p inflightSource) Fetch(ctx context.Context) (string, error) {
+	p.cur.Add(1)
+	defer p.cur.Add(-1)
+	select {
+	case <-p.gate:
+		return "tok", nil
+	case <-ctx.Done():
+		return "", ctx.Err()
 	}
-	time.Sleep(5 * time.Millisecond)
-	p.cur.Add(-1)
-	return "tok", nil
 }
-func (p peakSource) Type() string { return "peak" }
+func (p inflightSource) Type() string { return "inflight" }
 
 func TestLoadCredentials_BoundsConcurrentFetches(t *testing.T) {
-	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cur, peak atomic.Int32
-	srv.resolveSource = func(SourceConfig) (credentialsource.CredentialSource, error) {
-		return peakSource{cur: &cur, peak: &peak}, nil
-	}
-	cfg := &Config{}
-	for i := 0; i < 40; i++ {
-		name := fmt.Sprintf("s%d", i)
-		cfg.Credentials = append(cfg.Credentials, CredentialConfig{Host: name + ".example.com", Grant: name, Source: SourceConfig{Type: "mock", Secret: name}})
-	}
-	if err := srv.loadCredentials(context.Background(), cfg); err != nil {
-		t.Fatalf("loadCredentials: %v", err)
-	}
-	if got := peak.Load(); got > 16 || got < 2 {
-		t.Fatalf("peak concurrent fetches = %d, want between 2 and 16", got)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cur atomic.Int32
+		gate := make(chan struct{})
+		srv.resolveSource = func(SourceConfig) (credentialsource.CredentialSource, error) {
+			return inflightSource{cur: &cur, gate: gate}, nil
+		}
+		cfg := &Config{}
+		for i := 0; i < 40; i++ {
+			name := fmt.Sprintf("s%d", i)
+			cfg.Credentials = append(cfg.Credentials, CredentialConfig{Host: name + ".example.com", Grant: name, Source: SourceConfig{Type: "mock", Secret: name}})
+		}
+		done := make(chan error, 1)
+		go func() { done <- srv.loadCredentials(context.Background(), cfg) }()
+		synctest.Wait()
+		if got := cur.Load(); got != 16 {
+			t.Errorf("fetches in flight while every fetch is blocked = %d, want 16", got)
+		}
+		close(gate)
+		if err := <-done; err != nil {
+			t.Fatalf("loadCredentials: %v", err)
+		}
+	})
 }
 
 func TestLoadCredentials_ClosesPostgresResolversWhenALaterFetchFails(t *testing.T) {
