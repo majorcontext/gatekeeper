@@ -1,6 +1,7 @@
 package gatekeeper
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -377,5 +378,24 @@ func TestParseConfig_AcceptsValidNetworkPolicy(t *testing.T) {
 		if _, err := ParseConfig([]byte(y)); err != nil {
 			t.Errorf("policy %q: %v", policy, err)
 		}
+	}
+}
+
+func TestNew_RejectsBadNetworkPolicy(t *testing.T) {
+	tests := []struct {
+		name    string
+		network NetworkConfig
+	}{
+		{"capitalized policy", NetworkConfig{Policy: "Strict"}},
+		{"non-numeric port", NetworkConfig{Policy: "strict", Allow: []string{"host:abc"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, err := New(context.Background(), &Config{Network: tt.network}, "")
+			if err == nil {
+				_ = srv.Stop(context.Background())
+				t.Fatal("New accepted an invalid network config")
+			}
+		})
 	}
 }

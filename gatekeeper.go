@@ -112,6 +112,10 @@ func (s *Server) log() *slog.Logger {
 // and can be used to cancel startup if the process receives a signal.
 // New never changes process-global state.
 func New(ctx context.Context, cfg *Config, opts Options) (*Server, error) {
+	if err := cfg.Network.validate(); err != nil {
+		return nil, err
+	}
+
 	p := proxy.NewProxy()
 
 	s := &Server{
