@@ -58,6 +58,10 @@ func (p *Proxy) AddRelay(name, targetURL string) error {
 // The /relay/{name} prefix is stripped, and the remaining path is appended
 // to the configured target URL.
 func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
+	if p.delegateAuth && p.authToken == "" {
+		writeProxyAuthRequired(w, "Proxy authentication required")
+		return
+	}
 	// handleRelay is reached directly (the NO_PROXY bypass in ServeHTTP),
 	// bypassing the CONNECT/plain-HTTP auth chain entirely, so it enforces
 	// authToken itself before any resolver or STS call. Absent credentials

@@ -98,7 +98,9 @@ func (p *Proxy) handleConnectTunnel(w http.ResponseWriter, r *http.Request) {
 			dialAddr = rewriteHostPort(r.Host, rc.HostGatewayIP)
 		}
 	}
-	targetConn, err := net.DialTimeout("tcp", dialAddr, connectTunnelDialTimeout)
+	dialCtx, cancel := context.WithTimeout(r.Context(), connectTunnelDialTimeout)
+	defer cancel()
+	targetConn, err := dialContext(dialCtx, "tcp", dialAddr)
 	if err != nil {
 		http.Error(w, p.errorPrefix()+": dial upstream failed", http.StatusBadGateway)
 		return

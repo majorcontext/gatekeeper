@@ -52,10 +52,19 @@ func isHostGateway(rc *RunContextData, host string) bool {
 	if host == rc.HostGateway {
 		return true
 	}
+	if rc.HostGatewayIP != "" && sameIP(host, rc.HostGatewayIP) {
+		return true
+	}
 	if gatewayRoutesToLoopback(rc) {
 		return isLoopbackAlias(host)
 	}
 	return false
+}
+
+func sameIP(a, b string) bool {
+	x, err1 := netip.ParseAddr(strings.Trim(a, "[]"))
+	y, err2 := netip.ParseAddr(strings.Trim(b, "[]"))
+	return err1 == nil && err2 == nil && x.WithZone("").Unmap() == y.WithZone("").Unmap()
 }
 
 func isLoopbackAlias(host string) bool {
@@ -114,7 +123,7 @@ func (p *Proxy) checkNetworkPolicyForRequest(r *http.Request, host string, port 
 		if method != "CONNECT" && rc.RequestCheck != nil {
 			return rc.RequestCheck(host, port, method, path)
 		}
-		if rc.Policy != "strict" {
+		if rc.permissive() {
 			return true
 		}
 		return matchHost(rc.AllowedHosts, host, port)

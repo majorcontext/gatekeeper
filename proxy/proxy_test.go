@@ -377,7 +377,7 @@ func TestProxy_MismatchedProxyPasswordRejected(t *testing.T) {
 		{"mismatched password from another box is rejected", true, false, "box-a-token", http.StatusProxyAuthRequired},
 		{"matching password passes", true, false, ownToken, http.StatusOK},
 		{"absent credentials unchanged", true, true, "", http.StatusProxyAuthRequired},
-		{"delegateAuth with no auth_token still passes any non-empty password", false, false, "not-checked-against-anything", http.StatusOK},
+		{"delegateAuth with no auth_token refuses every request", false, false, "not-checked-against-anything", http.StatusProxyAuthRequired},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3051,9 +3051,9 @@ func TestProxy_HostGatewayStrictModeAlsoBlocks(t *testing.T) {
 	}
 }
 
-// TestProxy_NonHostGatewayUnaffected verifies that requests to non-host-gateway
-// addresses are unaffected by the host gateway blocking logic.
-func TestProxy_NonHostGatewayUnaffected(t *testing.T) {
+// TestProxy_NonGatewayLoopbackLiteralRefused verifies that a loopback literal
+// that is not the host gateway is refused when the run sets a different gateway.
+func TestProxy_NonGatewayLoopbackLiteralRefused(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	}))
@@ -3084,8 +3084,8 @@ func TestProxy_NonHostGatewayUnaffected(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("expected 502, got %d", resp.StatusCode)
 	}
 }
 

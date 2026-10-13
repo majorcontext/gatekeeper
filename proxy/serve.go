@@ -74,6 +74,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		r = r.WithContext(ctx)
 	} else if p.delegateAuth {
+		if p.authToken == "" {
+			writeProxyAuthRequired(w, "Proxy authentication required")
+			return
+		}
 		// A password that mismatches a configured authToken is rejected even under delegateAuth.
 		if rejected, _ := p.rejectMismatchedAuth(w, r); rejected {
 			return
@@ -319,7 +323,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Forward request
-	resp, err := httpTransport.RoundTrip(outReq)
+	resp, err := p.httpTransportFor(getRunContext(r)).RoundTrip(outReq)
 
 	// Fields shared by the error and success log lines.
 	logData := RequestLogData{

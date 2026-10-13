@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"crypto/x509"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -16,8 +18,28 @@ func (p *Proxy) SetAuthToken(token string) {
 // leave its validation to credential resolvers. With authToken empty, no
 // static check applies to the password; with authToken set, ServeHTTP still
 // requires a presented password to equal it before any resolver runs.
-func (p *Proxy) SetDelegateAuth(delegate bool) {
+//
+// Delegation without an auth token would accept any non-empty password, so
+// SetDelegateAuth(true) with no token returns an error, and ServeHTTP refuses
+// every request until SetAuthToken supplies one.
+func (p *Proxy) SetDelegateAuth(delegate bool) error {
 	p.delegateAuth = delegate
+	if delegate && p.authToken == "" {
+		return errDelegateAuthNoToken
+	}
+	return nil
+}
+
+var errDelegateAuthNoToken = errors.New("delegate auth requires an auth token")
+
+func validatePolicy(policy string) (string, error) {
+	switch policy {
+	case "":
+		return "permissive", nil
+	case "permissive", "strict":
+		return policy, nil
+	}
+	return "", fmt.Errorf("network policy %q is not one of \"permissive\" or \"strict\"", policy)
 }
 
 // SetCA sets the CA for TLS interception.
@@ -32,10 +54,10 @@ func (p *Proxy) SetCA(ca *CA) {
 func (p *Proxy) SetUpstreamCAs(pool *x509.CertPool) {
 	p.mu.Lock()
 	p.upstreamCAs = pool
-	transport := p.h2UpstreamTransport
-	p.h2UpstreamTransport = nil
+	transports := p.h2UpstreamTransports
+	p.h2UpstreamTransports = nil
 	p.mu.Unlock()
-	if transport != nil {
+	for _, transport := range transports {
 		// Existing tunnels retain their trust settings. Retired connections
 		// still in use are reclaimed by the transport's timeout once idle.
 		transport.CloseIdleConnections()
@@ -255,10 +277,15 @@ func isValidHost(host string) bool {
 }
 
 // SetNetworkPolicy sets the network policy and allowed hosts.
-// policy should be "permissive" or "strict".
+// policy must be "permissive" or "strict" (empty means permissive); any other
+// value returns an error and changes nothing.
 // allows is a list of host patterns like "api.example.com" or "*.example.com".
 // grants is a list of grant names like "github" that will be expanded to host patterns.
-func (p *Proxy) SetNetworkPolicy(policy string, allows []string, grants []string) {
+func (p *Proxy) SetNetworkPolicy(policy string, allows []string, grants []string) error {
+	policy, err := validatePolicy(policy)
+	if err != nil {
+		return err
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -279,12 +306,17 @@ func (p *Proxy) SetNetworkPolicy(policy string, allows []string, grants []string
 			p.allowedHosts = append(p.allowedHosts, parseHostPattern(pattern))
 		}
 	}
+	return nil
 }
 
 // SetNetworkPolicyWithRules sets the network policy with per-host request rules.
 // The allows list should include hosts from rules (the caller extracts them).
 // checker evaluates per-request rules; pathChecker reports if path-level rules exist.
-func (p *Proxy) SetNetworkPolicyWithRules(policy string, allows []string, grants []string, checker func(host string, port int, method, path string) bool, pathChecker func(host string, port int) bool) {
+func (p *Proxy) SetNetworkPolicyWithRules(policy string, allows []string, grants []string, checker func(host string, port int, method, path string) bool, pathChecker func(host string, port int) bool) error {
+	policy, err := validatePolicy(policy)
+	if err != nil {
+		return err
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -301,4 +333,11 @@ func (p *Proxy) SetNetworkPolicyWithRules(policy string, allows []string, grants
 			p.allowedHosts = append(p.allowedHosts, parseHostPattern(pattern))
 		}
 	}
+	return nil
+}
+
+// permissive reports whether the run allows hosts outside AllowedHosts. Any
+// value other than "" or "permissive" is strict.
+func (rc *RunContextData) permissive() bool {
+	return rc.Policy == "" || rc.Policy == "permissive"
 }

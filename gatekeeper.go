@@ -189,7 +189,9 @@ func (s *Server) configurePolicy(cfg *Config) error {
 	// actor_token_from requires a non-empty proxy password.
 	for _, cred := range cfg.Credentials {
 		if cred.Source.ActorTokenFrom != "" {
-			s.proxy.SetDelegateAuth(true)
+			if err := s.proxy.SetDelegateAuth(true); err != nil {
+				return fmt.Errorf("credential %q: actor_token_from: %w", cred.Host, err)
+			}
 			break
 		}
 	}
@@ -203,7 +205,9 @@ func (s *Server) configurePolicy(cfg *Config) error {
 
 	// Configure network policy if specified.
 	if cfg.Network.Policy != "" {
-		s.proxy.SetNetworkPolicy(cfg.Network.Policy, cfg.Network.Allow, nil)
+		if err := s.proxy.SetNetworkPolicy(cfg.Network.Policy, cfg.Network.Allow, nil); err != nil {
+			return fmt.Errorf("network: %w", err)
+		}
 	}
 	return nil
 }
