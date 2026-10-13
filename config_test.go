@@ -167,6 +167,13 @@ credentials:
       type: env
       var: NEON_API_KEY
     grant: neon-databases
+  - host: "*.other.tech"
+    postgres:
+      resolver: neon
+      project_env: NEON_PROJECT_ID
+    source:
+      type: env
+      var: NEON_API_KEY
 `
 	cfg, err := ParseConfig([]byte(yamlData))
 	if err != nil {
@@ -184,8 +191,8 @@ credentials:
 	if !cfg.Postgres.ProxyProtocol {
 		t.Error("Postgres.ProxyProtocol = false, want true")
 	}
-	if len(cfg.Credentials) != 1 {
-		t.Fatalf("credentials = %d, want 1", len(cfg.Credentials))
+	if len(cfg.Credentials) != 2 {
+		t.Fatalf("credentials = %d, want 2", len(cfg.Credentials))
 	}
 	pg := cfg.Credentials[0].Postgres
 	if pg == nil {
@@ -196,6 +203,9 @@ credentials:
 	}
 	if pg.Project != "falling-river-38863773" {
 		t.Errorf("Project = %q, want falling-river-38863773", pg.Project)
+	}
+	if got := cfg.Credentials[1].Postgres.ProjectEnv; got != "NEON_PROJECT_ID" {
+		t.Errorf("ProjectEnv = %q, want NEON_PROJECT_ID", got)
 	}
 }
 

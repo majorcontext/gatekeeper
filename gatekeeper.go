@@ -682,14 +682,15 @@ func (s *Server) loadPostgresCredential(ctx context.Context, cred CredentialConf
 		return ResolveSource(cred.Source)
 	}
 
+	if cred.Postgres.Project != "" && cred.Postgres.ProjectEnv != "" {
+		return fmt.Errorf("postgres credential for %s: project and project_env are mutually exclusive", cred.Host)
+	}
+	project := cred.Postgres.Project
+
 	var resolver proxy.PostgresCredentialResolver
 	switch strings.ToLower(cred.Postgres.Resolver) {
 	case "neon":
-		project := cred.Postgres.Project
 		if envName := cred.Postgres.ProjectEnv; envName != "" {
-			if project != "" {
-				return fmt.Errorf("postgres credential for %s: project and project_env are mutually exclusive", cred.Host)
-			}
 			if project = os.Getenv(envName); project == "" {
 				slog.Info("postgres credential skipped: project_env is empty", "host", cred.Host, "project_env", envName)
 				return nil

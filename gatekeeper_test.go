@@ -3785,9 +3785,15 @@ func startNeonRelay(t *testing.T, pg *PostgresCredentialConfig, neonAPI string) 
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = srv.Start(ctx) }()
+	startErr := make(chan error, 1)
+	go func() { startErr <- srv.Start(ctx) }()
 	deadline := time.Now().Add(2 * time.Second)
 	for srv.PostgresAddr() == "" {
+		select {
+		case err := <-startErr:
+			t.Fatalf("Start: %v", err)
+		default:
+		}
 		if time.Now().After(deadline) {
 			t.Fatal("postgres listener did not start in time")
 		}
@@ -3893,7 +3899,7 @@ func TestPostgresCredentialProjectEnv_RejectsProjectAndProjectEnv(t *testing.T) 
 		Postgres: &PostgresConfig{Port: 0},
 		Credentials: []CredentialConfig{{
 			Host:     "*.neon.tech",
-			Postgres: &PostgresCredentialConfig{Resolver: "neon", Project: "p", ProjectEnv: "TEST_NEON_PROJECT"},
+			Postgres: &PostgresCredentialConfig{Resolver: "static", Project: "p", ProjectEnv: "TEST_NEON_PROJECT"},
 			Source:   SourceConfig{Type: "static", Value: "k"},
 		}},
 	}
