@@ -12,7 +12,7 @@ import (
 )
 
 func withBundleContext(req *http.Request, bundles ...credentialBundle) *http.Request {
-	return withRunContext(req, &RunContextData{CredentialBundles: bundles})
+	return withRunContext(req, &RunContextData{credentialBundles: bundles})
 }
 
 func withRunContext(req *http.Request, rc *RunContextData) *http.Request {
@@ -246,7 +246,7 @@ func TestIntercept_CredentialBundleIsScoped(t *testing.T) {
 		if token != "bundletest" {
 			return nil, false
 		}
-		return &RunContextData{Policy: "permissive", CredentialBundles: []credentialBundle{bundle}}, true
+		return &RunContextData{Policy: "permissive", credentialBundles: []credentialBundle{bundle}}, true
 	})
 	// A context resolver turns on proxy auth, so the tunnel needs the run token.
 	setup.Client.Transport.(*http.Transport).ProxyConnectHeader = http.Header{
@@ -324,7 +324,7 @@ func TestHandleHTTP_BundleHeaderSurvivesCollidingHostCredential(t *testing.T) {
 	rec := httptest.NewRecorder()
 	// The same host also carries an ordinary Authorization credential.
 	p.handleHTTP(rec, withRunContext(req, &RunContextData{
-		CredentialBundles: []credentialBundle{bundle},
+		credentialBundles: []credentialBundle{bundle},
 		Credentials: map[string][]CredentialHeader{
 			host: {{AllowInsecure: true, Name: "Authorization", Value: "Bearer host-wide-token", Grant: "other"}},
 		},
@@ -379,7 +379,7 @@ func TestHandleHTTP_BundleDoesNotTriggerAutoInjectionOfOtherHeaders(t *testing.T
 	req.Header.Set("ChatGPT-Account-ID", "fake-account")
 	rec := httptest.NewRecorder()
 	p.handleHTTP(rec, withRunContext(req, &RunContextData{
-		CredentialBundles: []credentialBundle{bundle},
+		credentialBundles: []credentialBundle{bundle},
 		Credentials: map[string][]CredentialHeader{
 			host: {
 				{AllowInsecure: true, Name: "Authorization", Value: "Bearer host-wide-token", Grant: "other"},
@@ -414,7 +414,7 @@ func TestMCPRelay_RecordsButDoesNotInjectBundlePlaceholders(t *testing.T) {
 	var policy []PolicyLogData
 	p.SetPolicyLogger(func(d PolicyLogData) { policy = append(policy, d) })
 	rc := &RunContextData{
-		CredentialBundles: []credentialBundle{codexTestBundle()},
+		credentialBundles: []credentialBundle{codexTestBundle()},
 		MCPServers:        []MCPServerConfig{{Name: "srv", URL: backend.URL}},
 	}
 
@@ -451,7 +451,7 @@ func TestMCPRelay_UnrelatedRequestIsUnaffectedByBundles(t *testing.T) {
 
 	p := NewProxy()
 	rc := &RunContextData{
-		CredentialBundles: []credentialBundle{codexTestBundle()},
+		credentialBundles: []credentialBundle{codexTestBundle()},
 		MCPServers:        []MCPServerConfig{{Name: "srv", URL: backend.URL}},
 	}
 

@@ -12,8 +12,8 @@ Gatekeeper produces structured logs, distributed traces, and request metrics via
 
 The `proxy` package defines two callback types for instrumentation:
 
-- **`RequestLogger`** — called once per completed request with a `RequestLogData` struct containing method, host, path, status code, duration, injected headers, grant names, denial info, and request context.
-- **`PolicyLogger`** — called on each policy denial with scope, operation, rule, and message.
+- **`SetLogger` callback** — called once per completed request with a `RequestLogData` struct containing method, host, path, status code, duration, injected headers, grant names, denial info, and request context.
+- **`SetPolicyLogger` callback** — called on each policy denial with scope, operation, rule, and message.
 
 The `gatekeeper` package (standalone server wiring) sets these callbacks at startup. The callbacks write canonical log lines, enrich OTel spans, and record metrics. This design keeps every non-test `proxy/` file except `otel.go` free of OTel imports.
 

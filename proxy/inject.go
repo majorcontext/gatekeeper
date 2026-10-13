@@ -462,7 +462,7 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 // nothing to look up here.
 func (p *Proxy) getCredentialBundlesForRequest(ctxReq *http.Request) []credentialBundle {
 	if rc := getRunContext(ctxReq); rc != nil {
-		return rc.CredentialBundles
+		return rc.credentialBundles
 	}
 	return nil
 }

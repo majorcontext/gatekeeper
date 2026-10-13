@@ -39,7 +39,7 @@ A request to `/mcp/context7/v1/endpoint` forwards to `https://mcp.context7.com/m
 
 ## Daemon-mode token-embedded path
 
-The relay path above (`/mcp/{server-name}`) relies on `Proxy-Authorization` to resolve run context, which requires the request to go through the proxy mechanism. When gatekeeper runs with a `ContextResolver` (daemon mode — moat's per-run registration, not standalone `gatekeeper.yaml` mode) and a request arrives directly rather than proxied, gatekeeper also serves `/mcp/{token}/{server-name}[/path]`: the run's proxy auth token is embedded in the URL itself, since a direct request carries no `Proxy-Authorization` header. Gatekeeper extracts the token, resolves it to run context, strips the token from the path, and dispatches to the same relay handling described above. This form only exists in daemon mode — standalone gatekeeper has no `ContextResolver` and does not serve it.
+The relay path above (`/mcp/{server-name}`) relies on `Proxy-Authorization` to resolve run context, which requires the request to go through the proxy mechanism. When gatekeeper runs with a context resolver (daemon mode — moat's per-run registration, not standalone `gatekeeper.yaml` mode) and a request arrives directly rather than proxied, gatekeeper also serves `/mcp/{token}/{server-name}[/path]`: the run's proxy auth token is embedded in the URL itself, since a direct request carries no `Proxy-Authorization` header. Gatekeeper extracts the token, resolves it to run context, strips the token from the path, and dispatches to the same relay handling described above. This form only exists in daemon mode — standalone gatekeeper has no context resolver and does not serve it.
 
 ## SSE streaming
 
@@ -51,7 +51,7 @@ The relay HTTP client has no client-level timeout — MCP SSE streams are long-l
 
 MCP credential injection works in two modes:
 
-**Relay mode.** Requests to `/mcp/{server-name}` are proxied directly. Gatekeeper resolves the credential by grant name from `RunContextData.Credentials` (daemon mode) or the `CredentialStore` (standalone mode) and sets the header on the outgoing request.
+**Relay mode.** Requests to `/mcp/{server-name}` are proxied directly. Gatekeeper resolves the credential by grant name from `RunContextData.Credentials` (daemon mode) or the credential store (standalone mode) and sets the header on the outgoing request.
 
 **Stub replacement mode.** When an MCP client sends a request through the CONNECT proxy (not the relay endpoint) to an MCP server URL, gatekeeper checks if the authentication header contains a stub value (`gatekeeper-stub-{grant}` (the prefix is `Branding.MCPStubPrefix`)). If it matches, the stub is replaced with the real credential. Non-stub values are left unchanged — the client may already have a valid credential.
 

@@ -83,14 +83,14 @@ Gatekeeper:
 
 1. Matches `context7` against the configured `MCPServerConfig` entries.
 2. Builds the target URL from the server's `URL` field, appending any path after `/mcp/context7` (here, `/v1/endpoint`) and preserving the query string.
-3. Resolves the credential for grant `mcp-context7` — first from `RunContextData.Credentials` (daemon mode), then from the `CredentialStore` — and sets it on the configured `Auth.Header`.
+3. Resolves the credential for grant `mcp-context7` — first from `RunContextData.Credentials` (daemon mode), then from the credential store — and sets it on the configured `Auth.Header`.
 4. Forwards the request to `https://mcp.context7.com/mcp/v1/endpoint` and streams the response back.
 
 Path building trims exactly the `/mcp/{server-name}` prefix and appends what remains to the server's configured URL path (trimming a trailing slash first), so `/mcp/context7` (no sub-path) forwards to the bare `https://mcp.context7.com/mcp`.
 
 ## Multi-tenant setup (RunContextData)
 
-For a daemon that scopes MCP servers and credentials per caller, populate `RunContextData.MCPServers` and `RunContextData.Credentials` (or `RunContextData.CredStore`) inside a `ContextResolver` instead of calling `SetMCPServers`/`SetCredentialStore` on the proxy directly:
+For a daemon that scopes MCP servers and credentials per caller, populate `RunContextData.MCPServers` and `RunContextData.Credentials` (or `RunContextData.CredStore`) inside a context resolver instead of calling `SetMCPServers`/`SetCredentialStore` on the proxy directly:
 
 ```go
 p.SetContextResolver(func(token string) (*proxy.RunContextData, bool) {
@@ -119,11 +119,11 @@ p.SetContextResolver(func(token string) (*proxy.RunContextData, bool) {
 })
 ```
 
-Each run's `MCPServers` list and credentials are isolated — `getMCPServersForRequest` reads `RunContextData.MCPServers` when a `ContextResolver` resolved the run, and only falls back to the proxy-level list set by `SetMCPServers` when no run context is present. See [Go Library Usage](./09-go-library.md#custom-contextresolver) for the full `ContextResolver` pattern.
+Each run's `MCPServers` list and credentials are isolated — `getMCPServersForRequest` reads `RunContextData.MCPServers` when a context resolver resolved the run, and only falls back to the proxy-level list set by `SetMCPServers` when no run context is present. See [Go Library Usage](./09-go-library.md#custom-context-resolver) for the full context resolver pattern.
 
 ### Daemon-mode direct access
 
-When a `ContextResolver` is set, gatekeeper also serves `/mcp/{token}/{server-name}[/path]` for clients that connect directly (not through the proxy mechanism) and therefore cannot send a `Proxy-Authorization` header. The run's proxy auth token is embedded in the URL instead; gatekeeper extracts it, resolves the run, strips the token from the path, and dispatches to the same relay handling described above. Standalone gatekeeper (no `ContextResolver`) never serves this form — see [MCP Relay](../concepts/05-mcp-relay.md#daemon-mode-token-embedded-path) for the full mechanics.
+When a context resolver is set, gatekeeper also serves `/mcp/{token}/{server-name}[/path]` for clients that connect directly (not through the proxy mechanism) and therefore cannot send a `Proxy-Authorization` header. The run's proxy auth token is embedded in the URL instead; gatekeeper extracts it, resolves the run, strips the token from the path, and dispatches to the same relay handling described above. Standalone gatekeeper (no context resolver) never serves this form — see [MCP Relay](../concepts/05-mcp-relay.md#daemon-mode-token-embedded-path) for the full mechanics.
 
 ## Credential injection modes
 

@@ -43,12 +43,12 @@ func (p *Proxy) SetUpstreamCAs(pool *x509.CertPool) {
 }
 
 // SetLogger sets the request logger.
-func (p *Proxy) SetLogger(logger requestLogger) {
+func (p *Proxy) SetLogger(logger func(data RequestLogData)) {
 	p.logger = logger
 }
 
 // SetPolicyLogger sets the policy decision logger.
-func (p *Proxy) SetPolicyLogger(logger policyLogger) {
+func (p *Proxy) SetPolicyLogger(logger func(data PolicyLogData)) {
 	p.policyLogger = logger
 }
 
@@ -63,13 +63,15 @@ func (p *Proxy) SetMCPServers(servers []MCPServerConfig) {
 }
 
 // SetCredentialStore sets the credential store for MCP credential retrieval.
-func (p *Proxy) SetCredentialStore(store credentialStore) {
+func (p *Proxy) SetCredentialStore(store interface {
+	GetToken(provider string) (string, error)
+}) {
 	p.credStore = store
 }
 
 // SetContextResolver sets the per-run context resolver for multi-tenant proxy use.
 // When set, the proxy can resolve auth tokens to per-run credential data.
-func (p *Proxy) SetContextResolver(resolver contextResolver) {
+func (p *Proxy) SetContextResolver(resolver func(token string) (*RunContextData, bool)) {
 	p.contextResolver = resolver
 }
 
@@ -282,7 +284,7 @@ func (p *Proxy) SetNetworkPolicy(policy string, allows []string, grants []string
 // SetNetworkPolicyWithRules sets the network policy with per-host request rules.
 // The allows list should include hosts from rules (the caller extracts them).
 // checker evaluates per-request rules; pathChecker reports if path-level rules exist.
-func (p *Proxy) SetNetworkPolicyWithRules(policy string, allows []string, grants []string, checker requestChecker, pathChecker pathRulesChecker) {
+func (p *Proxy) SetNetworkPolicyWithRules(policy string, allows []string, grants []string, checker func(host string, port int, method, path string) bool, pathChecker func(host string, port int) bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 

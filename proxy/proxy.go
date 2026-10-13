@@ -61,13 +61,6 @@ func userIDFromContext(ctx context.Context) string {
 // Returns the modified response and true if transformed, or original and false.
 type ResponseTransformer func(req, resp any) (any, bool)
 
-// credentialStore retrieves tokens by provider name (grant).
-// The proxy uses this for MCP credential injection when credentials are
-// not pre-resolved in RunContextData.
-type credentialStore interface {
-	GetToken(provider string) (string, error)
-}
-
 // MCPServerConfig holds the MCP server configuration needed by the proxy.
 type MCPServerConfig struct {
 	Name string
@@ -84,14 +77,6 @@ type MCPAuthConfig struct {
 	// http:// MCP server. The default refuses the request.
 	AllowInsecure bool
 }
-
-// requestChecker checks if a request to host:port with the given method and
-// path is allowed. Provided by the caller to encapsulate network rule evaluation.
-type requestChecker func(host string, port int, method, path string) bool
-
-// pathRulesChecker reports whether path-level rules exist for a given host.
-// When true, the proxy intercepts CONNECT tunnels for path-level inspection.
-type pathRulesChecker func(host string, port int) bool
 
 // httpTransport is a shared transport for non-CONNECT HTTP forwarding with
 // sane timeout defaults. No client-level Timeout is set because the proxy may
@@ -166,9 +151,6 @@ type RequestLogData struct {
 	ApplicationName string
 }
 
-// requestLogger is called for each proxied request.
-type requestLogger func(data RequestLogData)
-
 // PolicyLogData contains data for a policy denial event.
 type PolicyLogData struct {
 	RunID     string
@@ -189,9 +171,6 @@ type PolicyLogData struct {
 	// worse than an extra warning. Getting it wrong now over-reports.
 	NonBlocking bool
 }
-
-// policyLogger is called when a policy denial occurs.
-type policyLogger func(data PolicyLogData)
 
 // CredentialHeader holds a header name and value for credential injection.
 type CredentialHeader struct {
@@ -244,14 +223,14 @@ func MatchesHostPattern(pattern HostPattern, host string, port int) bool {
 	return matchesPattern(pattern, host, port)
 }
 
-// RunContextData holds per-run credential data resolved by contextResolver.
+// RunContextData holds per-run credential data resolved by the context resolver.
 // The host-keyed maps are read without synchronization on every request —
 // including linear scans for wildcard and case-fold matching — so they must
 // not be mutated after the RunContextData is registered with the proxy.
 type RunContextData struct {
 	RunID                string
 	Credentials          map[string][]CredentialHeader
-	CredentialBundles    []credentialBundle
+	credentialBundles    []credentialBundle
 	ExtraHeaders         map[string][]ExtraHeader
 	RemoveHeaders        map[string][]string
 	TokenSubstitutions   map[string]*TokenSubstitution
@@ -259,19 +238,18 @@ type RunContextData struct {
 	MCPServers           []MCPServerConfig
 	Policy               string
 	AllowedHosts         []HostPattern
-	RequestCheck         requestChecker
-	PathRulesCheck       pathRulesChecker
+	RequestCheck         func(host string, port int, method, path string) bool
+	PathRulesCheck       func(host string, port int) bool
 	AWSHandler           http.Handler
-	CredStore            credentialStore
-	KeepEngines          map[string]*keeplib.Engine
-	HostGateway          string
-	HostGatewayIP        string // actual IP to forward allowed host-gateway requests to
-	AllowedHostPorts     []int
-	PostgresResolvers    []postgresResolverEntry
+	CredStore            interface {
+		GetToken(provider string) (string, error)
+	}
+	KeepEngines       map[string]*keeplib.Engine
+	HostGateway       string
+	HostGatewayIP     string // actual IP to forward allowed host-gateway requests to
+	AllowedHostPorts  []int
+	postgresResolvers []postgresResolverEntry
 }
-
-// contextResolver resolves a proxy auth token to per-run context data.
-type contextResolver func(token string) (*RunContextData, bool)
 
 // CredentialResolver resolves credentials dynamically per-request. Unlike
 // static credentials (pre-resolved at startup), resolvers may inspect and
@@ -313,25 +291,27 @@ type Proxy struct {
 	extraHeaders         map[string][]ExtraHeader           // host -> additional headers to inject
 	responseTransformers map[string][]ResponseTransformer   // host -> response transformers
 	mu                   sync.RWMutex
-	ca                   *CA              // Optional CA for TLS interception
-	logger               requestLogger    // Optional request logger
-	authToken            string           // Optional auth token required for proxy access
-	delegateAuth         bool             // When authToken is empty, require some non-empty password and delegate its validation to credential resolvers
-	policy               string           // "permissive" or "strict"
-	allowedHosts         []HostPattern    // parsed allow patterns for strict policy
-	requestChecker       requestChecker   // per-host request rules checker
-	pathRulesChecker     pathRulesChecker // checks if host has path-level rules
-	awsHandler           http.Handler     // Optional handler for AWS credential endpoint
-	credStore            credentialStore
-	mcpServers           []MCPServerConfig
-	removeHeaders        map[string][]string           // host -> []headerName
-	tokenSubstitutions   map[string]*TokenSubstitution // host -> substitution
-	relays               map[string]string             // name -> target URL for relay endpoints
-	contextResolver      contextResolver               // optional per-run credential resolver
-	policyLogger         policyLogger                  // optional policy decision logger
-	upstreamCAs          *x509.CertPool                // optional CA pool for upstream TLS verification
-	captureHeaders       []string                      // headers to capture in logs and strip before forwarding
-	branding             Branding                      // client-visible wording of blocks and errors
+	ca                   *CA                                                   // Optional CA for TLS interception
+	logger               func(data RequestLogData)                             // Optional request logger
+	authToken            string                                                // Optional auth token required for proxy access
+	delegateAuth         bool                                                  // When authToken is empty, require some non-empty password and delegate its validation to credential resolvers
+	policy               string                                                // "permissive" or "strict"
+	allowedHosts         []HostPattern                                         // parsed allow patterns for strict policy
+	requestChecker       func(host string, port int, method, path string) bool // per-host request rules checker
+	pathRulesChecker     func(host string, port int) bool                      // checks if host has path-level rules
+	awsHandler           http.Handler                                          // Optional handler for AWS credential endpoint
+	credStore            interface {
+		GetToken(provider string) (string, error)
+	}
+	mcpServers         []MCPServerConfig
+	removeHeaders      map[string][]string                        // host -> []headerName
+	tokenSubstitutions map[string]*TokenSubstitution              // host -> substitution
+	relays             map[string]string                          // name -> target URL for relay endpoints
+	contextResolver    func(token string) (*RunContextData, bool) // optional per-run credential resolver
+	policyLogger       func(data PolicyLogData)                   // optional policy decision logger
+	upstreamCAs        *x509.CertPool                             // optional CA pool for upstream TLS verification
+	captureHeaders     []string                                   // headers to capture in logs and strip before forwarding
+	branding           Branding                                   // client-visible wording of blocks and errors
 
 	h2UpstreamTransport *http.Transport
 

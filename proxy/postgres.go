@@ -99,7 +99,7 @@ type staticPostgresResolver struct {
 }
 
 // NewStaticPostgresResolver creates a resolver that always returns password.
-func NewStaticPostgresResolver(password string) *staticPostgresResolver {
+func NewStaticPostgresResolver(password string) PostgresCredentialResolver {
 	return &staticPostgresResolver{password: password}
 }
 
@@ -139,7 +139,7 @@ func (p *Proxy) postgresResolverForHost(rc *RunContextData, host string) Postgre
 		host = h
 	}
 	if rc != nil {
-		return postgresResolverFromEntries(rc.PostgresResolvers, host)
+		return postgresResolverFromEntries(rc.postgresResolvers, host)
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
