@@ -144,6 +144,15 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if p.refusesCleartextInjection(r, targetURL.Scheme, host, creds) {
+		p.logExit(r, logBase, start, http.StatusForbidden, func(d *RequestLogData) {
+			d.Denied = true
+			d.DenyReason = "credential injection over plain HTTP refused: " + host
+		})
+		p.writeCleartextRefusal(w, targetURL.Hostname())
+		return
+	}
+
 	for key, values := range r.Header {
 		if key == "Proxy-Authorization" || key == "Proxy-Connection" {
 			continue

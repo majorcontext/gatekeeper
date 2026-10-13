@@ -670,9 +670,10 @@ func TestHTTPCredentialInjection(t *testing.T) {
 		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
 		Credentials: []CredentialConfig{
 			{
-				Host:   backendURL.Hostname(),
-				Grant:  "test",
-				Source: SourceConfig{Type: "static", Value: "Bearer http-secret"},
+				Host:          backendURL.Hostname(),
+				AllowInsecure: true,
+				Grant:         "test",
+				Source:        SourceConfig{Type: "static", Value: "Bearer http-secret"},
 			},
 		},
 		Network: NetworkConfig{Policy: "permissive"},
@@ -701,6 +702,66 @@ func TestHTTPCredentialInjection(t *testing.T) {
 
 	if string(body) != "Bearer http-secret" {
 		t.Errorf("backend got Authorization = %q, want %q", body, "Bearer http-secret")
+	}
+}
+
+func TestHTTPCredentialInjectionRefusedWithoutAllowInsecure(t *testing.T) {
+	reached := make(chan struct{}, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached <- struct{}{}
+	}))
+	defer backend.Close()
+	backendURL, _ := url.Parse(backend.URL)
+
+	cfg, err := ParseConfig([]byte(`
+proxy: {port: 0, host: 127.0.0.1}
+network: {policy: permissive}
+credentials:
+  - host: ` + backendURL.Hostname() + `
+    grant: test
+    source: {type: static, value: "Bearer http-secret"}
+`))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	srv, err := New(context.Background(), cfg, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	go func() { _ = srv.Start(t.Context()) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	proxyURL, _ := url.Parse("http://" + srv.ProxyAddr())
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	resp, err := client.Get(backend.URL + "/test")
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "allow_insecure") {
+		t.Errorf("status %d body %q, want 403 naming allow_insecure", resp.StatusCode, body)
+	}
+	select {
+	case <-reached:
+		t.Error("request reached the plain-HTTP backend")
+	default:
+	}
+}
+
+func TestParseConfigAllowInsecure(t *testing.T) {
+	cfg, err := ParseConfig([]byte(`
+credentials:
+  - host: svc.internal
+    allow_insecure: true
+    source: {type: static, value: x}
+`))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if len(cfg.Credentials) != 1 || !cfg.Credentials[0].AllowInsecure {
+		t.Errorf("credentials = %+v, want allow_insecure set", cfg.Credentials)
 	}
 }
 
@@ -1254,15 +1315,17 @@ func TestMultipleCredentialsSameHost(t *testing.T) {
 		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
 		Credentials: []CredentialConfig{
 			{
-				Host:   backendURL.Hostname(),
-				Grant:  "github",
-				Source: SourceConfig{Type: "static", Value: "Bearer gh-token"},
+				Host:          backendURL.Hostname(),
+				AllowInsecure: true,
+				Grant:         "github",
+				Source:        SourceConfig{Type: "static", Value: "Bearer gh-token"},
 			},
 			{
-				Host:   backendURL.Hostname(),
-				Header: "x-api-key",
-				Grant:  "anthropic",
-				Source: SourceConfig{Type: "static", Value: "sk-ant-key"},
+				Host:          backendURL.Hostname(),
+				Header:        "x-api-key",
+				AllowInsecure: true,
+				Grant:         "anthropic",
+				Source:        SourceConfig{Type: "static", Value: "sk-ant-key"},
 			},
 		},
 		Network: NetworkConfig{Policy: "permissive"},
@@ -1308,8 +1371,9 @@ func TestAuthSchemeAutoDetectionThroughProxy(t *testing.T) {
 		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
 		Credentials: []CredentialConfig{
 			{
-				Host:  backendURL.Hostname(),
-				Grant: "github",
+				Host:          backendURL.Hostname(),
+				AllowInsecure: true,
+				Grant:         "github",
 				// Bare GitHub classic PAT — should auto-detect "token" prefix.
 				Source: SourceConfig{Type: "static", Value: "ghp_abc123def456"},
 			},
@@ -1356,11 +1420,12 @@ func TestBasicFormatCredentialInjection(t *testing.T) {
 		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
 		Credentials: []CredentialConfig{
 			{
-				Host:   backendURL.Hostname(),
-				Grant:  "github-git",
-				Format: "basic",
-				Prefix: "x-access-token",
-				Source: SourceConfig{Type: "static", Value: "ghs_abc123"},
+				Host:          backendURL.Hostname(),
+				AllowInsecure: true,
+				Grant:         "github-git",
+				Format:        "basic",
+				Prefix:        "x-access-token",
+				Source:        SourceConfig{Type: "static", Value: "ghs_abc123"},
 			},
 		},
 		Network: NetworkConfig{Policy: "permissive"},
@@ -2521,9 +2586,10 @@ func TestHTTPTokenExchangeRelay(t *testing.T) {
 		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
 		Credentials: []CredentialConfig{
 			{
-				Host:   backendURL.Hostname(),
-				Grant:  "test",
-				Prefix: "Bearer",
+				Host:          backendURL.Hostname(),
+				AllowInsecure: true,
+				Grant:         "test",
+				Prefix:        "Bearer",
 				Source: SourceConfig{
 					Type:            "token-exchange",
 					Endpoint:        sts.URL,
@@ -2622,9 +2688,10 @@ func TestHTTPTokenExchangeProxyAuthRelay(t *testing.T) {
 		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
 		Credentials: []CredentialConfig{
 			{
-				Host:   backendURL.Hostname(),
-				Grant:  "test",
-				Prefix: "Bearer",
+				Host:          backendURL.Hostname(),
+				AllowInsecure: true,
+				Grant:         "test",
+				Prefix:        "Bearer",
 				Source: SourceConfig{
 					Type:            "token-exchange",
 					Endpoint:        sts.URL,

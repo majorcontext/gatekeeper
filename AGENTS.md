@@ -75,7 +75,7 @@ examples/           Sample config, CA generation script, and test harness
 2. Proxy establishes TLS with the client using a dynamically-generated certificate for that host
 3. Proxy reads the plaintext HTTP request from the client
 4. `RunContextData.Credentials` is checked — if a credential matches the request host, the configured header (default: `Authorization`) is injected
-5. Proxy forwards the request to the real server over a separate TLS connection
+5. Proxy forwards the request to the real server over a separate TLS connection. A plain-HTTP request that matches a credential is refused with 403 unless the credential sets `allow_insecure`
 6. Response streams back to the client
 
 ### Host Gateway

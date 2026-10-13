@@ -69,7 +69,7 @@ func TestMCPRelay_DaemonModeCredentials(t *testing.T) {
 			{
 				Name: "test-server",
 				URL:  backend.URL,
-				Auth: &MCPAuthConfig{
+				Auth: &MCPAuthConfig{AllowInsecure: true,
 					Grant:  "mcp-test",
 					Header: "X-Api-Key",
 				},
@@ -87,7 +87,7 @@ func TestMCPRelay_DaemonModeCredentials(t *testing.T) {
 			{
 				Name: "test-server",
 				URL:  backend.URL,
-				Auth: &MCPAuthConfig{
+				Auth: &MCPAuthConfig{AllowInsecure: true,
 					Grant:  "mcp-test",
 					Header: "X-Api-Key",
 				},
@@ -502,7 +502,7 @@ func TestMCPRelay_HeaderInjection(t *testing.T) {
 			{
 				Name: "test",
 				URL:  backend.URL,
-				Auth: &MCPAuthConfig{
+				Auth: &MCPAuthConfig{AllowInsecure: true,
 					Grant:  "mcp-test",
 					Header: "X-API-Key",
 				},
@@ -763,7 +763,7 @@ func TestServeHTTP_DirectMCPRelay(t *testing.T) {
 				{
 					Name: "my-server",
 					URL:  backend.URL,
-					Auth: &MCPAuthConfig{Grant: "mcp-test", Header: "X-Api-Key"},
+					Auth: &MCPAuthConfig{AllowInsecure: true, Grant: "mcp-test", Header: "X-Api-Key"},
 				},
 			},
 		}, true
@@ -875,7 +875,7 @@ func TestMCPRelay_LogsCredentialInjection(t *testing.T) {
 			{
 				Name: "test",
 				URL:  backend.URL,
-				Auth: &MCPAuthConfig{
+				Auth: &MCPAuthConfig{AllowInsecure: true,
 					Grant:  "mcp-test",
 					Header: "X-API-Key",
 				},

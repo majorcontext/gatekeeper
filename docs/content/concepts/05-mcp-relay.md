@@ -22,8 +22,9 @@ A relay request follows this path:
 1. The client sends a request to `http://proxy-host:port/mcp/{server-name}[/path]`.
 2. Gatekeeper matches `{server-name}` against configured `MCPServerConfig` entries.
 3. Gatekeeper builds the target URL from the server's configured `URL` field, preserving any sub-path and query string from the original request.
-4. If the server has an `Auth` config, gatekeeper resolves the credential by grant name and injects it into the forwarded request header.
-5. Gatekeeper forwards the request to the real MCP server and streams the response back to the client.
+4. If the target URL uses `http://` and the `Auth` config does not set `AllowInsecure`, gatekeeper answers `403` and forwards nothing.
+5. If the server has an `Auth` config, gatekeeper resolves the credential by grant name and injects it into the forwarded request header.
+6. Gatekeeper forwards the request to the real MCP server and streams the response back to the client.
 
 ```yaml
 # MCP server configuration (set via MCPServerConfig)

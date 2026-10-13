@@ -474,7 +474,7 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 				// Declare the subject header so the proxy still strips it
 				// when a better-matched static credential outranks (and
 				// therefore skips) this resolver.
-				s.proxy.SetCredentialResolverWithStripHeaders(cred.Host, resolver, credentialResolverStripHeaders(cred)...)
+				s.proxy.SetCredentialResolverWithStripHeaders(cred.Host, allowInsecureResolver(resolver, cred.AllowInsecure), credentialResolverStripHeaders(cred)...)
 				continue
 			}
 		}
@@ -522,7 +522,7 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 		if strings.EqualFold(e.header, "Authorization") {
 			val = ensureAuthScheme(val, e.cred.Prefix, e.cred.Format)
 		}
-		s.proxy.SetCredentialWithGrant(e.cred.Host, e.header, val, e.cred.Grant)
+		s.setCredential(e.cred, e.header, val)
 
 		if rs, ok := e.source.src.(credentialsource.RefreshingSource); ok {
 			if pr, ok := refreshMap[e.source]; ok {
@@ -676,7 +676,7 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 				if strings.EqualFold(header, "Authorization") {
 					val = ensureAuthScheme(val, cred.Prefix, cred.Format)
 				}
-				s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
+				s.setCredential(cred, header, val)
 				s.log().Debug("credential refreshed",
 					"host", cred.Host,
 					"grant", cred.Grant,
@@ -684,6 +684,27 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 			}
 		}
 	}()
+}
+
+func (s *Server) setCredential(cred CredentialConfig, header, val string) {
+	if cred.AllowInsecure {
+		s.proxy.SetInsecureCredentialWithGrant(cred.Host, header, val, cred.Grant)
+		return
+	}
+	s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
+}
+
+func allowInsecureResolver(r proxy.CredentialResolver, allow bool) proxy.CredentialResolver {
+	if !allow {
+		return r
+	}
+	return func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]proxy.CredentialHeader, error) {
+		creds, err := r(ctx, proxyReq, innerReq, host)
+		for i := range creds {
+			creds[i].AllowInsecure = true
+		}
+		return creds, err
+	}
 }
 
 var refreshFloor = 30 * time.Second

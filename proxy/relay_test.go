@@ -67,7 +67,7 @@ func TestRelay_InjectsCredentials(t *testing.T) {
 	// Register credential for backend hostname (without port, matching real behavior)
 	backendHost := strings.TrimPrefix(backend.URL, "http://")
 	host, _, _ := strings.Cut(backendHost, ":")
-	p.SetCredentialWithGrant(host, "Authorization", "Bearer sk-real-token", "claude")
+	p.SetInsecureCredentialWithGrant(host, "Authorization", "Bearer sk-real-token", "claude")
 	p.AddExtraHeader(host, "anthropic-beta", "oauth-2025-04-20")
 
 	req := httptest.NewRequest("POST", "/relay/anthropic/v1/messages", nil)
@@ -125,7 +125,7 @@ func TestRelay_MismatchedAuthTokenRejectedBeforeResolver(t *testing.T) {
 			host, _, _ := strings.Cut(backendHost, ":")
 			p.SetCredentialResolver(host, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]CredentialHeader, error) {
 				resolverCalls.Add(1)
-				return []CredentialHeader{{Name: "Authorization", Value: "Bearer exchanged"}}, nil
+				return []CredentialHeader{{AllowInsecure: true, Name: "Authorization", Value: "Bearer exchanged"}}, nil
 			})
 
 			req := httptest.NewRequest("POST", "/relay/anthropic/v1/messages", nil)
@@ -680,7 +680,7 @@ func TestRelay_StripsCaptureHeadersAndSubstitutesTokens(t *testing.T) {
 	if err := p.SetCaptureHeaders([]string{"X-Trace-Id"}); err != nil {
 		t.Fatalf("SetCaptureHeaders: %v", err)
 	}
-	p.SetTokenSubstitution(strings.TrimPrefix(backend.URL, "http://"), "placeholder-token", "real-secret")
+	p.SetInsecureTokenSubstitution(strings.TrimPrefix(backend.URL, "http://"), "placeholder-token", "real-secret")
 
 	req := httptest.NewRequest("POST", "/relay/tg/bot"+"placeholder-token"+"/getUpdates", strings.NewReader(`{"t":"placeholder-token"}`))
 	req.Header.Set("X-Trace-Id", "trace-1")
@@ -722,7 +722,7 @@ func TestRelay_CrossHostRedirectNotFollowed(t *testing.T) {
 	if err := p.AddRelay("api", first.URL); err != nil {
 		t.Fatalf("AddRelay: %v", err)
 	}
-	p.SetCredentialWithGrant("127.0.0.1", "x-api-key", "sk-secret", "api")
+	p.SetInsecureCredentialWithGrant("127.0.0.1", "x-api-key", "sk-secret", "api")
 
 	req := httptest.NewRequest("GET", "/relay/api/v1", nil)
 	rec := httptest.NewRecorder()

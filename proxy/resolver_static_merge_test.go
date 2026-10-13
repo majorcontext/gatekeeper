@@ -26,10 +26,10 @@ func TestProxy_ResolverAndStaticOnDifferentHeaders(t *testing.T) {
 	defer backend.Close()
 
 	p := NewProxy()
-	p.SetCredentialWithGrant("127.0.0.1", "x-api-key", "real-api-key", "app")
+	p.SetInsecureCredentialWithGrant("127.0.0.1", "x-api-key", "real-api-key", "app")
 	p.SetCredentialResolverWithStripHeaders("127.0.0.1",
 		func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-			return []credentialHeader{{Name: "Authorization", Value: "Bearer resolved", Grant: "subscription"}}, nil
+			return []credentialHeader{{AllowInsecure: true, Name: "Authorization", Value: "Bearer resolved", Grant: "subscription"}}, nil
 		})
 
 	proxyServer := httptest.NewServer(p)
@@ -81,7 +81,7 @@ func TestProxy_ResolverStillWinsItsOwnHeader(t *testing.T) {
 	p.SetCredentialWithGrant("127.0.0.1", "Authorization", "Bearer static-fallback", "app-fallback")
 	p.SetCredentialResolverWithStripHeaders("127.0.0.1",
 		func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-			return []credentialHeader{{Name: "Authorization", Value: "Bearer resolved", Grant: "subscription"}}, nil
+			return []credentialHeader{{AllowInsecure: true, Name: "Authorization", Value: "Bearer resolved", Grant: "subscription"}}, nil
 		})
 
 	proxyServer := httptest.NewServer(p)
@@ -119,7 +119,7 @@ func TestProxy_NoPlaceholderDoesNotFanOutCredentials(t *testing.T) {
 	p.SetCredentialWithGrant("127.0.0.1", "x-api-key", "real-api-key", "app")
 	p.SetCredentialResolverWithStripHeaders("127.0.0.1",
 		func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-			return []credentialHeader{{Name: "Authorization", Value: "Bearer resolved", Grant: "subscription"}}, nil
+			return []credentialHeader{{AllowInsecure: true, Name: "Authorization", Value: "Bearer resolved", Grant: "subscription"}}, nil
 		})
 
 	proxyServer := httptest.NewServer(p)
@@ -184,7 +184,7 @@ func TestProxy_ResolverMutationDoesNotChangeWhatWasAskedFor(t *testing.T) {
 			p.SetCredentialResolverWithStripHeaders("127.0.0.1",
 				func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
 					tc.mutate(innerReq)
-					return []credentialHeader{{Name: "Authorization", Value: "Bearer resolved", Grant: "subscription"}}, nil
+					return []credentialHeader{{AllowInsecure: true, Name: "Authorization", Value: "Bearer resolved", Grant: "subscription"}}, nil
 				}, "x-api-key")
 
 			proxyServer := httptest.NewServer(p)

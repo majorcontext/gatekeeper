@@ -326,7 +326,7 @@ func TestHandleHTTP_BundleHeaderSurvivesCollidingHostCredential(t *testing.T) {
 	p.handleHTTP(rec, withRunContext(req, &RunContextData{
 		CredentialBundles: []CredentialBundle{bundle},
 		Credentials: map[string][]credentialHeader{
-			host: {{Name: "Authorization", Value: "Bearer host-wide-token", Grant: "other"}},
+			host: {{AllowInsecure: true, Name: "Authorization", Value: "Bearer host-wide-token", Grant: "other"}},
 		},
 	}))
 
@@ -382,8 +382,8 @@ func TestHandleHTTP_BundleDoesNotTriggerAutoInjectionOfOtherHeaders(t *testing.T
 		CredentialBundles: []CredentialBundle{bundle},
 		Credentials: map[string][]credentialHeader{
 			host: {
-				{Name: "Authorization", Value: "Bearer host-wide-token", Grant: "other"},
-				{Name: "X-Api-Key", Value: "host-api-key", Grant: "other"},
+				{AllowInsecure: true, Name: "Authorization", Value: "Bearer host-wide-token", Grant: "other"},
+				{AllowInsecure: true, Name: "X-Api-Key", Value: "host-api-key", Grant: "other"},
 			},
 		},
 	}))
