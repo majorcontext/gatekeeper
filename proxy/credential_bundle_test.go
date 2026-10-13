@@ -5,18 +5,18 @@ import (
 	"testing"
 )
 
-func codexTestBundle() CredentialBundle {
-	return CredentialBundle{
+func codexTestBundle() credentialBundle {
+	return credentialBundle{
 		ID:    "codex-subscription-v1",
 		Grant: "codex",
-		Scope: CredentialScope{
+		Scope: credentialScope{
 			RequireTLS:   true,
 			Origins:      []string{"https://chatgpt.com"},
 			Methods:      []string{"POST"},
 			PathPrefixes: []string{"/backend-api/codex"},
 		},
 		RequireAll: true,
-		Replacements: []HeaderReplacement{
+		Replacements: []headerReplacement{
 			{Name: "Authorization", Placeholder: "Bearer fake-access", Value: "Bearer real-access"},
 			{Name: "ChatGPT-Account-ID", Placeholder: "fake-account", Value: "real-account"},
 		},
@@ -31,7 +31,7 @@ func TestInjectCredentialBundles_ReplacesAllHeadersAtomically(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer fake-access")
 	req.Header.Set("ChatGPT-Account-ID", "fake-account")
 
-	res := injectCredentialBundles(req, []CredentialBundle{codexTestBundle()}, "https", "chatgpt.com")
+	res := injectCredentialBundles(req, []credentialBundle{codexTestBundle()}, "https", "chatgpt.com")
 
 	if res.Skipped {
 		t.Fatalf("bundle denied: %s", res.Reason)
@@ -96,7 +96,7 @@ func TestInjectCredentialBundles_FailsClosedWithoutMutating(t *testing.T) {
 			}
 			beforeAuth, beforeAccount := req.Header.Get("Authorization"), req.Header.Get("ChatGPT-Account-ID")
 
-			res := injectCredentialBundles(req, []CredentialBundle{codexTestBundle()}, tc.scheme, tc.host)
+			res := injectCredentialBundles(req, []credentialBundle{codexTestBundle()}, tc.scheme, tc.host)
 
 			if !res.Skipped {
 				t.Fatal("out-of-scope request was not recorded as skipped")
@@ -124,7 +124,7 @@ func TestInjectCredentialBundles_AcceptsExplicitDefaultPort(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer fake-access")
 	req.Header.Set("ChatGPT-Account-ID", "fake-account")
 
-	res := injectCredentialBundles(req, []CredentialBundle{codexTestBundle()}, "https", "chatgpt.com:443")
+	res := injectCredentialBundles(req, []credentialBundle{codexTestBundle()}, "https", "chatgpt.com:443")
 	if res.Skipped {
 		t.Fatalf("https://chatgpt.com:443 was denied; it is the same origin as https://chatgpt.com")
 	}
@@ -143,7 +143,7 @@ func TestInjectCredentialBundles_AcceptsPrefixItself(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer fake-access")
 	req.Header.Set("ChatGPT-Account-ID", "fake-account")
 
-	res := injectCredentialBundles(req, []CredentialBundle{codexTestBundle()}, "https", "chatgpt.com")
+	res := injectCredentialBundles(req, []credentialBundle{codexTestBundle()}, "https", "chatgpt.com")
 	if res.Skipped {
 		t.Fatal("the prefix path itself was denied")
 	}
@@ -154,7 +154,7 @@ func TestInjectCredentialBundles_IgnoresUnrelatedRequestWithoutPlaceholders(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	res := injectCredentialBundles(req, []CredentialBundle{codexTestBundle()}, "https", "chatgpt.com")
+	res := injectCredentialBundles(req, []credentialBundle{codexTestBundle()}, "https", "chatgpt.com")
 	if res.Skipped || len(res.Injected) != 0 {
 		t.Fatalf("unrelated request should be untouched, got %+v", res)
 	}
@@ -167,29 +167,29 @@ func TestInjectCredentialBundles_IgnoresUnrelatedRequestWithoutPlaceholders(t *t
 func TestInjectCredentialBundles_MalformedBundleIsIgnoredEntirely(t *testing.T) {
 	malformed := []struct {
 		name   string
-		bundle CredentialBundle
+		bundle credentialBundle
 	}{
-		{"empty placeholder", CredentialBundle{
-			ID: "b", Scope: CredentialScope{Origins: []string{"https://chatgpt.com"}},
-			Replacements: []HeaderReplacement{{Name: "X-Unset", Placeholder: "", Value: "real"}},
+		{"empty placeholder", credentialBundle{
+			ID: "b", Scope: credentialScope{Origins: []string{"https://chatgpt.com"}},
+			Replacements: []headerReplacement{{Name: "X-Unset", Placeholder: "", Value: "real"}},
 		}},
-		{"empty value", CredentialBundle{
-			ID: "b", Scope: CredentialScope{Origins: []string{"https://chatgpt.com"}},
-			Replacements: []HeaderReplacement{{Name: "X-Unset", Placeholder: "p", Value: ""}},
+		{"empty value", credentialBundle{
+			ID: "b", Scope: credentialScope{Origins: []string{"https://chatgpt.com"}},
+			Replacements: []headerReplacement{{Name: "X-Unset", Placeholder: "p", Value: ""}},
 		}},
-		{"empty name", CredentialBundle{
-			ID: "b", Scope: CredentialScope{Origins: []string{"https://chatgpt.com"}},
-			Replacements: []HeaderReplacement{{Name: "", Placeholder: "p", Value: "real"}},
+		{"empty name", credentialBundle{
+			ID: "b", Scope: credentialScope{Origins: []string{"https://chatgpt.com"}},
+			Replacements: []headerReplacement{{Name: "", Placeholder: "p", Value: "real"}},
 		}},
-		{"duplicate header", CredentialBundle{
-			ID: "b", Scope: CredentialScope{Origins: []string{"https://chatgpt.com"}},
-			Replacements: []HeaderReplacement{
+		{"duplicate header", credentialBundle{
+			ID: "b", Scope: credentialScope{Origins: []string{"https://chatgpt.com"}},
+			Replacements: []headerReplacement{
 				{Name: "Authorization", Placeholder: "p", Value: "a"},
 				{Name: "authorization", Placeholder: "q", Value: "b"},
 			},
 		}},
-		{"no replacements", CredentialBundle{
-			ID: "b", Scope: CredentialScope{Origins: []string{"https://chatgpt.com"}},
+		{"no replacements", credentialBundle{
+			ID: "b", Scope: credentialScope{Origins: []string{"https://chatgpt.com"}},
 		}},
 	}
 	for _, tc := range malformed {
@@ -199,7 +199,7 @@ func TestInjectCredentialBundles_MalformedBundleIsIgnoredEntirely(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			res := injectCredentialBundles(req, []CredentialBundle{tc.bundle}, "https", "chatgpt.com")
+			res := injectCredentialBundles(req, []credentialBundle{tc.bundle}, "https", "chatgpt.com")
 			if res.Skipped {
 				t.Fatalf("a malformed bundle flagged an unrelated request: %s", res.Reason)
 			}
@@ -220,8 +220,8 @@ func TestInjectCredentialBundles_MalformedBundleDoesNotDisableValidOne(t *testin
 	req.Header.Set("Authorization", "Bearer fake-access")
 	req.Header.Set("ChatGPT-Account-ID", "fake-account")
 
-	broken := CredentialBundle{ID: "broken", Replacements: []HeaderReplacement{{Name: "X-Unset"}}}
-	res := injectCredentialBundles(req, []CredentialBundle{broken, codexTestBundle()}, "https", "chatgpt.com")
+	broken := credentialBundle{ID: "broken", Replacements: []headerReplacement{{Name: "X-Unset"}}}
+	res := injectCredentialBundles(req, []credentialBundle{broken, codexTestBundle()}, "https", "chatgpt.com")
 	if res.Skipped {
 		t.Fatalf("valid bundle skipped: %s", res.Reason)
 	}

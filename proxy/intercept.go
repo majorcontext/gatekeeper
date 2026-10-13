@@ -214,7 +214,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			pr.Out.RequestURI = ""
 
 			// Credentials were resolved in the wrapping handler and passed via context.
-			creds, _ := pr.Out.Context().Value(interceptCredsKey{}).([]credentialHeader)
+			creds, _ := pr.Out.Context().Value(interceptCredsKey{}).([]CredentialHeader)
 
 			// Snapshot headers before injection so logs never hold credential values.
 			preInjectionHeaders, _ := pr.Out.Context().Value(interceptPreInjHeadersKey{}).(http.Header)

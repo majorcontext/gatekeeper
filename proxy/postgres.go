@@ -85,31 +85,31 @@ type PostgresCredentialResolver interface {
 	InvalidatePassword(host, user, database string)
 }
 
-// PostgresResolverEntry binds a host pattern (hosts.go glob syntax) to a
+// postgresResolverEntry binds a host pattern (hosts.go glob syntax) to a
 // resolver. Patterns match hostname only; a pattern with an explicit port
 // other than 5432 (e.g. "db.internal:5433") will never match.
-type PostgresResolverEntry struct {
+type postgresResolverEntry struct {
 	Pattern  string
 	Resolver PostgresCredentialResolver
 }
 
-// StaticPostgresResolver returns a fixed password for every connection.
-type StaticPostgresResolver struct {
+// staticPostgresResolver returns a fixed password for every connection.
+type staticPostgresResolver struct {
 	password string
 }
 
 // NewStaticPostgresResolver creates a resolver that always returns password.
-func NewStaticPostgresResolver(password string) *StaticPostgresResolver {
-	return &StaticPostgresResolver{password: password}
+func NewStaticPostgresResolver(password string) PostgresCredentialResolver {
+	return &staticPostgresResolver{password: password}
 }
 
 // ResolvePassword returns the fixed password.
-func (s *StaticPostgresResolver) ResolvePassword(ctx context.Context, host, user, database string) (string, error) {
+func (s *staticPostgresResolver) ResolvePassword(ctx context.Context, host, user, database string) (string, error) {
 	return s.password, nil
 }
 
 // InvalidatePassword is a no-op: static passwords are never cached.
-func (s *StaticPostgresResolver) InvalidatePassword(host, user, database string) {}
+func (s *staticPostgresResolver) InvalidatePassword(host, user, database string) {}
 
 // SetPostgresResolver registers a proxy-level Postgres credential resolver
 // for hosts matching pattern. Calling again with the same pattern replaces
@@ -124,7 +124,7 @@ func (p *Proxy) SetPostgresResolver(pattern string, r PostgresCredentialResolver
 			return
 		}
 	}
-	p.postgresResolvers = append(p.postgresResolvers, PostgresResolverEntry{Pattern: pattern, Resolver: r})
+	p.postgresResolvers = append(p.postgresResolvers, postgresResolverEntry{Pattern: pattern, Resolver: r})
 }
 
 // postgresResolverForHost returns the Postgres credential resolver for host.
@@ -139,7 +139,7 @@ func (p *Proxy) postgresResolverForHost(rc *RunContextData, host string) Postgre
 		host = h
 	}
 	if rc != nil {
-		return postgresResolverFromEntries(rc.PostgresResolvers, host)
+		return postgresResolverFromEntries(rc.postgresResolvers, host)
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -148,7 +148,7 @@ func (p *Proxy) postgresResolverForHost(rc *RunContextData, host string) Postgre
 
 // postgresResolverFromEntries returns the resolver of the first entry whose
 // pattern matches host, or nil when none match.
-func postgresResolverFromEntries(entries []PostgresResolverEntry, host string) PostgresCredentialResolver {
+func postgresResolverFromEntries(entries []postgresResolverEntry, host string) PostgresCredentialResolver {
 	for _, entry := range entries {
 		pattern := parseHostPattern(entry.Pattern)
 		// Patterns without an explicit port match the Postgres default port
@@ -178,7 +178,7 @@ func postgresResolverFromEntries(entries []PostgresResolverEntry, host string) P
 // still never matches. This is Postgres-specific: matchHost/matchesPattern
 // and their HTTP/CONNECT callers (checkNetworkPolicy,
 // checkNetworkPolicyForRequest) are unchanged.
-func matchHostPostgres(patterns []hostPattern, host string) bool {
+func matchHostPostgres(patterns []HostPattern, host string) bool {
 	for _, pattern := range patterns {
 		if pattern.port == 0 {
 			pattern.port = postgresDefaultPort

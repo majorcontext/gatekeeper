@@ -61,7 +61,7 @@ This ordering has a security property: credentials are never sent to unauthorize
 
 ## Per-path rules
 
-When gatekeeper has path-level rules (configured via `RequestChecker`), it evaluates them on the inner HTTP request after TLS interception — not on the CONNECT tunnel. The CONNECT request only carries the host, not the path. Gatekeeper intercepts the tunnel, reads the plaintext request, and then checks `method` and `path` against the rules.
+When gatekeeper has path-level rules (configured via `SetNetworkPolicyWithRules`), it evaluates them on the inner HTTP request after TLS interception — not on the CONNECT tunnel. The CONNECT request only carries the host, not the path. Gatekeeper intercepts the tunnel, reads the plaintext request, and then checks `method` and `path` against the rules.
 
 > **Note:** Per-path rules require TLS interception (a CA must be configured). Without interception, only host-level allow/deny applies. Gatekeeper logs a warning if path rules are configured but the CA is missing.
 

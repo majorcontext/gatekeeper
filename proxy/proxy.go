@@ -48,8 +48,8 @@ func withUserID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, userIDKey, id)
 }
 
-// UserIDFromContext extracts the user ID from a context, or empty string.
-func UserIDFromContext(ctx context.Context) string {
+// userIDFromContext extracts the user ID from a context, or empty string.
+func userIDFromContext(ctx context.Context) string {
 	if id, ok := ctx.Value(userIDKey).(string); ok {
 		return id
 	}
@@ -60,13 +60,6 @@ func UserIDFromContext(ctx context.Context) string {
 // Cast to *http.Request and *http.Response in the transformer implementation.
 // Returns the modified response and true if transformed, or original and false.
 type ResponseTransformer func(req, resp any) (any, bool)
-
-// CredentialStore retrieves tokens by provider name (grant).
-// The proxy uses this for MCP credential injection when credentials are
-// not pre-resolved in RunContextData.
-type CredentialStore interface {
-	GetToken(provider string) (string, error)
-}
 
 // MCPServerConfig holds the MCP server configuration needed by the proxy.
 type MCPServerConfig struct {
@@ -84,14 +77,6 @@ type MCPAuthConfig struct {
 	// http:// MCP server. The default refuses the request.
 	AllowInsecure bool
 }
-
-// RequestChecker checks if a request to host:port with the given method and
-// path is allowed. Provided by the caller to encapsulate network rule evaluation.
-type RequestChecker func(host string, port int, method, path string) bool
-
-// PathRulesChecker reports whether path-level rules exist for a given host.
-// When true, the proxy intercepts CONNECT tunnels for path-level inspection.
-type PathRulesChecker func(host string, port int) bool
 
 // httpTransport is a shared transport for non-CONNECT HTTP forwarding with
 // sane timeout defaults. No client-level Timeout is set because the proxy may
@@ -166,9 +151,6 @@ type RequestLogData struct {
 	ApplicationName string
 }
 
-// RequestLogger is called for each proxied request.
-type RequestLogger func(data RequestLogData)
-
 // PolicyLogData contains data for a policy denial event.
 type PolicyLogData struct {
 	RunID     string
@@ -190,11 +172,8 @@ type PolicyLogData struct {
 	NonBlocking bool
 }
 
-// PolicyLogger is called when a policy denial occurs.
-type PolicyLogger func(data PolicyLogData)
-
-// credentialHeader holds a header name and value for credential injection.
-type credentialHeader struct {
+// CredentialHeader holds a header name and value for credential injection.
+type CredentialHeader struct {
 	Name  string // Header name (e.g., "Authorization", "x-api-key")
 	Value string // Header value (e.g., "Bearer token", "sk-ant-...")
 	Grant string // Grant name for logging (e.g., "github", "anthropic")
@@ -213,14 +192,14 @@ type credentialHeader struct {
 	AllowInsecure bool
 }
 
-// extraHeader holds an additional header to inject for a host.
-type extraHeader struct {
+// ExtraHeader holds an additional header to inject for a host.
+type ExtraHeader struct {
 	Name  string
 	Value string
 }
 
-// tokenSubstitution maps a placeholder string to the real token for a host.
-type tokenSubstitution struct {
+// TokenSubstitution maps a placeholder string to the real token for a host.
+type TokenSubstitution struct {
 	placeholder string
 	realToken   string
 
@@ -229,22 +208,10 @@ type tokenSubstitution struct {
 	AllowInsecure bool
 }
 
-// CredentialHeader is the exported version of credentialHeader for daemon use.
-type CredentialHeader = credentialHeader
-
-// ExtraHeader is the exported version of extraHeader for daemon use.
-type ExtraHeader = extraHeader
-
-// TokenSubstitution is the exported version of tokenSubstitution for daemon use.
-type TokenSubstitution = tokenSubstitution
-
 // NewTokenSubstitution creates a TokenSubstitution with the given placeholder and real token.
 func NewTokenSubstitution(placeholder, realToken string) *TokenSubstitution {
 	return &TokenSubstitution{placeholder: placeholder, realToken: realToken}
 }
-
-// HostPattern is the exported version of hostPattern.
-type HostPattern = hostPattern
 
 // ParseHostPattern is the exported wrapper for parseHostPattern.
 func ParseHostPattern(pattern string) HostPattern {
@@ -256,34 +223,33 @@ func MatchesHostPattern(pattern HostPattern, host string, port int) bool {
 	return matchesPattern(pattern, host, port)
 }
 
-// RunContextData holds per-run credential data resolved by ContextResolver.
+// RunContextData holds per-run credential data resolved by the context resolver.
 // The host-keyed maps are read without synchronization on every request —
 // including linear scans for wildcard and case-fold matching — so they must
 // not be mutated after the RunContextData is registered with the proxy.
 type RunContextData struct {
 	RunID                string
-	Credentials          map[string][]credentialHeader
-	CredentialBundles    []CredentialBundle
-	ExtraHeaders         map[string][]extraHeader
+	Credentials          map[string][]CredentialHeader
+	credentialBundles    []credentialBundle
+	ExtraHeaders         map[string][]ExtraHeader
 	RemoveHeaders        map[string][]string
-	TokenSubstitutions   map[string]*tokenSubstitution
+	TokenSubstitutions   map[string]*TokenSubstitution
 	ResponseTransformers map[string][]ResponseTransformer
 	MCPServers           []MCPServerConfig
 	Policy               string
-	AllowedHosts         []hostPattern
-	RequestCheck         RequestChecker
-	PathRulesCheck       PathRulesChecker
+	AllowedHosts         []HostPattern
+	RequestCheck         func(host string, port int, method, path string) bool
+	PathRulesCheck       func(host string, port int) bool
 	AWSHandler           http.Handler
-	CredStore            CredentialStore
-	KeepEngines          map[string]*keeplib.Engine
-	HostGateway          string
-	HostGatewayIP        string // actual IP to forward allowed host-gateway requests to
-	AllowedHostPorts     []int
-	PostgresResolvers    []PostgresResolverEntry
+	CredStore            interface {
+		GetToken(provider string) (string, error)
+	}
+	KeepEngines       map[string]*keeplib.Engine
+	HostGateway       string
+	HostGatewayIP     string // actual IP to forward allowed host-gateway requests to
+	AllowedHostPorts  []int
+	postgresResolvers []postgresResolverEntry
 }
-
-// ContextResolver resolves a proxy auth token to per-run context data.
-type ContextResolver func(token string) (*RunContextData, bool)
 
 // CredentialResolver resolves credentials dynamically per-request. Unlike
 // static credentials (pre-resolved at startup), resolvers may inspect and
@@ -296,7 +262,7 @@ type ContextResolver func(token string) (*RunContextData, bool)
 // application-level request the resolver may inspect and modify.
 //
 // Returns nil with no error when the resolver has no credentials to offer.
-type CredentialResolver func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error)
+type CredentialResolver func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]CredentialHeader, error)
 
 // Proxy is an HTTP proxy that injects credentials into outgoing requests.
 //
@@ -319,31 +285,33 @@ type CredentialResolver func(ctx context.Context, proxyReq, innerReq *http.Reque
 // authentication is not required. For Apple containers, the proxy binds
 // to all interfaces with a cryptographically secure token for authentication.
 type Proxy struct {
-	credentials          map[string][]credentialHeader      // host -> credential headers
+	credentials          map[string][]CredentialHeader      // host -> credential headers
 	credentialResolvers  map[string]credentialResolverEntry // host -> dynamic resolver + declared strip headers
-	postgresResolvers    []PostgresResolverEntry            // host pattern -> Postgres password resolver
-	extraHeaders         map[string][]extraHeader           // host -> additional headers to inject
+	postgresResolvers    []postgresResolverEntry            // host pattern -> Postgres password resolver
+	extraHeaders         map[string][]ExtraHeader           // host -> additional headers to inject
 	responseTransformers map[string][]ResponseTransformer   // host -> response transformers
 	mu                   sync.RWMutex
-	ca                   *CA              // Optional CA for TLS interception
-	logger               RequestLogger    // Optional request logger
-	authToken            string           // Optional auth token required for proxy access
-	delegateAuth         bool             // When authToken is empty, require some non-empty password and delegate its validation to credential resolvers
-	policy               string           // "permissive" or "strict"
-	allowedHosts         []hostPattern    // parsed allow patterns for strict policy
-	requestChecker       RequestChecker   // per-host request rules checker
-	pathRulesChecker     PathRulesChecker // checks if host has path-level rules
-	awsHandler           http.Handler     // Optional handler for AWS credential endpoint
-	credStore            CredentialStore
-	mcpServers           []MCPServerConfig
-	removeHeaders        map[string][]string           // host -> []headerName
-	tokenSubstitutions   map[string]*tokenSubstitution // host -> substitution
-	relays               map[string]string             // name -> target URL for relay endpoints
-	contextResolver      ContextResolver               // optional per-run credential resolver
-	policyLogger         PolicyLogger                  // optional policy decision logger
-	upstreamCAs          *x509.CertPool                // optional CA pool for upstream TLS verification
-	captureHeaders       []string                      // headers to capture in logs and strip before forwarding
-	branding             Branding                      // client-visible wording of blocks and errors
+	ca                   *CA                                                   // Optional CA for TLS interception
+	logger               func(data RequestLogData)                             // Optional request logger
+	authToken            string                                                // Optional auth token required for proxy access
+	delegateAuth         bool                                                  // When authToken is empty, require some non-empty password and delegate its validation to credential resolvers
+	policy               string                                                // "permissive" or "strict"
+	allowedHosts         []HostPattern                                         // parsed allow patterns for strict policy
+	requestChecker       func(host string, port int, method, path string) bool // per-host request rules checker
+	pathRulesChecker     func(host string, port int) bool                      // checks if host has path-level rules
+	awsHandler           http.Handler                                          // Optional handler for AWS credential endpoint
+	credStore            interface {
+		GetToken(provider string) (string, error)
+	}
+	mcpServers         []MCPServerConfig
+	removeHeaders      map[string][]string                        // host -> []headerName
+	tokenSubstitutions map[string]*TokenSubstitution              // host -> substitution
+	relays             map[string]string                          // name -> target URL for relay endpoints
+	contextResolver    func(token string) (*RunContextData, bool) // optional per-run credential resolver
+	policyLogger       func(data PolicyLogData)                   // optional policy decision logger
+	upstreamCAs        *x509.CertPool                             // optional CA pool for upstream TLS verification
+	captureHeaders     []string                                   // headers to capture in logs and strip before forwarding
+	branding           Branding                                   // client-visible wording of blocks and errors
 
 	h2UpstreamTransport *http.Transport
 
@@ -353,12 +321,12 @@ type Proxy struct {
 // NewProxy creates a new auth proxy.
 func NewProxy() *Proxy {
 	return &Proxy{
-		credentials:          make(map[string][]credentialHeader),
+		credentials:          make(map[string][]CredentialHeader),
 		credentialResolvers:  make(map[string]credentialResolverEntry),
-		extraHeaders:         make(map[string][]extraHeader),
+		extraHeaders:         make(map[string][]ExtraHeader),
 		responseTransformers: make(map[string][]ResponseTransformer),
 		removeHeaders:        make(map[string][]string),
-		tokenSubstitutions:   make(map[string]*tokenSubstitution),
+		tokenSubstitutions:   make(map[string]*TokenSubstitution),
 		policy:               "permissive", // default to permissive
 	}
 }

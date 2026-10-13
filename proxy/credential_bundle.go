@@ -8,30 +8,30 @@ import (
 	"strings"
 )
 
-// HeaderReplacement describes one exact placeholder-to-secret replacement.
+// headerReplacement describes one exact placeholder-to-secret replacement.
 // A bundle is validated in full before any replacement is applied.
-type HeaderReplacement struct {
+type headerReplacement struct {
 	Name        string
 	Placeholder string
 	Value       string
 }
 
-// CredentialScope limits where a credential bundle may be injected.
-type CredentialScope struct {
+// credentialScope limits where a credential bundle may be injected.
+type credentialScope struct {
 	RequireTLS   bool
 	Origins      []string
 	Methods      []string
 	PathPrefixes []string
 }
 
-// CredentialBundle groups headers that must be selected and replaced as one
+// credentialBundle groups headers that must be selected and replaced as one
 // atomic credential. It is intended for protocols whose identity consists of
 // more than one header, such as an OAuth access token plus account identifier.
-type CredentialBundle struct {
+type credentialBundle struct {
 	ID           string
 	Grant        string
-	Scope        CredentialScope
-	Replacements []HeaderReplacement
+	Scope        credentialScope
+	Replacements []headerReplacement
 	RequireAll   bool
 }
 
@@ -64,7 +64,7 @@ func mergeCredentialInjectionResults(a, b credentialInjectionResult) credentialI
 		// static credential can both fire for one host under the same grant,
 		// and listing it twice would misreport one injection as two.
 		Grants:   mergeGrants(a.Grants, b.Grants),
-		Injected: append(append([]credentialHeader(nil), a.Injected...), b.Injected...),
+		Injected: append(append([]CredentialHeader(nil), a.Injected...), b.Injected...),
 	}
 	for key := range a.InjectedHeaders {
 		merged.InjectedHeaders[key] = true
@@ -107,7 +107,7 @@ func headerKey(name string) string { return strings.ToLower(name) }
 // empty Placeholder compares equal to every absent header. Two replacements on
 // one header name are contradictory. Neither is a request-level decision, so a
 // bundle failing this test is ignored rather than denied.
-func bundleIsWellFormed(bundle CredentialBundle) bool {
+func bundleIsWellFormed(bundle credentialBundle) bool {
 	if len(bundle.Replacements) == 0 {
 		return false
 	}
@@ -133,7 +133,7 @@ func bundleIsWellFormed(bundle CredentialBundle) bool {
 // a scope, so honoring one there would mean applying a scope to a destination it
 // was never written for. Logging rather than refusing keeps that boundary while
 // leaving the request to fail on its own merits upstream.
-func carriesBundlePlaceholder(req *http.Request, bundles []CredentialBundle) (string, bool) {
+func carriesBundlePlaceholder(req *http.Request, bundles []credentialBundle) (string, bool) {
 	for _, bundle := range bundles {
 		if !bundleIsWellFormed(bundle) {
 			continue
@@ -152,7 +152,7 @@ func carriesBundlePlaceholder(req *http.Request, bundles []CredentialBundle) (st
 // one header named by a bundle. Once selected, any scope or placeholder
 // mismatch injects nothing at all — never a partial bundle — and the request
 // is forwarded untouched, with Skipped set so the near miss stays observable.
-func injectCredentialBundles(req *http.Request, bundles []CredentialBundle, scheme, host string) credentialBundleInjectionResult {
+func injectCredentialBundles(req *http.Request, bundles []credentialBundle, scheme, host string) credentialBundleInjectionResult {
 	if len(bundles) == 0 {
 		return credentialBundleInjectionResult{}
 	}
@@ -196,7 +196,7 @@ func injectCredentialBundles(req *http.Request, bundles []CredentialBundle, sche
 		}
 
 		injectedHeaders := make(map[string]bool, matched)
-		injected := make([]credentialHeader, 0, matched)
+		injected := make([]CredentialHeader, 0, matched)
 		for _, replacement := range bundle.Replacements {
 			if req.Header.Get(replacement.Name) != replacement.Placeholder {
 				continue
@@ -204,7 +204,7 @@ func injectCredentialBundles(req *http.Request, bundles []CredentialBundle, sche
 			req.Header.Set(replacement.Name, replacement.Value)
 			key := headerKey(replacement.Name)
 			injectedHeaders[key] = true
-			injected = append(injected, credentialHeader{
+			injected = append(injected, CredentialHeader{
 				Name: replacement.Name, Value: replacement.Value, Grant: bundle.Grant,
 			})
 		}
@@ -225,7 +225,7 @@ func injectCredentialBundles(req *http.Request, bundles []CredentialBundle, sche
 	return credentialBundleInjectionResult{}
 }
 
-func bundleScopeMatches(scope CredentialScope, req *http.Request, scheme, host string) bool {
+func bundleScopeMatches(scope credentialScope, req *http.Request, scheme, host string) bool {
 	if scope.RequireTLS && !strings.EqualFold(scheme, "https") {
 		return false
 	}

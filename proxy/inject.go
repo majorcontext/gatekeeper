@@ -9,7 +9,7 @@ import (
 )
 
 // getTokenSubstitution returns the token substitution for a host.
-func (p *Proxy) getTokenSubstitution(host string) *tokenSubstitution {
+func (p *Proxy) getTokenSubstitution(host string) *TokenSubstitution {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	sub, _ := lookupHostKeyed(p.tokenSubstitutions, host, presenceUsable)
@@ -32,7 +32,7 @@ const maxTokenSubBodySize = 64 * 1024
 // the request's URL path, Authorization header, and body.
 // URL path substitution is needed for APIs like Telegram Bot API where
 // the token is embedded in the URL (e.g., /bot{TOKEN}/sendMessage).
-func (p *Proxy) applyTokenSubstitution(req *http.Request, sub *tokenSubstitution) {
+func (p *Proxy) applyTokenSubstitution(req *http.Request, sub *TokenSubstitution) {
 	// Replace in URL path
 	if newPath := strings.ReplaceAll(req.URL.Path, sub.placeholder, sub.realToken); newPath != req.URL.Path {
 		req.URL.Path = newPath
@@ -65,7 +65,7 @@ func (p *Proxy) applyTokenSubstitution(req *http.Request, sub *tokenSubstitution
 
 // refusesCleartextInjection reports whether forwarding the request over scheme http
 // would inject a secret that was not marked AllowInsecure.
-func (p *Proxy) refusesCleartextInjection(in *http.Request, scheme, lookupHost string, creds []credentialHeader) bool {
+func (p *Proxy) refusesCleartextInjection(in *http.Request, scheme, lookupHost string, creds []CredentialHeader) bool {
 	if !strings.EqualFold(scheme, "http") {
 		return false
 	}
@@ -95,7 +95,7 @@ func (p *Proxy) writeCleartextRefusal(w http.ResponseWriter, host string) {
 }
 
 type outboundPrep struct {
-	creds      []credentialHeader
+	creds      []CredentialHeader
 	bundle     credentialInjectionResult
 	host       string
 	lookupHost string
@@ -135,7 +135,7 @@ func (p *Proxy) prepareOutbound(in, out *http.Request, o outboundPrep) credentia
 
 // getCredentials returns all credential headers for a host; see
 // lookupHostKeyed for the matching rules.
-func (p *Proxy) getCredentials(host string) []credentialHeader {
+func (p *Proxy) getCredentials(host string) []CredentialHeader {
 	creds, _ := p.getCredentialsMatch(host)
 	return creds
 }
@@ -144,14 +144,14 @@ func (p *Proxy) getCredentials(host string) []credentialHeader {
 // that weigh exact static credentials against wildcard-keyed resolvers.
 // Returns a copy of the slice to avoid data races with concurrent
 // SetCredentialWithGrant calls (e.g., token refresh).
-func (p *Proxy) getCredentialsMatch(host string) ([]credentialHeader, hostMatch) {
+func (p *Proxy) getCredentialsMatch(host string) ([]CredentialHeader, hostMatch) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	creds, match := lookupHostKeyed(p.credentials, host, nonEmptySlice)
 	if len(creds) == 0 {
 		return nil, hostMatch{}
 	}
-	out := make([]credentialHeader, len(creds))
+	out := make([]CredentialHeader, len(creds))
 	copy(out, creds)
 	return out, match
 }
@@ -199,7 +199,7 @@ type credentialInjectionResult struct {
 	// credentials share a header name, only the one that won the tie appears
 	// here. Consumers acting on a credential's identity (invalidation) must use
 	// this, not the header name set.
-	Injected []credentialHeader
+	Injected []CredentialHeader
 }
 
 // injectCredentials replaces credential headers in the request.
@@ -229,7 +229,7 @@ type credentialInjectionResult struct {
 // Returns a credentialInjectionResult naming the headers injected, the
 // credentials whose values reached the wire, and their grants. Grants and
 // Injected describe only what was sent — never a credential that lost the tie.
-func injectCredentials(req *http.Request, creds []credentialHeader, host, method, path string, reserved map[string]bool) credentialInjectionResult {
+func injectCredentials(req *http.Request, creds []CredentialHeader, host, method, path string, reserved map[string]bool) credentialInjectionResult {
 	if len(creds) == 0 {
 		return credentialInjectionResult{}
 	}
@@ -290,7 +290,7 @@ func injectCredentials(req *http.Request, creds []credentialHeader, host, method
 
 	injected := make(map[string]bool, len(winners))
 	grants := make([]string, 0, len(winners))
-	injectedCreds := make([]credentialHeader, 0, len(winners))
+	injectedCreds := make([]CredentialHeader, 0, len(winners))
 
 	msg, action := "credential injected", "inject"
 	if autoInjected {
@@ -331,7 +331,7 @@ func injectCredentials(req *http.Request, creds []credentialHeader, host, method
 // like Set-Cookie that cannot be combined. All headers currently registered
 // via routing.go are list-safe; if that changes, this function will need a
 // per-header strategy.
-func mergeExtraHeaders(req *http.Request, host string, headers []extraHeader) {
+func mergeExtraHeaders(req *http.Request, host string, headers []ExtraHeader) {
 	for _, h := range headers {
 		if existing := req.Header.Get(h.Name); existing != "" {
 			req.Header.Set(h.Name, existing+","+h.Value)
@@ -349,7 +349,7 @@ func mergeExtraHeaders(req *http.Request, host string, headers []extraHeader) {
 }
 
 // getExtraHeaders returns additional headers to inject for a host.
-func (p *Proxy) getExtraHeaders(host string) []extraHeader {
+func (p *Proxy) getExtraHeaders(host string) []ExtraHeader {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	headers, _ := lookupHostKeyed(p.extraHeaders, host, presenceUsable)
@@ -394,7 +394,7 @@ func getRunContext(r *http.Request) *RunContextData {
 // ctxReq carries the RunContextData (the CONNECT request for intercepted
 // connections, or the same request for plain HTTP). innerReq is the actual
 // request the resolver may inspect and modify.
-func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host string) ([]CredentialHeader, error) {
 	if rc := getRunContext(ctxReq); rc != nil {
 		creds, _ := lookupHostKeyed(rc.Credentials, host, nonEmptySlice)
 		if len(creds) > 0 {
@@ -460,9 +460,9 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 // Unlike credentials, bundles are not keyed by host: each one carries its own
 // scope and injectCredentialBundles matches the request against it, so there is
 // nothing to look up here.
-func (p *Proxy) getCredentialBundlesForRequest(ctxReq *http.Request) []CredentialBundle {
+func (p *Proxy) getCredentialBundlesForRequest(ctxReq *http.Request) []credentialBundle {
 	if rc := getRunContext(ctxReq); rc != nil {
-		return rc.CredentialBundles
+		return rc.credentialBundles
 	}
 	return nil
 }
@@ -488,7 +488,7 @@ func (p *Proxy) getCredentialBundlesForRequest(ctxReq *http.Request) []Credentia
 // credentials attached, and one that sets a header would otherwise merge a
 // static credential the client never asked for. Either way the request ends up
 // carrying a credential nobody requested.
-func withRequestedStatics(sentBefore map[string]bool, req *http.Request, resolved, static []credentialHeader) []credentialHeader {
+func withRequestedStatics(sentBefore map[string]bool, req *http.Request, resolved, static []CredentialHeader) []CredentialHeader {
 	if len(static) == 0 {
 		return resolved
 	}
@@ -504,7 +504,7 @@ func withRequestedStatics(sentBefore map[string]bool, req *http.Request, resolve
 		if len(merged) == len(resolved) {
 			// Copy before the first append so a resolver's slice is never
 			// extended in place; callers may retain it.
-			merged = append(append(make([]credentialHeader, 0, len(resolved)+len(static)), resolved...), c)
+			merged = append(append(make([]CredentialHeader, 0, len(resolved)+len(static)), resolved...), c)
 			continue
 		}
 		merged = append(merged, c)
@@ -540,7 +540,7 @@ func withRequestedStatics(sentBefore map[string]bool, req *http.Request, resolve
 // Statuses other than 401/403/429 are left alone; a 5xx says nothing about the
 // credential. Sources rate-limit their own evictions, since these statuses also
 // cover cases where resolving again will return the same credential.
-func invalidateCredentialsOnCredentialFailure(creds []credentialHeader, statusCode int) {
+func invalidateCredentialsOnCredentialFailure(creds []CredentialHeader, statusCode int) {
 	if statusCode != http.StatusUnauthorized && statusCode != http.StatusForbidden && statusCode != http.StatusTooManyRequests {
 		return
 	}
@@ -553,7 +553,7 @@ func invalidateCredentialsOnCredentialFailure(creds []credentialHeader, statusCo
 
 // getExtraHeadersForRequest returns extra headers for a host, checking
 // RunContextData first, then falling back to the proxy's own map.
-func (p *Proxy) getExtraHeadersForRequest(r *http.Request, host string) []extraHeader {
+func (p *Proxy) getExtraHeadersForRequest(r *http.Request, host string) []ExtraHeader {
 	if rc := getRunContext(r); rc != nil {
 		headers, _ := lookupHostKeyed(rc.ExtraHeaders, host, presenceUsable)
 		return headers
@@ -573,7 +573,7 @@ func (p *Proxy) getRemoveHeadersForRequest(r *http.Request, host string) []strin
 
 // getTokenSubstitutionForRequest returns the token substitution for a host,
 // checking RunContextData first, then falling back to the proxy's own map.
-func (p *Proxy) getTokenSubstitutionForRequest(r *http.Request, host string) *tokenSubstitution {
+func (p *Proxy) getTokenSubstitutionForRequest(r *http.Request, host string) *TokenSubstitution {
 	if rc := getRunContext(r); rc != nil {
 		sub, _ := lookupHostKeyed(rc.TokenSubstitutions, host, presenceUsable)
 		return sub

@@ -9,12 +9,12 @@ func TestParseHostPattern(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    string
-		expected hostPattern
+		expected HostPattern
 	}{
 		{
 			name:  "simple host",
 			input: "api.example.com",
-			expected: hostPattern{
+			expected: HostPattern{
 				pattern:    "api.example.com",
 				host:       "api.example.com",
 				port:       0,
@@ -24,7 +24,7 @@ func TestParseHostPattern(t *testing.T) {
 		{
 			name:  "host with port",
 			input: "api.example.com:8080",
-			expected: hostPattern{
+			expected: HostPattern{
 				pattern:    "api.example.com:8080",
 				host:       "api.example.com",
 				port:       8080,
@@ -34,7 +34,7 @@ func TestParseHostPattern(t *testing.T) {
 		{
 			name:  "wildcard host",
 			input: "*.example.com",
-			expected: hostPattern{
+			expected: HostPattern{
 				pattern:    "*.example.com",
 				host:       "example.com",
 				port:       0,
@@ -44,7 +44,7 @@ func TestParseHostPattern(t *testing.T) {
 		{
 			name:  "wildcard host with port",
 			input: "*.example.com:443",
-			expected: hostPattern{
+			expected: HostPattern{
 				pattern:    "*.example.com:443",
 				host:       "example.com",
 				port:       443,
@@ -54,7 +54,7 @@ func TestParseHostPattern(t *testing.T) {
 		{
 			name:  "default https port",
 			input: "api.example.com:443",
-			expected: hostPattern{
+			expected: HostPattern{
 				pattern:    "api.example.com:443",
 				host:       "api.example.com",
 				port:       443,
@@ -64,7 +64,7 @@ func TestParseHostPattern(t *testing.T) {
 		{
 			name:  "default http port",
 			input: "api.example.com:80",
-			expected: hostPattern{
+			expected: HostPattern{
 				pattern:    "api.example.com:80",
 				host:       "api.example.com",
 				port:       80,
@@ -74,7 +74,7 @@ func TestParseHostPattern(t *testing.T) {
 		{
 			name:  "invalid port - not a number",
 			input: "api.example.com:abc",
-			expected: hostPattern{
+			expected: HostPattern{
 				pattern:    "api.example.com:abc",
 				host:       "api.example.com",
 				port:       0,
@@ -84,7 +84,7 @@ func TestParseHostPattern(t *testing.T) {
 		{
 			name:  "port out of range high",
 			input: "api.example.com:99999",
-			expected: hostPattern{
+			expected: HostPattern{
 				pattern:    "api.example.com:99999",
 				host:       "api.example.com",
 				port:       0,
@@ -369,7 +369,7 @@ func TestMatchHost(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Parse patterns
-			parsed := make([]hostPattern, len(tt.patterns))
+			parsed := make([]HostPattern, len(tt.patterns))
 			for i, p := range tt.patterns {
 				parsed[i] = parseHostPattern(p)
 			}
@@ -438,9 +438,9 @@ func TestGetHostsForGrant(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := GetHostsForGrant(tt.grant)
+			result := getHostsForGrant(tt.grant)
 			if !reflect.DeepEqual(result, tt.expected) {
-				t.Errorf("GetHostsForGrant(%q) = %v, want %v", tt.grant, result, tt.expected)
+				t.Errorf("getHostsForGrant(%q) = %v, want %v", tt.grant, result, tt.expected)
 			}
 		})
 	}
@@ -449,14 +449,14 @@ func TestGetHostsForGrant(t *testing.T) {
 func TestMatchesPattern(t *testing.T) {
 	tests := []struct {
 		name     string
-		pattern  hostPattern
+		pattern  HostPattern
 		host     string
 		port     int
 		expected bool
 	}{
 		{
 			name: "exact match with default port",
-			pattern: hostPattern{
+			pattern: HostPattern{
 				pattern:    "api.example.com",
 				host:       "api.example.com",
 				port:       0,
@@ -468,7 +468,7 @@ func TestMatchesPattern(t *testing.T) {
 		},
 		{
 			name: "exact match with specific port",
-			pattern: hostPattern{
+			pattern: HostPattern{
 				pattern:    "api.example.com:8080",
 				host:       "api.example.com",
 				port:       8080,
@@ -480,7 +480,7 @@ func TestMatchesPattern(t *testing.T) {
 		},
 		{
 			name: "wildcard match",
-			pattern: hostPattern{
+			pattern: HostPattern{
 				pattern:    "*.example.com",
 				host:       "example.com",
 				port:       0,
@@ -492,7 +492,7 @@ func TestMatchesPattern(t *testing.T) {
 		},
 		{
 			name: "wildcard no match base domain",
-			pattern: hostPattern{
+			pattern: HostPattern{
 				pattern:    "*.example.com",
 				host:       "example.com",
 				port:       0,
@@ -504,7 +504,7 @@ func TestMatchesPattern(t *testing.T) {
 		},
 		{
 			name: "port mismatch specific port",
-			pattern: hostPattern{
+			pattern: HostPattern{
 				pattern:    "api.example.com:8080",
 				host:       "api.example.com",
 				port:       8080,
@@ -516,7 +516,7 @@ func TestMatchesPattern(t *testing.T) {
 		},
 		{
 			name: "port mismatch default port pattern with non-default port",
-			pattern: hostPattern{
+			pattern: HostPattern{
 				pattern:    "api.example.com",
 				host:       "api.example.com",
 				port:       0,
@@ -565,9 +565,9 @@ func TestParseAndMatchHostPattern(t *testing.T) {
 // TestRegisterGrantHosts verifies that registered grant hosts are retrievable.
 func TestRegisterGrantHosts(t *testing.T) {
 	RegisterGrantHosts("test-grant-coverage", []string{"coverage.example.com"})
-	hosts := GetHostsForGrant("test-grant-coverage")
+	hosts := getHostsForGrant("test-grant-coverage")
 	if len(hosts) == 0 {
-		t.Fatal("GetHostsForGrant returned empty slice after RegisterGrantHosts")
+		t.Fatal("getHostsForGrant returned empty slice after RegisterGrantHosts")
 	}
 	if hosts[0] != "coverage.example.com" {
 		t.Errorf("hosts[0] = %q, want coverage.example.com", hosts[0])

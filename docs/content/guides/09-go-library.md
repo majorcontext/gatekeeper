@@ -90,9 +90,9 @@ _ = p.CloseConnections(ctx)
 | `SetAuthToken(token)`        | Require proxy authentication                         |
 | `SetContextResolver(fn)`     | Map proxy auth tokens to per-caller contexts         |
 
-## Custom ContextResolver
+## Custom context resolver
 
-For multi-tenant setups, use a `ContextResolver` to map proxy auth tokens to per-caller credential sets:
+For multi-tenant setups, use a context resolver to map proxy auth tokens to per-caller credential sets:
 
 ```go
 p := proxy.NewProxy()
@@ -131,10 +131,10 @@ Moat imports `github.com/majorcontext/gatekeeper/proxy` and layers a daemon on t
 
 1. A management API (Unix socket) accepts run registrations with per-run credentials and policies.
 2. Each registration generates a unique proxy auth token.
-3. The `ContextResolver` maps tokens to `RunContextData` containing that run's scoped credentials and network policy.
+3. The context resolver maps tokens to `RunContextData` containing that run's scoped credentials and network policy.
 4. The proxy itself is shared across all runs -- credential isolation is handled entirely by the resolver.
 
-Gatekeeper has no knowledge of moat. It exposes the `ContextResolver` hook and `RunContextData` struct; moat provides the implementation.
+Gatekeeper has no knowledge of moat. It exposes the `SetContextResolver` hook and `RunContextData` struct; moat provides the implementation.
 
 ## Branding
 

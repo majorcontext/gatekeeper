@@ -150,8 +150,8 @@ func TestIntercept_UpstreamAuthFailureInvalidatesCredential(t *testing.T) {
 			}))
 
 			var invalidated atomic.Int32
-			setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-				return []credentialHeader{{
+			setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]CredentialHeader, error) {
+				return []CredentialHeader{{
 					Name:       "Authorization",
 					Value:      "Bearer stale-token",
 					Grant:      "github-user",
@@ -206,7 +206,7 @@ func TestIntercept_TooManyRequestsInvalidatesCachedCredential(t *testing.T) {
 	var exchanges atomic.Int32
 	var cacheMu sync.Mutex
 	var cached string
-	setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+	setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]CredentialHeader, error) {
 		cacheMu.Lock()
 		if cached == "" {
 			if exchanges.Add(1) == 1 {
@@ -218,7 +218,7 @@ func TestIntercept_TooManyRequestsInvalidatesCachedCredential(t *testing.T) {
 		token := cached
 		cacheMu.Unlock()
 
-		return []credentialHeader{{
+		return []CredentialHeader{{
 			Name:  "Authorization",
 			Value: "Bearer " + token,
 			Invalidate: func() {
@@ -275,8 +275,8 @@ func TestIntercept_AuthFailureInvalidatesOnlyInjectedCredential(t *testing.T) {
 	}))
 
 	var winnerInvalidated, loserInvalidated atomic.Int32
-	setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-		return []credentialHeader{
+	setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]CredentialHeader, error) {
+		return []CredentialHeader{
 			// Same header name: the "claude" grant loses to the other.
 			{Name: "Authorization", Value: "Bearer claude", Grant: "claude",
 				Invalidate: func() { loserInvalidated.Add(1) }},
@@ -309,8 +309,8 @@ func TestIntercept_AuthFailureInvalidatesOnlyPlaceholderSelectedCredential(t *te
 	}))
 
 	var selected, unselected atomic.Int32
-	setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-		return []credentialHeader{
+	setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]CredentialHeader, error) {
+		return []CredentialHeader{
 			{Name: "Authorization", Value: "Bearer real", Grant: "a",
 				Invalidate: func() { selected.Add(1) }},
 			{Name: "X-Api-Key", Value: "real-key", Grant: "b",
@@ -351,8 +351,8 @@ func TestIntercept_AuthFailureInvalidatesOnlyWireCredentialWithPlaceholder(t *te
 	}))
 
 	var claudeInvalidated, loserInvalidated atomic.Int32
-	setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-		return []credentialHeader{
+	setup.Proxy.SetCredentialResolver(setup.BackendHost, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]CredentialHeader, error) {
+		return []CredentialHeader{
 			// A client-sent placeholder selects the claude grant.
 			{Name: "Authorization", Value: "Bearer claude", Grant: "claude",
 				Invalidate: func() { claudeInvalidated.Add(1) }},
@@ -1411,7 +1411,7 @@ func TestIntercept_PortPinnedCredentialKey(t *testing.T) {
 
 	hostPort := mustParseURL(setup.Backend.URL).Host // "127.0.0.1:PORT"
 	setup.Proxy.mu.Lock()
-	setup.Proxy.credentials[hostPort] = []credentialHeader{{Name: "Authorization", Value: "Bearer port-pinned", Grant: "pinned-grant"}}
+	setup.Proxy.credentials[hostPort] = []CredentialHeader{{Name: "Authorization", Value: "Bearer port-pinned", Grant: "pinned-grant"}}
 	setup.Proxy.mu.Unlock()
 
 	resp, err := setup.Client.Get(setup.Backend.URL + "/api/data")

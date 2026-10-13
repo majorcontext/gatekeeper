@@ -78,9 +78,9 @@ examples/           Sample config, CA generation script, and test harness
 
 - **`proxy.Proxy`** — The core proxy. Handles HTTP CONNECT, TLS interception, credential injection, network policy, and request logging.
 - **`proxy.RunContextData`** — Per-caller credential and policy context. Holds credentials, network policy, MCP servers, host gateway config, and Keep engines for a single caller.
-- **`proxy.ContextResolver`** — Function type (`func(token string) (*RunContextData, bool)`) that resolves a proxy auth token to per-caller context. Standalone mode uses a single static context; moat's daemon maps each registered run to its own scoped context.
+- **`SetContextResolver`** — Takes a `func(token string) (*RunContextData, bool)` that resolves a proxy auth token to per-caller context. Standalone mode uses a single static context; moat's daemon maps each registered run to its own scoped context.
 - **`proxy.PostgresServer`** — The client-facing Postgres listener. Terminates client TLS with a CA-minted cert for the SNI host, authenticates the run token sent as the Postgres password, resolves the upstream password, completes SCRAM-SHA-256 upstream, and relays pgproto3 messages in both directions.
-- **`proxy.PostgresCredentialResolver`** — Interface resolving an upstream Postgres password for a (host, user, database) tuple at connection time. Implemented by `credentialsource.NeonResolver` (per-branch passwords via the Neon API, cached with TTL) and `proxy.StaticPostgresResolver` (a fixed password).
+- **`proxy.PostgresCredentialResolver`** — Interface resolving an upstream Postgres password for a (host, user, database) tuple at connection time. Implemented by `credentialsource.NeonResolver` (per-branch passwords via the Neon API, cached with TTL) and `staticPostgresResolver` (a fixed password).
 - **`gatekeeper.Server`** — Standalone server that loads config, resolves credential sources, and wires up the proxy.
 
 ### How Credential Injection Works

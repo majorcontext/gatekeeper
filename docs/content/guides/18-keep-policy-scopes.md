@@ -8,7 +8,7 @@ keywords: ["gatekeeper", "Keep", "policy", "scopes", "http", "mcp", "llm-gateway
 
 Gatekeeper evaluates [Keep](https://github.com/majorcontext/keep) policy engines at three distinct points in the request lifecycle, keyed by three distinct scope names: `http`, `mcp-<server-name>`, and `llm-gateway`. They inspect different things, deny in different ways, and fail closed under different conditions. This guide is for two audiences: embedders (like moat) wiring engines into `RunContextData.KeepEngines`, and operators reading policy denial logs and trying to tell which layer produced them.
 
-> **Note:** None of this is configurable in `gatekeeper.yaml`. `KeepEngines` is a field on `RunContextData` — a Go-library type — populated by whatever constructs the struct returned from a `ContextResolver`. Standalone gatekeeper never sets it; this feature exists only for embedders. See [Go Library Usage](./09-go-library.md).
+> **Note:** None of this is configurable in `gatekeeper.yaml`. `KeepEngines` is a field on `RunContextData` — a Go-library type — populated by whatever constructs the struct returned from a context resolver. Standalone gatekeeper never sets it; this feature exists only for embedders. See [Go Library Usage](./09-go-library.md).
 
 ## The KeepEngines map
 
@@ -20,7 +20,7 @@ type RunContextData struct {
 }
 ```
 
-There is no setter method — an embedder populates the map directly when building the `RunContextData` it returns from its `ContextResolver`. The map is keyed by scope name, and gatekeeper looks up exactly three keys:
+There is no setter method — an embedder populates the map directly when building the `RunContextData` it returns from its context resolver. The map is keyed by scope name, and gatekeeper looks up exactly three keys:
 
 | Key | Looked up | Evaluates |
 |---|---|---|

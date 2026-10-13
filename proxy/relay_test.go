@@ -649,7 +649,7 @@ func TestRelay_DefaultPortPinnedCredentialKey(t *testing.T) {
 		t.Fatalf("AddRelay: %v", err)
 	}
 	p.mu.Lock()
-	p.credentials["api.example.com:443"] = []credentialHeader{{Name: "Authorization", Value: "Bearer pinned", Grant: "pinned-grant"}}
+	p.credentials["api.example.com:443"] = []CredentialHeader{{Name: "Authorization", Value: "Bearer pinned", Grant: "pinned-grant"}}
 	p.mu.Unlock()
 
 	req := httptest.NewRequest("POST", "/relay/api/v1/messages", nil)
