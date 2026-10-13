@@ -4597,6 +4597,9 @@ func TestProxy_HostGatewayLoopbackSpellingsRestricted(t *testing.T) {
 			if rec.Code != http.StatusProxyAuthRequired {
 				t.Errorf("GET %s:8080 status = %d, want 407", host, rec.Code)
 			}
+			if got := rec.Header().Get("X-Moat-Blocked"); got != "host-service" {
+				t.Errorf("X-Moat-Blocked = %q, want host-service", got)
+			}
 		})
 	}
 }
