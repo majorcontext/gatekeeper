@@ -109,6 +109,9 @@ type CredentialConfig struct {
 type PostgresCredentialConfig struct {
 	Resolver string `yaml:"resolver"`
 	Project  string `yaml:"project,omitempty"` // optional Neon project ID; required for project-scoped API keys
+	// ProjectEnv names an environment variable holding the Neon project ID.
+	// An empty value registers no resolver. Mutually exclusive with Project.
+	ProjectEnv string `yaml:"project_env,omitempty"`
 }
 
 // SourceConfig describes where to read a credential value from.

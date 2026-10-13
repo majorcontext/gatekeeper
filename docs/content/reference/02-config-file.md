@@ -413,7 +413,8 @@ credentials:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `resolver` | `string` | Yes | `neon` (the source supplies a Neon API key; per-branch passwords are minted from the Neon API) or `static` (the source supplies a fixed password; works with any Postgres server, not just Neon). |
-| `project` | `string` | No | Neon project ID. Required for project-scoped Neon API keys, which cannot list projects; omit it for account-scoped keys. |
+| `project` | `string` | No | Neon project ID. Required for project-scoped Neon API keys, which cannot list projects; omit it for account-scoped keys. When set, gatekeeper resolves only endpoints that belong to this project. |
+| `project_env` | `string` | No | Name of an environment variable holding the Neon project ID, read once at startup. Mutually exclusive with `project`. When the variable is empty or unset, gatekeeper registers no resolver for the host and the data plane answers `08004` "no credentials configured for this host". It never falls back to listing every project. |
 
 See [Postgres Data Plane](../concepts/08-postgres-data-plane.md) for how resolution works.
 

@@ -220,6 +220,8 @@ type Server struct {
 	// resolveSource overrides ResolveSource for testing. When non-nil,
 	// loadCredentials calls this instead of ResolveSource.
 	resolveSource func(SourceConfig) (credentialsource.CredentialSource, error)
+	// neonBaseURL overrides the Neon API base URL for testing.
+	neonBaseURL string
 
 	mu      sync.Mutex
 	started bool
@@ -683,6 +685,16 @@ func (s *Server) loadPostgresCredential(ctx context.Context, cred CredentialConf
 	var resolver proxy.PostgresCredentialResolver
 	switch strings.ToLower(cred.Postgres.Resolver) {
 	case "neon":
+		project := cred.Postgres.Project
+		if envName := cred.Postgres.ProjectEnv; envName != "" {
+			if project != "" {
+				return fmt.Errorf("postgres credential for %s: project and project_env are mutually exclusive", cred.Host)
+			}
+			if project = os.Getenv(envName); project == "" {
+				slog.Info("postgres credential skipped: project_env is empty", "host", cred.Host, "project_env", envName)
+				return nil
+			}
+		}
 		src, err := buildSource()
 		if err != nil {
 			return fmt.Errorf("postgres credential for %s: %w", cred.Host, err)
@@ -690,7 +702,7 @@ func (s *Server) loadPostgresCredential(ctx context.Context, cred CredentialConf
 		if c, ok := src.(io.Closer); ok {
 			s.closers = append(s.closers, c)
 		}
-		neon := &credentialsource.NeonResolver{APIKey: src, Project: cred.Postgres.Project}
+		neon := &credentialsource.NeonResolver{APIKey: src, Project: project, BaseURL: s.neonBaseURL}
 		// Closed on shutdown (before the listener drain) so in-flight Neon API
 		// calls are cancelled rather than holding up the drain.
 		s.closers = append(s.closers, neon)

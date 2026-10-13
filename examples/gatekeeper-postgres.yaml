@@ -77,6 +77,7 @@ credentials:
     postgres:
       resolver: neon
       # project: falling-river-38863773   # required only for project-scoped keys
+      # project_env: NEON_PROJECT_ID      # same, read from an environment variable
     source:
       type: env
       var: NEON_API_KEY

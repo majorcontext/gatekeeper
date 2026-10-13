@@ -3755,3 +3755,153 @@ func TestLoadCredentials_ClosesPostgresResolversWhenALaterFetchFails(t *testing.
 		t.Fatalf("closers left after a failed load = %d, want 0", len(srv.closers))
 	}
 }
+
+func startNeonRelay(t *testing.T, pg *PostgresCredentialConfig, neonAPI string, mutate func(*Server)) (*Server, *x509.CertPool) {
+	t.Helper()
+	caDir := t.TempDir()
+	ca, err := proxy.NewCA(caDir)
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(ca.CertPEM())
+	cfg := &Config{
+		Proxy:    ProxyConfig{Port: 0, Host: "127.0.0.1", AuthToken: "box-token"},
+		TLS:      TLSConfig{CACert: filepath.Join(caDir, "ca.crt"), CAKey: filepath.Join(caDir, "ca.key")},
+		Postgres: &PostgresConfig{Port: 0},
+		Credentials: []CredentialConfig{{
+			Host:     "*.neon.tech",
+			Postgres: pg,
+			Source:   SourceConfig{Type: "static", Value: "neon-api-key"},
+		}},
+	}
+	srv, err := New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if mutate != nil {
+		mutate(srv)
+	}
+	srv.neonBaseURL = neonAPI
+	if err := srv.loadCredentials(context.Background(), cfg); err != nil {
+		t.Fatalf("loadCredentials: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = srv.Start(ctx) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for srv.PostgresAddr() == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("postgres listener did not start in time")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return srv, pool
+}
+
+func relayErrorCode(t *testing.T, srv *Server, pool *x509.CertPool, sni string) string {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", srv.PostgresAddr(), time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	fe := pgproto3.NewFrontend(conn, conn)
+	fe.Send(&pgproto3.SSLRequest{})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("send SSLRequest: %v", err)
+	}
+	buf := make([]byte, 1)
+	if _, err := io.ReadFull(conn, buf); err != nil || buf[0] != 'S' {
+		t.Fatalf("SSLRequest response = %q, %v", buf, err)
+	}
+	tlsConn := tls.Client(conn, &tls.Config{ServerName: sni, RootCAs: pool})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	fe = pgproto3.NewFrontend(tlsConn, tlsConn)
+	fe.Send(&pgproto3.StartupMessage{ProtocolVersion: pgproto3.ProtocolVersionNumber, Parameters: map[string]string{"user": "app", "database": "appdb"}})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("send startup: %v", err)
+	}
+	for {
+		msg, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("receive: %v", err)
+		}
+		switch m := msg.(type) {
+		case *pgproto3.AuthenticationCleartextPassword:
+			fe.Send(&pgproto3.PasswordMessage{Password: "box-token"})
+			if err := fe.Flush(); err != nil {
+				t.Fatalf("send password: %v", err)
+			}
+		case *pgproto3.ErrorResponse:
+			return m.Code
+		}
+	}
+}
+
+func TestPostgresCredentialProjectEnv_OtherProjectEndpointDenied(t *testing.T) {
+	t.Setenv("TEST_NEON_PROJECT", "proj-1")
+	var paths []string
+	var mu sync.Mutex
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		if r.URL.Path == "/api/v2/projects/proj-1/endpoints" {
+			fmt.Fprint(w, `{"endpoints":[{"id":"ep-other-endpoint-999999","branch_id":"br-1"}]}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(api.Close)
+	srv, pool := startNeonRelay(t, &PostgresCredentialConfig{Resolver: "neon", ProjectEnv: "TEST_NEON_PROJECT"}, api.URL, nil)
+
+	if got := relayErrorCode(t, srv, pool, "ep-cool-darkness-123456.us-east-2.aws.neon.tech"); got != "28P01" {
+		t.Errorf("error code = %q, want 28P01", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, p := range paths {
+		if p != "/api/v2/projects/proj-1/endpoints" {
+			t.Errorf("Neon API call %q outside the configured project", p)
+		}
+	}
+}
+
+func TestPostgresCredentialProjectEnv_EmptyValueRegistersNothing(t *testing.T) {
+	t.Setenv("TEST_NEON_PROJECT", "")
+	var calls atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(api.Close)
+	srv, pool := startNeonRelay(t, &PostgresCredentialConfig{Resolver: "neon", ProjectEnv: "TEST_NEON_PROJECT"}, api.URL, nil)
+
+	if got := relayErrorCode(t, srv, pool, "ep-cool-darkness-123456.us-east-2.aws.neon.tech"); got != "08004" {
+		t.Errorf("error code = %q, want 08004", got)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("Neon API calls = %d, want 0", n)
+	}
+}
+
+func TestPostgresCredentialProjectEnv_RejectsProjectAndProjectEnv(t *testing.T) {
+	cfg := &Config{
+		Proxy:    ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		TLS:      newTestCAConfig(t),
+		Postgres: &PostgresConfig{Port: 0},
+		Credentials: []CredentialConfig{{
+			Host:     "*.neon.tech",
+			Postgres: &PostgresCredentialConfig{Resolver: "neon", Project: "p", ProjectEnv: "TEST_NEON_PROJECT"},
+			Source:   SourceConfig{Type: "static", Value: "k"},
+		}},
+	}
+	_, err := New(context.Background(), cfg, "")
+	if err == nil || !strings.Contains(err.Error(), "project_env") {
+		t.Fatalf("New error = %v, want one naming project_env", err)
+	}
+}
