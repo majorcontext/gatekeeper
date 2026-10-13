@@ -3,6 +3,8 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -66,6 +68,7 @@ func TestDialRefusesNameResolvingToRestrictedAddress(t *testing.T) {
 	_, port, _ := net.SplitHostPort(backend.Listener.Addr().String())
 
 	useFakeResolver(t, map[string][]string{
+		"localhost":         {"127.0.0.1"},
 		"loopback.example":  {"127.0.0.1"},
 		"loopback6.example": {"::1"},
 		"linklocal.example": {"169.254.169.254"},
@@ -73,7 +76,7 @@ func TestDialRefusesNameResolvingToRestrictedAddress(t *testing.T) {
 	})
 	proxySrv := gatewayProxy(t)
 
-	for _, name := range []string{"loopback.example", "loopback6.example", "linklocal.example", "mixed.example"} {
+	for _, name := range []string{"localhost", "loopback.example", "loopback6.example", "linklocal.example", "mixed.example"} {
 		t.Run("http/"+name, func(t *testing.T) {
 			client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxySrv.URL))}}
 			req, _ := http.NewRequest("GET", fmt.Sprintf("http://%s:%s/", name, port), nil)
@@ -323,5 +326,60 @@ func TestDirectGatewayIPRequestFollowsHostPortPolicy(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusProxyAuthRequired {
 		t.Errorf("status = %d, want 407: HostGatewayIP is the gateway, so AllowedHostPorts applies", resp.StatusCode)
+	}
+}
+
+func TestGuardedRunCannotReuseUnguardedHTTP2Connection(t *testing.T) {
+	var hits atomic.Int32
+	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+	}))
+	backend.EnableHTTP2 = true
+	backend.StartTLS()
+	defer backend.Close()
+	upstreamCAs := x509.NewCertPool()
+	upstreamCAs.AddCert(backend.Certificate())
+
+	ca, err := generateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewProxy()
+	p.SetCA(ca)
+	p.SetUpstreamCAs(upstreamCAs)
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		if token == "guarded" {
+			return &RunContextData{Policy: "permissive", HostGateway: "host.docker.internal", HostGatewayIP: "10.254.254.254"}, true
+		}
+		return &RunContextData{Policy: "permissive"}, token == "open"
+	})
+	s := httptest.NewServer(p)
+	defer s.Close()
+	clientCAs := x509.NewCertPool()
+	clientCAs.AppendCertsFromPEM(ca.certPEM)
+
+	get := func(token string) int {
+		tr := &http.Transport{
+			Proxy:              http.ProxyURL(mustParseURL(s.URL)),
+			ProxyConnectHeader: http.Header{"Proxy-Authorization": {"Bearer " + token}},
+			TLSClientConfig:    &tls.Config{RootCAs: clientCAs},
+			ForceAttemptHTTP2:  true,
+		}
+		defer tr.CloseIdleConnections()
+		resp, err := (&http.Client{Transport: tr}).Get(backend.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := get("open"); got != http.StatusOK {
+		t.Fatalf("unguarded status = %d, want 200", got)
+	}
+	if got := get("guarded"); got != http.StatusBadGateway {
+		t.Errorf("guarded status = %d, want 502; it reused an HTTP/2 connection dialed without the guard", got)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("backend hits = %d, want 1", n)
 	}
 }
