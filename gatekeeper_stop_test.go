@@ -22,6 +22,7 @@ type blockingSource struct {
 	inFlight  atomic.Int32
 	returned  atomic.Bool
 	closedMid atomic.Bool
+	closed    atomic.Bool
 }
 
 func (b *blockingSource) Fetch(ctx context.Context) (string, error) {
@@ -42,6 +43,7 @@ func (b *blockingSource) Type() string       { return "blocking" }
 func (b *blockingSource) TTL() time.Duration { return 0 }
 
 func (b *blockingSource) Close() error {
+	b.closed.Store(true)
 	if b.inFlight.Load() > 0 {
 		b.closedMid.Store(true)
 	}
@@ -75,6 +77,46 @@ func (h *recordingHandler) refreshMessages() []string {
 	return out
 }
 
+func startBlockedRefresh(t *testing.T, result error) (*Server, *blockingSource, *recordingHandler) {
+	t.Helper()
+	prevFloor := refreshFloor
+	refreshFloor = time.Millisecond
+	t.Cleanup(func() { refreshFloor = prevFloor })
+
+	logs := &recordingHandler{}
+	prevLog := slog.Default()
+	slog.SetDefault(slog.New(logs))
+	t.Cleanup(func() { slog.SetDefault(prevLog) })
+
+	src := &blockingSource{
+		entered:  make(chan struct{}, 1),
+		canceled: make(chan struct{}),
+		release:  make(chan struct{}),
+		result:   result,
+	}
+	srv, err := New(context.Background(), &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.resolveSource = func(SourceConfig) (credentialsource.CredentialSource, error) {
+		return src, nil
+	}
+	if err := srv.loadCredentials(context.Background(), &Config{
+		Credentials: []CredentialConfig{{Host: "api.github.com", Source: SourceConfig{Type: "mock"}, Grant: "gh"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	startDone := make(chan struct{})
+	go func() { defer close(startDone); _ = srv.Start(ctx) }()
+	t.Cleanup(func() { cancel(); <-startDone })
+
+	<-src.entered
+	return srv, src, logs
+}
+
 func TestStop_WaitsForInFlightRefresh(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -84,41 +126,7 @@ func TestStop_WaitsForInFlightRefresh(t *testing.T) {
 		{"fetch succeeds after stop", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			prevFloor := refreshFloor
-			refreshFloor = time.Millisecond
-			t.Cleanup(func() { refreshFloor = prevFloor })
-
-			logs := &recordingHandler{}
-			prevLog := slog.Default()
-			slog.SetDefault(slog.New(logs))
-			t.Cleanup(func() { slog.SetDefault(prevLog) })
-
-			src := &blockingSource{
-				entered:  make(chan struct{}, 1),
-				canceled: make(chan struct{}),
-				release:  make(chan struct{}),
-				result:   tc.result,
-			}
-			srv, err := New(context.Background(), &Config{
-				Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
-			}, "")
-			if err != nil {
-				t.Fatal(err)
-			}
-			srv.resolveSource = func(SourceConfig) (credentialsource.CredentialSource, error) {
-				return src, nil
-			}
-			if err := srv.loadCredentials(context.Background(), &Config{
-				Credentials: []CredentialConfig{{Host: "api.github.com", Source: SourceConfig{Type: "mock"}, Grant: "gh"}},
-			}); err != nil {
-				t.Fatal(err)
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			startDone := make(chan struct{})
-			go func() { defer close(startDone); _ = srv.Start(ctx) }()
-			t.Cleanup(func() { cancel(); <-startDone })
-
-			<-src.entered
+			srv, src, logs := startBlockedRefresh(t, tc.result)
 
 			stopDone := make(chan struct{})
 			stopReturnedAfterFetch := make(chan bool, 1)
@@ -142,4 +150,17 @@ func TestStop_WaitsForInFlightRefresh(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStop_DeadlineBoundsRefreshWait(t *testing.T) {
+	srv, src, _ := startBlockedRefresh(t, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = srv.Stop(ctx)
+
+	if src.closed.Load() {
+		t.Error("source closed although a refresh Fetch was still in flight at the Stop deadline")
+	}
+	close(src.release)
 }
