@@ -14,7 +14,8 @@ const (
 type Branding struct {
 	// Name prefixes block messages ("<Name>: request blocked ..."). Default "gatekeeper".
 	Name string
-	// ErrorPrefix prefixes relay and MCP error bodies. Default: Name.
+	// ErrorPrefix prefixes relay and MCP error bodies and the CONNECT dial
+	// and plain-HTTP upstream failure bodies. Default: Name.
 	ErrorPrefix string
 	// MCPStubPrefix starts the placeholder value that stands in for an MCP
 	// credential in client config. Default "gatekeeper-stub-".
