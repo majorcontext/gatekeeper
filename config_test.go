@@ -391,7 +391,7 @@ func TestNew_RejectsBadNetworkPolicy(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv, err := New(context.Background(), &Config{Network: tt.network}, "")
+			srv, err := New(context.Background(), &Config{Network: tt.network}, Options{})
 			if err == nil {
 				_ = srv.Stop(context.Background())
 				t.Fatal("New accepted an invalid network config")
