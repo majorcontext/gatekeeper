@@ -65,7 +65,7 @@ func TestProxy_InjectsAuthHeader(t *testing.T) {
 	defer backend.Close()
 
 	p := NewProxy()
-	p.SetCredential("127.0.0.1", "Bearer test-token")
+	p.SetInsecureCredentialWithGrant("127.0.0.1", "Authorization", "Bearer test-token", "")
 
 	proxyServer := httptest.NewServer(p)
 	defer proxyServer.Close()
@@ -620,7 +620,7 @@ func TestProxy_CanonicalLogLine_SuccessfulRequest(t *testing.T) {
 	host := backendURL.Hostname()
 
 	p := NewProxy()
-	p.SetCredentialWithGrant(host, "Authorization", "Bearer test-token", "myservice")
+	p.SetInsecureCredentialWithGrant(host, "Authorization", "Bearer test-token", "myservice")
 
 	var logged RequestLogData
 	p.SetLogger(func(data RequestLogData) {
@@ -799,8 +799,8 @@ func TestProxy_CanonicalLogLine_MultipleGrants(t *testing.T) {
 	host := backendURL.Hostname()
 
 	p := NewProxy()
-	p.SetCredentialWithGrant(host, "Authorization", "Bearer token1", "github")
-	p.SetCredentialWithGrant(host, "x-api-key", "sk-ant-key", "anthropic")
+	p.SetInsecureCredentialWithGrant(host, "Authorization", "Bearer token1", "github")
+	p.SetInsecureCredentialWithGrant(host, "x-api-key", "sk-ant-key", "anthropic")
 
 	var logged RequestLogData
 	p.SetLogger(func(data RequestLogData) {
@@ -1219,7 +1219,7 @@ func TestProxy_SetCredentialHeader(t *testing.T) {
 	defer backend.Close()
 
 	p := NewProxy()
-	p.SetCredentialHeader("127.0.0.1", "x-api-key", "sk-ant-test-key")
+	p.SetInsecureCredentialWithGrant("127.0.0.1", "x-api-key", "sk-ant-test-key", "")
 
 	proxyServer := httptest.NewServer(p)
 	defer proxyServer.Close()
@@ -2111,7 +2111,7 @@ func TestProxy_PerContextHTTPRequest(t *testing.T) {
 		if token == "test_token" {
 			return &RunContextData{
 				Credentials: map[string][]credentialHeader{
-					h: {{Name: "Authorization", Value: "Bearer injected"}},
+					h: {{AllowInsecure: true, Name: "Authorization", Value: "Bearer injected"}},
 				},
 				Policy: "permissive",
 			}, true
@@ -2250,7 +2250,7 @@ func TestProxy_PerContextNetworkPolicy(t *testing.T) {
 		if token == "permissive_run" {
 			return &RunContextData{
 				Credentials: map[string][]credentialHeader{
-					backendURL.Hostname(): {{Name: "Authorization", Value: "Bearer ctx-token"}},
+					backendURL.Hostname(): {{AllowInsecure: true, Name: "Authorization", Value: "Bearer ctx-token"}},
 				},
 				Policy: "permissive",
 			}, true
@@ -2389,7 +2389,7 @@ func TestProxy_RemoveHeaderSkipsInjectedCredential(t *testing.T) {
 			return &RunContextData{
 				// "anthropic" grant won the credential slot with x-api-key
 				Credentials: map[string][]credentialHeader{
-					h: {{Name: "x-api-key", Value: "sk-ant-real-key", Grant: "anthropic"}},
+					h: {{AllowInsecure: true, Name: "x-api-key", Value: "sk-ant-real-key", Grant: "anthropic"}},
 				},
 				// "claude" grant registered remove x-api-key (for OAuth)
 				RemoveHeaders: map[string][]string{
@@ -2444,8 +2444,8 @@ func TestProxy_DualCredentialClientChooses(t *testing.T) {
 			return &RunContextData{
 				Credentials: map[string][]credentialHeader{
 					h: {
-						{Name: "Authorization", Value: "Bearer oauth-token", Grant: "claude"},
-						{Name: "x-api-key", Value: "sk-ant-real-key", Grant: "anthropic"},
+						{AllowInsecure: true, Name: "Authorization", Value: "Bearer oauth-token", Grant: "claude"},
+						{AllowInsecure: true, Name: "x-api-key", Value: "sk-ant-real-key", Grant: "anthropic"},
 					},
 				},
 				// Claude OAuth registers RemoveRequestHeader("x-api-key")
@@ -2560,8 +2560,8 @@ func TestProxy_DualCredentialSameHeaderPreference(t *testing.T) {
 			return &RunContextData{
 				Credentials: map[string][]credentialHeader{
 					h: {
-						{Name: "Authorization", Value: "Bearer oauth-token", Grant: "claude"},
-						{Name: "Authorization", Value: "Bearer api-key-token", Grant: "anthropic"},
+						{AllowInsecure: true, Name: "Authorization", Value: "Bearer oauth-token", Grant: "claude"},
+						{AllowInsecure: true, Name: "Authorization", Value: "Bearer api-key-token", Grant: "anthropic"},
 					},
 				},
 				Policy: "permissive",
@@ -2608,7 +2608,7 @@ func TestProxy_PerContextTokenSubstitution(t *testing.T) {
 		if token == "sub_run" {
 			return &RunContextData{
 				TokenSubstitutions: map[string]*tokenSubstitution{
-					h: {placeholder: "PLACEHOLDER", realToken: "real-secret"},
+					h: {placeholder: "PLACEHOLDER", realToken: "real-secret", AllowInsecure: true},
 				},
 				Policy: "permissive",
 			}, true
@@ -2652,7 +2652,7 @@ func TestProxy_PerContextBasicAuth(t *testing.T) {
 		if token == "basic_token" {
 			return &RunContextData{
 				Credentials: map[string][]credentialHeader{
-					h: {{Name: "Authorization", Value: "Bearer injected-via-basic"}},
+					h: {{AllowInsecure: true, Name: "Authorization", Value: "Bearer injected-via-basic"}},
 				},
 				Policy: "permissive",
 			}, true
@@ -2704,14 +2704,14 @@ func TestProxy_PerContextIsolation(t *testing.T) {
 		case "run_a":
 			return &RunContextData{
 				Credentials: map[string][]credentialHeader{
-					h: {{Name: "Authorization", Value: "Bearer token-A"}},
+					h: {{AllowInsecure: true, Name: "Authorization", Value: "Bearer token-A"}},
 				},
 				Policy: "permissive",
 			}, true
 		case "run_b":
 			return &RunContextData{
 				Credentials: map[string][]credentialHeader{
-					h: {{Name: "Authorization", Value: "Bearer token-B"}},
+					h: {{AllowInsecure: true, Name: "Authorization", Value: "Bearer token-B"}},
 				},
 				Policy: "permissive",
 			}, true
@@ -2767,7 +2767,7 @@ func TestProxy_LegacyModeUnchanged(t *testing.T) {
 	defer backend.Close()
 
 	p := NewProxy()
-	p.SetCredential("127.0.0.1", "Bearer legacy-token")
+	p.SetInsecureCredentialWithGrant("127.0.0.1", "Authorization", "Bearer legacy-token", "")
 	// No ContextResolver set - should work with placeholder header
 
 	proxyServer := httptest.NewServer(p)
@@ -2804,7 +2804,7 @@ func TestProxy_AutoInjectWithoutPlaceholder(t *testing.T) {
 	defer backend.Close()
 
 	p := NewProxy()
-	p.SetCredential("127.0.0.1", "Bearer secret-token")
+	p.SetInsecureCredentialWithGrant("127.0.0.1", "Authorization", "Bearer secret-token", "")
 
 	proxyServer := httptest.NewServer(p)
 	defer proxyServer.Close()
@@ -3603,7 +3603,7 @@ func TestProxy_CredentialResolver(t *testing.T) {
 
 	p := NewProxy()
 	p.SetCredentialResolver("127.0.0.1", func(ctx context.Context, _, _ *http.Request, host string) ([]CredentialHeader, error) {
-		return []CredentialHeader{{Name: "Authorization", Value: "Bearer dynamic-token", Grant: "test"}}, nil
+		return []CredentialHeader{{AllowInsecure: true, Name: "Authorization", Value: "Bearer dynamic-token", Grant: "test"}}, nil
 	})
 
 	proxyServer := httptest.NewServer(p)
@@ -3668,7 +3668,7 @@ func TestProxy_ResolverFallbackToStatic(t *testing.T) {
 
 	var resolverCalled atomic.Bool
 	p := NewProxy()
-	p.SetCredential("127.0.0.1", "Bearer static-token")
+	p.SetInsecureCredentialWithGrant("127.0.0.1", "Authorization", "Bearer static-token", "")
 	p.SetCredentialResolver("127.0.0.1", func(ctx context.Context, _, _ *http.Request, host string) ([]CredentialHeader, error) {
 		resolverCalled.Store(true)
 		return nil, nil
@@ -3707,9 +3707,9 @@ func TestProxy_ResolverTakesPriorityOverStatic(t *testing.T) {
 	defer backend.Close()
 
 	p := NewProxy()
-	p.SetCredential("127.0.0.1", "Bearer static-token")
+	p.SetInsecureCredentialWithGrant("127.0.0.1", "Authorization", "Bearer static-token", "")
 	p.SetCredentialResolver("127.0.0.1", func(ctx context.Context, _, _ *http.Request, host string) ([]CredentialHeader, error) {
-		return []CredentialHeader{{Name: "Authorization", Value: "Bearer resolver-token", Grant: "test"}}, nil
+		return []CredentialHeader{{AllowInsecure: true, Name: "Authorization", Value: "Bearer resolver-token", Grant: "test"}}, nil
 	})
 
 	proxyServer := httptest.NewServer(p)
@@ -3783,9 +3783,10 @@ func TestProxy_CredentialResolverStripsSubjectHeader(t *testing.T) {
 		}
 		innerReq.Header.Del("X-Gatekeeper-Subject")
 		return []CredentialHeader{{
-			Name:  "Authorization",
-			Value: "Bearer token-for-" + subject,
-			Grant: "test",
+			Name:          "Authorization",
+			Value:         "Bearer token-for-" + subject,
+			Grant:         "test",
+			AllowInsecure: true,
 		}}, nil
 	})
 
@@ -4302,7 +4303,7 @@ func TestProxy_HandleHTTP_PortPinnedCredentialKey(t *testing.T) {
 	p := NewProxy()
 	hostPort := mustParseURL(backend.URL).Host // "127.0.0.1:PORT"
 	p.mu.Lock()
-	p.credentials[hostPort] = []credentialHeader{{Name: "Authorization", Value: "Bearer port-pinned", Grant: "pinned-grant"}}
+	p.credentials[hostPort] = []credentialHeader{{AllowInsecure: true, Name: "Authorization", Value: "Bearer port-pinned", Grant: "pinned-grant"}}
 	p.mu.Unlock()
 
 	proxyServer := httptest.NewServer(p)
@@ -4451,7 +4452,7 @@ func TestProxy_HandleHTTP_DefaultPortPinnedKey(t *testing.T) {
 
 	p := NewProxy()
 	p.mu.Lock()
-	p.credentials["internal.example.com:80"] = []credentialHeader{{Name: "Authorization", Value: "Bearer default-port", Grant: "port80-grant"}}
+	p.credentials["internal.example.com:80"] = []credentialHeader{{AllowInsecure: true, Name: "Authorization", Value: "Bearer default-port", Grant: "port80-grant"}}
 	p.mu.Unlock()
 
 	proxyServer := httptest.NewServer(p)
@@ -4503,7 +4504,7 @@ func TestProxy_HandleHTTP_PolicyAndLookupPortAgree(t *testing.T) {
 
 	p := NewProxy()
 	p.mu.Lock()
-	p.credentials["internal.example.com:80"] = []credentialHeader{{Name: "Authorization", Value: "Bearer port80", Grant: "port80-grant"}}
+	p.credentials["internal.example.com:80"] = []credentialHeader{{AllowInsecure: true, Name: "Authorization", Value: "Bearer port80", Grant: "port80-grant"}}
 	p.mu.Unlock()
 
 	proxyServer := httptest.NewServer(p)

@@ -372,6 +372,22 @@ Grant names appear in the `grants` field of canonical request log lines and in O
 
 Grant names normally have no effect on which credential is injected. The one exception: when multiple credentials targeting the same host share a header name, gatekeeper breaks the tie by grant name. If the client sent a placeholder value in that header, the credential with `grant: claude` wins (letting the client explicitly opt into that grant). Otherwise, for unprompted auto-injection, a non-`claude` grant wins over `claude`, so `claude` is only injected when the client explicitly requests it via a placeholder. This tie-break only matters when two or more credentials collide on the same host and header; with no collision, `grant` is purely a logging label.
 
+### credentials[].allow_insecure
+
+Permits injecting the credential into a plain-HTTP request.
+
+```yaml
+credentials:
+  - host: internal-api.svc
+    allow_insecure: true
+```
+
+- **Type:** `bool`
+- **Required:** No
+- **Default:** `false`
+
+By default gatekeeper refuses a request whose upstream scheme is `http` when a credential matches its host. The client receives `403` and the request is not forwarded. This also applies to `/relay/` targets with an `http://` URL. Set `allow_insecure: true` only for a trusted network path, such as an in-cluster service. HTTPS and CONNECT traffic is not affected. Token-exchange `endpoint` URLs and other fetches that gatekeeper makes itself are not affected.
+
 ### credentials[].source
 
 Determines where the credential value comes from. See [Credential sources](./03-credential-sources.md) for all source types and their fields.

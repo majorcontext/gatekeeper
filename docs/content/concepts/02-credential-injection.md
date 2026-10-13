@@ -42,6 +42,12 @@ Gatekeeper injects credentials in two modes:
 
 2. **Auto-injection.** If the client sends no matching header, gatekeeper injects the credential unconditionally. When multiple credentials share the same header name for a host, the `claude` grant is deprioritized — it is only injected when the client explicitly sends a placeholder.
 
+## Plain HTTP
+
+Gatekeeper does not inject credentials into plain-HTTP requests by default. If a request to an `http://` URL matches a credential, gatekeeper answers `403`, logs a warning with the host only, and does not forward the request. The same rule covers token substitution and `/relay/` targets with an `http://` URL.
+
+To permit injection for one credential, for example toward an in-cluster service, set `allow_insecure: true` on it. See [credentials[].allow_insecure](../reference/02-config-file.md#credentialsallow_insecure). HTTPS and CONNECT-intercepted traffic is not affected, and neither are gatekeeper's own requests such as token-exchange `endpoint` calls.
+
 ## Grant names
 
 The `grant` field is an optional label that identifies a credential for logging and MCP relay matching. Grant names appear in canonical log lines and OpenTelemetry span attributes.

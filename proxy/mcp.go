@@ -121,6 +121,14 @@ func (p *Proxy) injectMCPCredentialsWithContext(ctxReq, targetReq *http.Request)
 		return // No matching MCP server
 	}
 
+	if strings.EqualFold(targetReq.URL.Scheme, "http") && !matchedServer.Auth.AllowInsecure {
+		slog.Warn("credential injection over plain HTTP refused",
+			"subsystem", "proxy",
+			"action", "refuse-cleartext",
+			"host", reqHost)
+		return
+	}
+
 	// Check if the specified header exists
 	headerValue := targetReq.Header.Get(matchedServer.Auth.Header)
 
@@ -412,6 +420,15 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	if bundleID, carries := carriesBundlePlaceholder(proxyReq, p.getCredentialBundlesForRequest(r)); carries {
 		p.logPolicyObservation(r, "credential-bundle", "mcp.request", "",
 			"credential bundle "+bundleID+" is not available through the MCP relay")
+	}
+
+	if mcpServer.Auth != nil && strings.EqualFold(targetURL.Scheme, "http") && !mcpServer.Auth.AllowInsecure {
+		p.logExit(r, logBase, start, http.StatusForbidden, func(d *RequestLogData) {
+			d.Denied = true
+			d.DenyReason = "credential injection over plain HTTP refused: " + targetURL.Host
+		})
+		p.writeCleartextRefusal(w, targetURL.Hostname())
+		return
 	}
 
 	// Inject credentials.

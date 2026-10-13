@@ -37,6 +37,10 @@ type contractRow struct {
 	wantBody   string
 	wantStatus int
 	wantCalls  int32
+
+	// plainHTTPOK marks rows whose injected headers are not secrets, so
+	// the plain-HTTP path forwards them.
+	plainHTTPOK bool
 }
 
 type wireRequest struct {
@@ -511,14 +515,16 @@ func contractRows() []contractRow {
 
 		// Extra headers.
 		{
-			name: "extra header injected",
+			name:        "extra header injected",
+			plainHTTPOK: true,
 			proxy: func(p *Proxy, k hostKeys, _ *atomic.Int32) {
 				p.AddExtraHeader(k.h, "X-Api-Version", "2024-01-01")
 			},
 			want: map[string]string{"X-Api-Version": "2024-01-01"},
 		},
 		{
-			name: "extra header comma-merges with the client value",
+			name:        "extra header comma-merges with the client value",
+			plainHTTPOK: true,
 			proxy: func(p *Proxy, k hostKeys, _ *atomic.Int32) {
 				p.AddExtraHeader(k.h, "Anthropic-Beta", "proxy-flag")
 			},
@@ -526,7 +532,8 @@ func contractRows() []contractRow {
 			want:    map[string]string{"Anthropic-Beta": "client-flag,proxy-flag"},
 		},
 		{
-			name: "run context extra headers replace proxy-level extra headers",
+			name:        "run context extra headers replace proxy-level extra headers",
+			plainHTTPOK: true,
 			proxy: func(p *Proxy, k hostKeys, _ *atomic.Int32) {
 				p.AddExtraHeader(k.h, "X-Proxy-Extra", "p")
 			},
@@ -643,8 +650,9 @@ func (r contractRow) normalized() contractRow {
 }
 
 // TestCredentialContract pins credential precedence and injection as a
-// caller observes it. The http-cleartext subtests inject credentials over plain
-// HTTP; a deliberate change to that behavior edits the expectations there.
+// caller observes it. The http-cleartext subtests refuse any row that injects
+// a secret, because credentials need allow_insecure to travel over plain HTTP;
+// a deliberate change to that behavior edits the expectation there.
 func TestCredentialContract(t *testing.T) {
 	for _, row := range contractRows() {
 		row = row.normalized()
@@ -656,7 +664,23 @@ func TestCredentialContract(t *testing.T) {
 	}
 }
 
+func (r contractRow) injectsSecret() bool {
+	if r.plainHTTPOK || r.wantStatus != http.StatusOK {
+		return false
+	}
+	for k, v := range r.want {
+		if r.headers[k] != v && r.headers[http.CanonicalHeaderKey(k)] != v {
+			return true
+		}
+	}
+	return r.wantPath != r.path || r.wantBody != r.body
+}
+
 func runContractHTTP(t *testing.T, row contractRow) {
+	if row.injectsSecret() {
+		row.wantStatus = http.StatusForbidden
+		row.want = nil
+	}
 	up, got := newContractUpstream(t, false)
 	redirectHTTPTransport(t, up.Listener.Addr().String())
 

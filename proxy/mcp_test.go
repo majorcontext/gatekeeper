@@ -32,7 +32,7 @@ func TestMCPCredentialInjection(t *testing.T) {
 		{
 			Name: "context7",
 			URL:  backend.URL, // Use test server URL
-			Auth: &MCPAuthConfig{
+			Auth: &MCPAuthConfig{AllowInsecure: true,
 				Grant:  "mcp-context7",
 				Header: "API_KEY",
 			},
@@ -327,7 +327,7 @@ func TestMCPRelay_HostLocalWithAuth(t *testing.T) {
 		{
 			Name: "local-auth",
 			URL:  backend.URL,
-			Auth: &MCPAuthConfig{
+			Auth: &MCPAuthConfig{AllowInsecure: true,
 				Grant:  "local-api-key",
 				Header: "X-API-Key",
 			},
@@ -368,7 +368,7 @@ func TestMCPOAuthCredentialInjection(t *testing.T) {
 		{
 			Name: "notion",
 			URL:  backend.URL,
-			Auth: &MCPAuthConfig{
+			Auth: &MCPAuthConfig{AllowInsecure: true,
 				Grant:  "oauth:notion",
 				Header: "Authorization",
 			},
@@ -409,7 +409,7 @@ func TestMCPOAuthRelayInjection(t *testing.T) {
 		{
 			Name: "notion",
 			URL:  backend.URL,
-			Auth: &MCPAuthConfig{
+			Auth: &MCPAuthConfig{AllowInsecure: true,
 				Grant:  "oauth:notion",
 				Header: "Authorization",
 			},
@@ -451,7 +451,7 @@ func TestMCPStaticCredentialStillRaw(t *testing.T) {
 		{
 			Name: "context7",
 			URL:  backend.URL,
-			Auth: &MCPAuthConfig{
+			Auth: &MCPAuthConfig{AllowInsecure: true,
 				Grant:  "mcp-context7",
 				Header: "API_KEY",
 			},
@@ -518,7 +518,7 @@ func TestMCPRelay_CrossHostRedirectNotFollowed(t *testing.T) {
 	p.SetMCPServers([]MCPServerConfig{{
 		Name: "redir",
 		URL:  first.URL,
-		Auth: &MCPAuthConfig{Grant: "k", Header: "X-API-Key"},
+		Auth: &MCPAuthConfig{Grant: "k", Header: "X-API-Key", AllowInsecure: true},
 	}})
 	p.credStore = &mockCredentialStore{tokens: map[string]string{"k": "sk-secret"}}
 

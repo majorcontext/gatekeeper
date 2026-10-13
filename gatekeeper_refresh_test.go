@@ -98,11 +98,11 @@ func runRefreshBubble(t *testing.T, body func(t *testing.T, f *refreshFixture)) 
 			t.Fatal(err)
 		}
 		f := &refreshFixture{srv: srv, port: port, creds: []CredentialConfig{
-			{Host: "127.0.0.1", Grant: "gh-a"},
-			{Host: "127.0.0.1", Grant: "gh-b", Header: "X-Api-Key"},
+			{Host: "127.0.0.1", Grant: "gh-a", AllowInsecure: true},
+			{Host: "127.0.0.1", Grant: "gh-b", Header: "X-Api-Key", AllowInsecure: true},
 		}}
-		srv.proxy.SetCredentialWithGrant("127.0.0.1", "Authorization", "Bearer tok_0", "gh-a")
-		srv.proxy.SetCredentialWithGrant("127.0.0.1", "X-Api-Key", "tok_0", "gh-b")
+		srv.proxy.SetInsecureCredentialWithGrant("127.0.0.1", "Authorization", "Bearer tok_0", "gh-a")
+		srv.proxy.SetInsecureCredentialWithGrant("127.0.0.1", "X-Api-Key", "tok_0", "gh-b")
 		body(t, f)
 	})
 }

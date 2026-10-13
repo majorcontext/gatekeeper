@@ -101,6 +101,8 @@ type CredentialConfig struct {
 	Source   SourceConfig              `yaml:"source"`
 	Grant    string                    `yaml:"grant,omitempty"` // Optional label for logging
 	Postgres *PostgresCredentialConfig `yaml:"postgres,omitempty"`
+
+	AllowInsecure bool `yaml:"allow_insecure,omitempty"` // Permit injection into plain-HTTP requests (default: refused)
 }
 
 // PostgresCredentialConfig marks a credential as a Postgres credential and

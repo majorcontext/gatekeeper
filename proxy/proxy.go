@@ -125,6 +125,10 @@ type MCPServerConfig struct {
 type MCPAuthConfig struct {
 	Grant  string
 	Header string
+
+	// AllowInsecure permits injecting the credential into a request to an
+	// http:// MCP server. The default refuses the request.
+	AllowInsecure bool
 }
 
 // RequestChecker checks if a request to host:port with the given method and
@@ -571,6 +575,10 @@ type credentialHeader struct {
 	// the same value again.
 	// Nil for credentials with no cache behind them (e.g. static headers).
 	Invalidate func()
+
+	// AllowInsecure permits injecting this credential into a request whose
+	// upstream scheme is http. The default refuses the request.
+	AllowInsecure bool
 }
 
 // extraHeader holds an additional header to inject for a host.
@@ -583,6 +591,10 @@ type extraHeader struct {
 type tokenSubstitution struct {
 	placeholder string
 	realToken   string
+
+	// AllowInsecure permits substituting the token into a request whose
+	// upstream scheme is http. The default refuses the request.
+	AllowInsecure bool
 }
 
 // CredentialHeader is the exported version of credentialHeader for daemon use.
@@ -912,6 +924,17 @@ func (p *Proxy) SetCredentialHeader(host, headerName, headerValue string) {
 // collisions when SetCredentialHeader is called multiple times with
 // different headers.
 func (p *Proxy) SetCredentialWithGrant(host, headerName, headerValue, grant string) {
+	p.setCredential(host, credentialHeader{Name: headerName, Value: headerValue, Grant: grant})
+}
+
+// SetInsecureCredentialWithGrant is SetCredentialWithGrant for a credential
+// that may also be injected into plain-HTTP requests.
+func (p *Proxy) SetInsecureCredentialWithGrant(host, headerName, headerValue, grant string) {
+	p.setCredential(host, credentialHeader{Name: headerName, Value: headerValue, Grant: grant, AllowInsecure: true})
+}
+
+func (p *Proxy) setCredential(host string, entry credentialHeader) {
+	headerName, grant := entry.Name, entry.Grant
 	if !isValidHost(host) {
 		slog.Debug("ignoring invalid host for credential injection",
 			"subsystem", "proxy",
@@ -921,7 +944,6 @@ func (p *Proxy) SetCredentialWithGrant(host, headerName, headerValue, grant stri
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	entry := credentialHeader{Name: headerName, Value: headerValue, Grant: grant}
 	for i, existing := range p.credentials[host] {
 		if existing.Grant == grant && existing.Name == headerName {
 			p.credentials[host][i] = entry
@@ -1020,6 +1042,18 @@ func (p *Proxy) SetTokenSubstitution(host, placeholder, realToken string) {
 	}
 }
 
+// SetInsecureTokenSubstitution is SetTokenSubstitution for a substitution
+// that may also apply to plain-HTTP requests.
+func (p *Proxy) SetInsecureTokenSubstitution(host, placeholder, realToken string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.tokenSubstitutions[host] = &tokenSubstitution{
+		placeholder:   placeholder,
+		realToken:     realToken,
+		AllowInsecure: true,
+	}
+}
+
 // getTokenSubstitution returns the token substitution for a host.
 func (p *Proxy) getTokenSubstitution(host string) *tokenSubstitution {
 	p.mu.RLock()
@@ -1073,6 +1107,36 @@ func (p *Proxy) applyTokenSubstitution(req *http.Request, sub *tokenSubstitution
 			req.ContentLength = int64(len(bodyBytes))
 		}
 	}
+}
+
+// refusesCleartextInjection reports whether forwarding in over scheme http
+// would inject a secret that was not marked AllowInsecure.
+func (p *Proxy) refusesCleartextInjection(in *http.Request, scheme, lookupHost string, creds []credentialHeader) bool {
+	if !strings.EqualFold(scheme, "http") {
+		return false
+	}
+	for _, c := range creds {
+		if !c.AllowInsecure {
+			return true
+		}
+	}
+	sub := p.getTokenSubstitutionForRequest(in, lookupHost)
+	return sub != nil && !sub.AllowInsecure
+}
+
+func cleartextRefusalMessage(host string) string {
+	return "gatekeeper: credential injection over plain HTTP is refused for host " + host +
+		". Use https, or set allow_insecure on the credential.\n"
+}
+
+func (p *Proxy) writeCleartextRefusal(w http.ResponseWriter, host string) {
+	slog.Warn("credential injection over plain HTTP refused",
+		"subsystem", "proxy",
+		"action", "refuse-cleartext",
+		"host", host)
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = w.Write([]byte(cleartextRefusalMessage(host)))
 }
 
 type outboundPrep struct {
@@ -2464,6 +2528,26 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			Err:            err,
 			ClientAddr:     r.RemoteAddr,
 		})
+		return
+	}
+
+	if p.refusesCleartextInjection(r, r.URL.Scheme, lookupHost, creds) {
+		p.logRequest(r, RequestLogData{
+			Method:         r.Method,
+			URL:            r.URL.String(),
+			Host:           host,
+			Path:           r.URL.Path,
+			RequestType:    "http",
+			StatusCode:     http.StatusForbidden,
+			Duration:       time.Since(start),
+			RequestHeaders: p.logHeadersRedacted(r.Header, lookupHost),
+			RequestSize:    r.ContentLength,
+			ResponseSize:   -1,
+			Denied:         true,
+			DenyReason:     "credential injection over plain HTTP refused: " + host,
+			ClientAddr:     r.RemoteAddr,
+		})
+		p.writeCleartextRefusal(w, host)
 		return
 	}
 
