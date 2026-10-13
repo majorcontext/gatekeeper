@@ -17,10 +17,10 @@ func cleartextProxyKinds() map[string]func(p *Proxy, k hostKeys) *RunContextData
 			return nil
 		},
 		"run context credential": func(p *Proxy, k hostKeys) *RunContextData {
-			return &RunContextData{Policy: "permissive", Credentials: map[string][]credentialHeader{k.h: authCred("Bearer "+cleartextSecret, "g")}}
+			return &RunContextData{Policy: "permissive", Credentials: map[string][]CredentialHeader{k.h: authCred("Bearer "+cleartextSecret, "g")}}
 		},
 		"resolver credential": func(p *Proxy, k hostKeys) *RunContextData {
-			p.SetCredentialResolver(k.h, func(context.Context, *http.Request, *http.Request, string) ([]credentialHeader, error) {
+			p.SetCredentialResolver(k.h, func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
 				return authCred("Bearer "+cleartextSecret, "g"), nil
 			})
 			return nil
@@ -92,7 +92,7 @@ func TestCleartextInjectionOptIn(t *testing.T) {
 			setup: func(p *Proxy, k hostKeys) *RunContextData {
 				c := cred("Authorization", "Bearer "+cleartextSecret, "g")
 				c.AllowInsecure = true
-				return &RunContextData{Policy: "permissive", Credentials: map[string][]credentialHeader{k.h: {c}}}
+				return &RunContextData{Policy: "permissive", Credentials: map[string][]CredentialHeader{k.h: {c}}}
 			},
 			check: wantAuth("Bearer " + cleartextSecret),
 		},

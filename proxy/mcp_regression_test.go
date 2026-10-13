@@ -80,7 +80,7 @@ func TestMCPRelay_DaemonModeCredentials(t *testing.T) {
 	// Build request with RunContextData carrying the credential and MCP config.
 	req := httptest.NewRequest("GET", "/mcp/test-server", nil)
 	rc := &RunContextData{
-		Credentials: map[string][]credentialHeader{
+		Credentials: map[string][]CredentialHeader{
 			"example.com": {{Name: "X-Api-Key", Value: "real-secret", Grant: "mcp-test"}},
 		},
 		MCPServers: []MCPServerConfig{
@@ -757,7 +757,7 @@ func TestServeHTTP_DirectMCPRelay(t *testing.T) {
 		}
 		return &RunContextData{
 			RunID: "run-1",
-			Credentials: map[string][]credentialHeader{
+			Credentials: map[string][]CredentialHeader{
 				backend.Listener.Addr().String(): {{Name: "X-Api-Key", Value: "real-secret", Grant: "mcp-test"}},
 			},
 			MCPServers: []MCPServerConfig{

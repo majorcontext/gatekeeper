@@ -116,28 +116,28 @@ func contractCA(t *testing.T) *CA {
 	return contractCAVal
 }
 
-func rawCreds(p *Proxy, key string, creds ...credentialHeader) {
+func rawCreds(p *Proxy, key string, creds ...CredentialHeader) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.credentials[key] = creds
 }
 
-func cred(name, value, grant string) credentialHeader {
-	return credentialHeader{Name: name, Value: value, Grant: grant}
+func cred(name, value, grant string) CredentialHeader {
+	return CredentialHeader{Name: name, Value: value, Grant: grant}
 }
 
-func rcCreds(m func(k hostKeys) map[string][]credentialHeader) func(hostKeys) *RunContextData {
+func rcCreds(m func(k hostKeys) map[string][]CredentialHeader) func(hostKeys) *RunContextData {
 	return func(k hostKeys) *RunContextData {
 		return &RunContextData{Policy: "permissive", Credentials: m(k)}
 	}
 }
 
-func authCred(v, grant string) []credentialHeader {
-	return []credentialHeader{cred("Authorization", v, grant)}
+func authCred(v, grant string) []CredentialHeader {
+	return []CredentialHeader{cred("Authorization", v, grant)}
 }
 
 func resolverReturning(calls *atomic.Int32, v, grant string) CredentialResolver {
-	return func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+	return func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]CredentialHeader, error) {
 		calls.Add(1)
 		return authCred(v, grant), nil
 	}
@@ -158,8 +158,8 @@ func contractRows() []contractRow {
 			proxy: func(p *Proxy, k hostKeys, _ *atomic.Int32) {
 				p.SetCredentialWithGrant(k.h, "Authorization", "Bearer proxy", "g")
 			},
-			rc: rcCreds(func(k hostKeys) map[string][]credentialHeader {
-				return map[string][]credentialHeader{k.h: {cred("X-Run-Key", "run", "rg")}}
+			rc: rcCreds(func(k hostKeys) map[string][]CredentialHeader {
+				return map[string][]CredentialHeader{k.h: {cred("X-Run-Key", "run", "rg")}}
 			}),
 			want: map[string]string{"X-Run-Key": "run"},
 		},
@@ -168,15 +168,15 @@ func contractRows() []contractRow {
 			proxy: func(p *Proxy, k hostKeys, _ *atomic.Int32) {
 				p.SetCredentialWithGrant(k.h, "Authorization", "Bearer proxy", "g")
 			},
-			rc: rcCreds(func(hostKeys) map[string][]credentialHeader {
-				return map[string][]credentialHeader{"other.test": authCred("Bearer o", "g")}
+			rc: rcCreds(func(hostKeys) map[string][]CredentialHeader {
+				return map[string][]CredentialHeader{"other.test": authCred("Bearer o", "g")}
 			}),
 			want: map[string]string{},
 		},
 		{
 			name: "run context empty host:port entry falls through to bare entry",
-			rc: rcCreds(func(k hostKeys) map[string][]credentialHeader {
-				return map[string][]credentialHeader{k.hp: {}, k.h: authCred("Bearer bare", "g")}
+			rc: rcCreds(func(k hostKeys) map[string][]CredentialHeader {
+				return map[string][]CredentialHeader{k.hp: {}, k.h: authCred("Bearer bare", "g")}
 			}),
 			want: map[string]string{"Authorization": "Bearer bare"},
 		},
@@ -217,16 +217,16 @@ func contractRows() []contractRow {
 		{
 			name: "wildcard excludes the apex",
 			host: "box.test",
-			rc: rcCreds(func(hostKeys) map[string][]credentialHeader {
-				return map[string][]credentialHeader{"*.box.test": {cred("Cf-Access-Client-Id", "id", "cf")}}
+			rc: rcCreds(func(hostKeys) map[string][]CredentialHeader {
+				return map[string][]CredentialHeader{"*.box.test": {cred("Cf-Access-Client-Id", "id", "cf")}}
 			}),
 			want: map[string]string{},
 		},
 		{
 			name: "wildcard matches a subdomain",
 			host: "alpha.box.test",
-			rc: rcCreds(func(hostKeys) map[string][]credentialHeader {
-				return map[string][]credentialHeader{"*.box.test": {cred("Cf-Access-Client-Id", "id", "cf")}}
+			rc: rcCreds(func(hostKeys) map[string][]CredentialHeader {
+				return map[string][]CredentialHeader{"*.box.test": {cred("Cf-Access-Client-Id", "id", "cf")}}
 			}),
 			want: map[string]string{"Cf-Access-Client-Id": "id"},
 		},
@@ -234,8 +234,8 @@ func contractRows() []contractRow {
 			name: "wildcard key with port matches only that port",
 			host: "svc.internal.test",
 			port: "8443",
-			rc: rcCreds(func(hostKeys) map[string][]credentialHeader {
-				return map[string][]credentialHeader{"*.internal.test:8443": authCred("Bearer tok", "g")}
+			rc: rcCreds(func(hostKeys) map[string][]CredentialHeader {
+				return map[string][]CredentialHeader{"*.internal.test:8443": authCred("Bearer tok", "g")}
 			}),
 			want: map[string]string{"Authorization": "Bearer tok"},
 		},
@@ -243,8 +243,8 @@ func contractRows() []contractRow {
 			name: "wildcard key with port skips other ports",
 			host: "svc.internal.test",
 			port: "9999",
-			rc: rcCreds(func(hostKeys) map[string][]credentialHeader {
-				return map[string][]credentialHeader{"*.internal.test:8443": authCred("Bearer tok", "g")}
+			rc: rcCreds(func(hostKeys) map[string][]CredentialHeader {
+				return map[string][]CredentialHeader{"*.internal.test:8443": authCred("Bearer tok", "g")}
 			}),
 			want: map[string]string{},
 		},
@@ -252,8 +252,8 @@ func contractRows() []contractRow {
 			name: "narrower wildcard domain outranks a port suffix on a broader one",
 			host: "svc.api.test",
 			port: "8443",
-			rc: rcCreds(func(hostKeys) map[string][]credentialHeader {
-				return map[string][]credentialHeader{
+			rc: rcCreds(func(hostKeys) map[string][]CredentialHeader {
+				return map[string][]CredentialHeader{
 					"*.test:8443": authCred("Bearer broad", "broad"),
 					"*.api.test":  authCred("Bearer narrow", "narrow"),
 				}
@@ -264,8 +264,8 @@ func contractRows() []contractRow {
 			name: "port-pinned wildcard beats port-less wildcard at equal domain",
 			host: "svc.api.test",
 			port: "8443",
-			rc: rcCreds(func(hostKeys) map[string][]credentialHeader {
-				return map[string][]credentialHeader{
+			rc: rcCreds(func(hostKeys) map[string][]CredentialHeader {
+				return map[string][]CredentialHeader{
 					"*.api.test:8443": authCred("Bearer pinned", "pinned"),
 					"*.api.test":      authCred("Bearer plain", "plain"),
 				}
@@ -287,8 +287,8 @@ func contractRows() []contractRow {
 			name: "case-variant host:port hits its port-bearing exact key",
 			host: "Internal.test",
 			port: "8443",
-			rc: rcCreds(func(hostKeys) map[string][]credentialHeader {
-				return map[string][]credentialHeader{
+			rc: rcCreds(func(hostKeys) map[string][]CredentialHeader {
+				return map[string][]CredentialHeader{
 					"internal.test:8443": authCred("Bearer exact", "exact"),
 					"*.test:8443":        authCred("Bearer wild", "wild"),
 				}
@@ -299,8 +299,8 @@ func contractRows() []contractRow {
 			name: "case-fold host:port match beats case-fold bare match",
 			host: "api.test",
 			port: "8443",
-			rc: rcCreds(func(hostKeys) map[string][]credentialHeader {
-				return map[string][]credentialHeader{
+			rc: rcCreds(func(hostKeys) map[string][]CredentialHeader {
+				return map[string][]CredentialHeader{
 					"API.test":      authCred("Bearer portless", "portless"),
 					"API.test:8443": authCred("Bearer pinned", "pinned"),
 				}
@@ -310,8 +310,8 @@ func contractRows() []contractRow {
 		{
 			name: "bracketed IPv6 host matches the unbracketed key",
 			host: "[::1]",
-			rc: rcCreds(func(hostKeys) map[string][]credentialHeader {
-				return map[string][]credentialHeader{"::1": authCred("Bearer v6", "v6")}
+			rc: rcCreds(func(hostKeys) map[string][]CredentialHeader {
+				return map[string][]CredentialHeader{"::1": authCred("Bearer v6", "v6")}
 			}),
 			want: map[string]string{"Authorization": "Bearer v6"},
 		},
@@ -392,7 +392,7 @@ func contractRows() []contractRow {
 			host: "other.box.test",
 			proxy: func(p *Proxy, _ hostKeys, c *atomic.Int32) {
 				p.SetCredentialWithGrant("api.box.test", "Authorization", "Bearer static", "static")
-				p.SetCredentialResolverWithStripHeaders("*.box.test", func(ctx context.Context, _, innerReq *http.Request, _ string) ([]credentialHeader, error) {
+				p.SetCredentialResolverWithStripHeaders("*.box.test", func(ctx context.Context, _, innerReq *http.Request, _ string) ([]CredentialHeader, error) {
 					c.Add(1)
 					innerReq.Header.Del("X-Subject-Token")
 					return authCred("Bearer resolver", "resolver"), nil
@@ -415,7 +415,7 @@ func contractRows() []contractRow {
 			name: "outranked legacy resolver still runs and static wins",
 			proxy: func(p *Proxy, k hostKeys, c *atomic.Int32) {
 				rawCreds(p, k.hp, cred("Authorization", "Bearer static", "static"))
-				p.SetCredentialResolver(k.h, func(ctx context.Context, _, innerReq *http.Request, _ string) ([]credentialHeader, error) {
+				p.SetCredentialResolver(k.h, func(ctx context.Context, _, innerReq *http.Request, _ string) ([]CredentialHeader, error) {
 					c.Add(1)
 					innerReq.Header.Del("X-Subject-Token")
 					return authCred("Bearer resolver", "resolver"), nil
@@ -430,7 +430,7 @@ func contractRows() []contractRow {
 			host: "api.box.test",
 			proxy: func(p *Proxy, _ hostKeys, c *atomic.Int32) {
 				p.SetCredentialWithGrant("api.box.test", "Authorization", "Bearer static", "static")
-				p.SetCredentialResolver("*.box.test", func(context.Context, *http.Request, *http.Request, string) ([]credentialHeader, error) {
+				p.SetCredentialResolver("*.box.test", func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
 					c.Add(1)
 					return nil, errors.New("sts unavailable")
 				})
@@ -443,7 +443,7 @@ func contractRows() []contractRow {
 			host: "api.box.test",
 			proxy: func(p *Proxy, _ hostKeys, c *atomic.Int32) {
 				p.SetCredentialWithGrant("api.box.test", "Authorization", "Bearer v1", "static")
-				p.SetCredentialResolver("*.box.test", func(context.Context, *http.Request, *http.Request, string) ([]credentialHeader, error) {
+				p.SetCredentialResolver("*.box.test", func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
 					c.Add(1)
 					p.SetCredentialWithGrant("api.box.test", "Authorization", "Bearer v2", "static")
 					return authCred("Bearer resolver", "resolver"), nil
@@ -455,7 +455,7 @@ func contractRows() []contractRow {
 		{
 			name: "resolver miss falls back to static read after resolver ran",
 			proxy: func(p *Proxy, k hostKeys, c *atomic.Int32) {
-				p.SetCredentialResolver(k.h, func(context.Context, *http.Request, *http.Request, string) ([]credentialHeader, error) {
+				p.SetCredentialResolver(k.h, func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
 					c.Add(1)
 					p.SetCredentialWithGrant(k.h, "Authorization", "Bearer refreshed", "static")
 					return nil, nil
@@ -468,7 +468,7 @@ func contractRows() []contractRow {
 			name: "resolver error fails closed with 502 and nothing reaches upstream",
 			proxy: func(p *Proxy, k hostKeys, c *atomic.Int32) {
 				p.SetCredentialWithGrant(k.h, "Authorization", "Bearer static", "static")
-				p.SetCredentialResolver(k.h, func(context.Context, *http.Request, *http.Request, string) ([]credentialHeader, error) {
+				p.SetCredentialResolver(k.h, func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
 					c.Add(1)
 					return nil, errors.New("sts unavailable")
 				})
@@ -538,7 +538,7 @@ func contractRows() []contractRow {
 				p.AddExtraHeader(k.h, "X-Proxy-Extra", "p")
 			},
 			rc: func(k hostKeys) *RunContextData {
-				return &RunContextData{Policy: "permissive", ExtraHeaders: map[string][]extraHeader{k.h: {{Name: "X-Run-Extra", Value: "r"}}}}
+				return &RunContextData{Policy: "permissive", ExtraHeaders: map[string][]ExtraHeader{k.h: {{Name: "X-Run-Extra", Value: "r"}}}}
 			},
 			want: map[string]string{"X-Run-Extra": "r"},
 		},
@@ -593,7 +593,7 @@ func contractRows() []contractRow {
 				p.SetTokenSubstitution(k.h, "proxy-ph", "proxy-real")
 			},
 			rc: func(k hostKeys) *RunContextData {
-				return &RunContextData{Policy: "permissive", TokenSubstitutions: map[string]*tokenSubstitution{k.h: {placeholder: "run-ph", realToken: "run-real"}}}
+				return &RunContextData{Policy: "permissive", TokenSubstitutions: map[string]*TokenSubstitution{k.h: {placeholder: "run-ph", realToken: "run-real"}}}
 			},
 			path:     "/run-ph/proxy-ph",
 			wantPath: "/run-real/proxy-ph",

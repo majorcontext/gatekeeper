@@ -119,7 +119,7 @@ func newHTTP2ProxySetup(t *testing.T, backends ...*httptest.Server) (transport *
 			HostGateway:      "api.modal.com",
 			HostGatewayIP:    "127.0.0.1",
 			AllowedHostPorts: backendPorts,
-			Credentials: map[string][]credentialHeader{
+			Credentials: map[string][]CredentialHeader{
 				"api.modal.com": {
 					{Name: "x-modal-token-id", Value: "token-id-test", Grant: "modal"},
 					{Name: "x-modal-token-secret", Value: "token-secret-test", Grant: "modal"},

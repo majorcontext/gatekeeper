@@ -1334,15 +1334,15 @@ func TestProxy_GetCredentials_WildcardKey(t *testing.T) {
 // does not, and an exact key takes precedence over a wildcard key.
 func TestProxy_GetCredentialResolver_WildcardKey(t *testing.T) {
 	grantResolver := func(grant string) CredentialResolver {
-		return func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
-			return []credentialHeader{{Name: "Authorization", Value: "Bearer " + grant, Grant: grant}}, nil
+		return func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]CredentialHeader, error) {
+			return []CredentialHeader{{Name: "Authorization", Value: "Bearer " + grant, Grant: grant}}, nil
 		}
 	}
 	p := NewProxy()
 	p.SetCredentialResolver("*.box.example.com", grantResolver("wildcard-grant"))
 	p.SetCredentialResolver("exact.box.example.com", grantResolver("exact-grant"))
 
-	resolve := func(t *testing.T, host string) []credentialHeader {
+	resolve := func(t *testing.T, host string) []CredentialHeader {
 		t.Helper()
 		r := p.getCredentialResolver(host)
 		if r == nil {
@@ -1433,11 +1433,11 @@ func TestProxy_GetCredentials_CaseVariantKeysDeterministic(t *testing.T) {
 func TestProxy_GetCredentials_WildcardKeyWithPort(t *testing.T) {
 	p := NewProxy()
 	rc := &RunContextData{
-		Credentials: map[string][]credentialHeader{
+		Credentials: map[string][]CredentialHeader{
 			"*.internal.example.com:8443": {{Name: "Authorization", Value: "Bearer tok", Grant: "port-grant"}},
 		},
 	}
-	lookup := func(t *testing.T, host string) []credentialHeader {
+	lookup := func(t *testing.T, host string) []CredentialHeader {
 		t.Helper()
 		req := httptest.NewRequest("GET", "https://"+host+"/", nil)
 		req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
@@ -1510,9 +1510,9 @@ func TestProxy_HostKeyedMaps_WildcardKey(t *testing.T) {
 	}
 
 	rc := &RunContextData{
-		ExtraHeaders:         map[string][]extraHeader{"*.box.example.com": {{Name: "X-Rc-Version", Value: "v1"}}},
+		ExtraHeaders:         map[string][]ExtraHeader{"*.box.example.com": {{Name: "X-Rc-Version", Value: "v1"}}},
 		RemoveHeaders:        map[string][]string{"*.box.example.com": {"X-Rc-Internal"}},
-		TokenSubstitutions:   map[string]*tokenSubstitution{"*.box.example.com": {placeholder: "RC-PLACEHOLDER", realToken: "rc-token"}},
+		TokenSubstitutions:   map[string]*TokenSubstitution{"*.box.example.com": {placeholder: "RC-PLACEHOLDER", realToken: "rc-token"}},
 		ResponseTransformers: map[string][]ResponseTransformer{"*.box.example.com": {noop}},
 	}
 	req := httptest.NewRequest("GET", "https://"+host+"/", nil)
@@ -1940,7 +1940,7 @@ func TestFilterHeaders_NilHeaders(t *testing.T) {
 // TestApplyTokenSubstitution_URLPath verifies token substitution in URL paths.
 func TestApplyTokenSubstitution_URLPath(t *testing.T) {
 	p := NewProxy()
-	sub := &tokenSubstitution{
+	sub := &TokenSubstitution{
 		placeholder: "moat-proxy-injected",
 		realToken:   "123456:ABC-DEF",
 	}
@@ -1966,7 +1966,7 @@ func TestApplyTokenSubstitution_URLPath(t *testing.T) {
 // TestApplyTokenSubstitution_RawPath verifies token substitution in RawPath when set.
 func TestApplyTokenSubstitution_RawPath(t *testing.T) {
 	p := NewProxy()
-	sub := &tokenSubstitution{
+	sub := &TokenSubstitution{
 		placeholder: "moat-abc123",
 		realToken:   "123456:ABC-DEF",
 	}
@@ -1996,7 +1996,7 @@ func TestApplyTokenSubstitution_RawPath(t *testing.T) {
 // TestApplyTokenSubstitution_URLPathAndBody verifies substitution in both URL and body.
 func TestApplyTokenSubstitution_URLPathAndBody(t *testing.T) {
 	p := NewProxy()
-	sub := &tokenSubstitution{
+	sub := &TokenSubstitution{
 		placeholder: "moat-proxy-injected",
 		realToken:   "real-token-value",
 	}
@@ -2033,7 +2033,7 @@ func TestProxy_ContextResolver(t *testing.T) {
 
 	contexts := map[string]*RunContextData{
 		"token_a": {
-			Credentials: map[string][]credentialHeader{
+			Credentials: map[string][]CredentialHeader{
 				"api.github.com": {{Name: "Authorization", Value: "token aaa"}},
 			},
 		},
@@ -2071,7 +2071,7 @@ func TestProxy_ContextResolverNilFallback(t *testing.T) {
 // TestApplyTokenSubstitution_NoMatch verifies no modification when placeholder is absent.
 func TestApplyTokenSubstitution_NoMatch(t *testing.T) {
 	p := NewProxy()
-	sub := &tokenSubstitution{
+	sub := &TokenSubstitution{
 		placeholder: "moat-proxy-injected",
 		realToken:   "real-token",
 	}
@@ -2094,7 +2094,7 @@ func TestApplyTokenSubstitution_NoMatch(t *testing.T) {
 }
 
 // TestProxy_PerContextHTTPRequest verifies that per-run context data is used
-// to inject credentials when a ContextResolver is set.
+// to inject credentials when a contextResolver is set.
 func TestProxy_PerContextHTTPRequest(t *testing.T) {
 	// Start a target HTTP server that echoes the Authorization header
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2110,7 +2110,7 @@ func TestProxy_PerContextHTTPRequest(t *testing.T) {
 	p.SetContextResolver(func(token string) (*RunContextData, bool) {
 		if token == "test_token" {
 			return &RunContextData{
-				Credentials: map[string][]credentialHeader{
+				Credentials: map[string][]CredentialHeader{
 					h: {{AllowInsecure: true, Name: "Authorization", Value: "Bearer injected"}},
 				},
 				Policy: "permissive",
@@ -2141,7 +2141,7 @@ func TestProxy_PerContextHTTPRequest(t *testing.T) {
 }
 
 // TestProxy_PerContextRejectsInvalidToken verifies that an invalid proxy token
-// is rejected with 407 when a ContextResolver is set.
+// is rejected with 407 when a contextResolver is set.
 func TestProxy_PerContextRejectsInvalidToken(t *testing.T) {
 	p := NewProxy()
 	p.SetContextResolver(func(token string) (*RunContextData, bool) {
@@ -2171,7 +2171,7 @@ func TestProxy_PerContextRejectsInvalidToken(t *testing.T) {
 }
 
 // TestProxy_PerContextRejectsMissingToken verifies that a request without a
-// Proxy-Authorization header is rejected when a ContextResolver is set.
+// Proxy-Authorization header is rejected when a contextResolver is set.
 func TestProxy_PerContextRejectsMissingToken(t *testing.T) {
 	p := NewProxy()
 	p.SetContextResolver(func(token string) (*RunContextData, bool) {
@@ -2214,7 +2214,7 @@ func TestProxy_PerContextNetworkPolicy(t *testing.T) {
 		if token == "strict_run" {
 			return &RunContextData{
 				Policy:       "strict",
-				AllowedHosts: []hostPattern{}, // allow nothing
+				AllowedHosts: []HostPattern{}, // allow nothing
 			}, true
 		}
 		return nil, false
@@ -2249,7 +2249,7 @@ func TestProxy_PerContextNetworkPolicy(t *testing.T) {
 	p2.SetContextResolver(func(token string) (*RunContextData, bool) {
 		if token == "permissive_run" {
 			return &RunContextData{
-				Credentials: map[string][]credentialHeader{
+				Credentials: map[string][]CredentialHeader{
 					backendURL.Hostname(): {{AllowInsecure: true, Name: "Authorization", Value: "Bearer ctx-token"}},
 				},
 				Policy: "permissive",
@@ -2294,7 +2294,7 @@ func TestProxy_PerContextExtraHeaders(t *testing.T) {
 	p.SetContextResolver(func(token string) (*RunContextData, bool) {
 		if token == "extra_run" {
 			return &RunContextData{
-				ExtraHeaders: map[string][]extraHeader{
+				ExtraHeaders: map[string][]ExtraHeader{
 					h: {{Name: "anthropic-beta", Value: "oauth-2025-04-20"}},
 				},
 				Policy: "permissive",
@@ -2388,7 +2388,7 @@ func TestProxy_RemoveHeaderSkipsInjectedCredential(t *testing.T) {
 		if token == "multi_grant_run" {
 			return &RunContextData{
 				// "anthropic" grant won the credential slot with x-api-key
-				Credentials: map[string][]credentialHeader{
+				Credentials: map[string][]CredentialHeader{
 					h: {{AllowInsecure: true, Name: "x-api-key", Value: "sk-ant-real-key", Grant: "anthropic"}},
 				},
 				// "claude" grant registered remove x-api-key (for OAuth)
@@ -2442,7 +2442,7 @@ func TestProxy_DualCredentialClientChooses(t *testing.T) {
 	p.SetContextResolver(func(token string) (*RunContextData, bool) {
 		if token == "dual_cred" {
 			return &RunContextData{
-				Credentials: map[string][]credentialHeader{
+				Credentials: map[string][]CredentialHeader{
 					h: {
 						{AllowInsecure: true, Name: "Authorization", Value: "Bearer oauth-token", Grant: "claude"},
 						{AllowInsecure: true, Name: "x-api-key", Value: "sk-ant-real-key", Grant: "anthropic"},
@@ -2558,7 +2558,7 @@ func TestProxy_DualCredentialSameHeaderPreference(t *testing.T) {
 	p.SetContextResolver(func(token string) (*RunContextData, bool) {
 		if token == "same_header" {
 			return &RunContextData{
-				Credentials: map[string][]credentialHeader{
+				Credentials: map[string][]CredentialHeader{
 					h: {
 						{AllowInsecure: true, Name: "Authorization", Value: "Bearer oauth-token", Grant: "claude"},
 						{AllowInsecure: true, Name: "Authorization", Value: "Bearer api-key-token", Grant: "anthropic"},
@@ -2607,7 +2607,7 @@ func TestProxy_PerContextTokenSubstitution(t *testing.T) {
 	p.SetContextResolver(func(token string) (*RunContextData, bool) {
 		if token == "sub_run" {
 			return &RunContextData{
-				TokenSubstitutions: map[string]*tokenSubstitution{
+				TokenSubstitutions: map[string]*TokenSubstitution{
 					h: {placeholder: "PLACEHOLDER", realToken: "real-secret", AllowInsecure: true},
 				},
 				Policy: "permissive",
@@ -2651,7 +2651,7 @@ func TestProxy_PerContextBasicAuth(t *testing.T) {
 	p.SetContextResolver(func(token string) (*RunContextData, bool) {
 		if token == "basic_token" {
 			return &RunContextData{
-				Credentials: map[string][]credentialHeader{
+				Credentials: map[string][]CredentialHeader{
 					h: {{AllowInsecure: true, Name: "Authorization", Value: "Bearer injected-via-basic"}},
 				},
 				Policy: "permissive",
@@ -2703,14 +2703,14 @@ func TestProxy_PerContextIsolation(t *testing.T) {
 		switch token {
 		case "run_a":
 			return &RunContextData{
-				Credentials: map[string][]credentialHeader{
+				Credentials: map[string][]CredentialHeader{
 					h: {{AllowInsecure: true, Name: "Authorization", Value: "Bearer token-A"}},
 				},
 				Policy: "permissive",
 			}, true
 		case "run_b":
 			return &RunContextData{
-				Credentials: map[string][]credentialHeader{
+				Credentials: map[string][]CredentialHeader{
 					h: {{AllowInsecure: true, Name: "Authorization", Value: "Bearer token-B"}},
 				},
 				Policy: "permissive",
@@ -2756,7 +2756,7 @@ func TestProxy_PerContextIsolation(t *testing.T) {
 	}
 }
 
-// TestProxy_LegacyModeUnchanged verifies that when no ContextResolver is set,
+// TestProxy_LegacyModeUnchanged verifies that when no contextResolver is set,
 // the proxy injects credentials when the client sends a matching placeholder header.
 func TestProxy_LegacyModeUnchanged(t *testing.T) {
 	var receivedAuth string
@@ -2768,7 +2768,7 @@ func TestProxy_LegacyModeUnchanged(t *testing.T) {
 
 	p := NewProxy()
 	p.SetInsecureCredentialWithGrant("127.0.0.1", "Authorization", "Bearer legacy-token", "")
-	// No ContextResolver set - should work with placeholder header
+	// No contextResolver set - should work with placeholder header
 
 	proxyServer := httptest.NewServer(p)
 	defer proxyServer.Close()
@@ -2832,7 +2832,7 @@ func TestProxy_AutoInjectWithoutPlaceholder(t *testing.T) {
 // the host level so TLS interception can apply path rules to inner HTTP requests.
 func TestProxy_ConnectPreCheckSkipsPathRules(t *testing.T) {
 	p := NewProxy()
-	// Set up strict policy with a RequestChecker that denies everything.
+	// Set up strict policy with a requestChecker that denies everything.
 	// Without the CONNECT guard, the checker would block the tunnel itself.
 	checker := func(host string, port int, method, path string) bool {
 		if host == "httpbin.org" {
@@ -3020,7 +3020,7 @@ func TestProxy_HostGatewayStrictModeAlsoBlocks(t *testing.T) {
 			return &RunContextData{
 				Policy:      "strict",
 				HostGateway: backendHost,
-				AllowedHosts: []hostPattern{
+				AllowedHosts: []HostPattern{
 					{host: backendHost, port: 0}, // wildcard port
 				},
 			}, true
@@ -4220,7 +4220,7 @@ func TestProxy_HostKeyedMaps_EmptyEntryOptOut(t *testing.T) {
 	const optedOut = "internal.example.com:8443"
 	p := NewProxy()
 	rc := &RunContextData{
-		ExtraHeaders: map[string][]extraHeader{
+		ExtraHeaders: map[string][]ExtraHeader{
 			"internal.example.com": {{Name: "X-Secret", Value: "s3cret"}},
 			optedOut:               nil,
 		},
@@ -4228,7 +4228,7 @@ func TestProxy_HostKeyedMaps_EmptyEntryOptOut(t *testing.T) {
 			"*.example.com": {"X-Strip"},
 			optedOut:        nil,
 		},
-		TokenSubstitutions: map[string]*tokenSubstitution{
+		TokenSubstitutions: map[string]*TokenSubstitution{
 			"internal.example.com": {placeholder: "PLACEHOLDER", realToken: "real"},
 			optedOut:               nil,
 		},
@@ -4263,7 +4263,7 @@ func TestProxy_HandleHTTP_PolicyCheckedBeforeResolvers(t *testing.T) {
 	p := NewProxy()
 	p.SetNetworkPolicy("strict", []string{"allowed.example.com"}, nil)
 	var invoked atomic.Bool
-	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+	p.SetCredentialResolver("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]CredentialHeader, error) {
 		invoked.Store(true)
 		return nil, errors.New("sts unavailable")
 	})
@@ -4303,7 +4303,7 @@ func TestProxy_HandleHTTP_PortPinnedCredentialKey(t *testing.T) {
 	p := NewProxy()
 	hostPort := mustParseURL(backend.URL).Host // "127.0.0.1:PORT"
 	p.mu.Lock()
-	p.credentials[hostPort] = []credentialHeader{{AllowInsecure: true, Name: "Authorization", Value: "Bearer port-pinned", Grant: "pinned-grant"}}
+	p.credentials[hostPort] = []CredentialHeader{{AllowInsecure: true, Name: "Authorization", Value: "Bearer port-pinned", Grant: "pinned-grant"}}
 	p.mu.Unlock()
 
 	proxyServer := httptest.NewServer(p)
@@ -4335,9 +4335,9 @@ func TestProxy_HandleHTTP_LogsExcludeResolverStrippedHeaders(t *testing.T) {
 
 	p := NewProxy()
 	host := mustParseURL(backend.URL).Hostname()
-	p.SetCredentialResolver(host, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+	p.SetCredentialResolver(host, func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]CredentialHeader, error) {
 		innerReq.Header.Del("X-Subject-Token")
-		return []credentialHeader{{Name: "Authorization", Value: "Bearer exchanged", Grant: "exchange-grant"}}, nil
+		return []CredentialHeader{{Name: "Authorization", Value: "Bearer exchanged", Grant: "exchange-grant"}}, nil
 	})
 
 	var mu sync.Mutex
@@ -4452,7 +4452,7 @@ func TestProxy_HandleHTTP_DefaultPortPinnedKey(t *testing.T) {
 
 	p := NewProxy()
 	p.mu.Lock()
-	p.credentials["internal.example.com:80"] = []credentialHeader{{AllowInsecure: true, Name: "Authorization", Value: "Bearer default-port", Grant: "port80-grant"}}
+	p.credentials["internal.example.com:80"] = []CredentialHeader{{AllowInsecure: true, Name: "Authorization", Value: "Bearer default-port", Grant: "port80-grant"}}
 	p.mu.Unlock()
 
 	proxyServer := httptest.NewServer(p)
@@ -4504,7 +4504,7 @@ func TestProxy_HandleHTTP_PolicyAndLookupPortAgree(t *testing.T) {
 
 	p := NewProxy()
 	p.mu.Lock()
-	p.credentials["internal.example.com:80"] = []credentialHeader{{AllowInsecure: true, Name: "Authorization", Value: "Bearer port80", Grant: "port80-grant"}}
+	p.credentials["internal.example.com:80"] = []CredentialHeader{{AllowInsecure: true, Name: "Authorization", Value: "Bearer port80", Grant: "port80-grant"}}
 	p.mu.Unlock()
 
 	proxyServer := httptest.NewServer(p)
@@ -4534,7 +4534,7 @@ func TestProxy_HandleHTTP_PolicyAndLookupPortAgree(t *testing.T) {
 func TestProxy_HandleHTTP_DenialLogRedactsDeclaredHeaders(t *testing.T) {
 	p := NewProxy()
 	p.SetNetworkPolicy("strict", []string{"allowed.example.com"}, nil)
-	p.SetCredentialResolverWithStripHeaders("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]credentialHeader, error) {
+	p.SetCredentialResolverWithStripHeaders("*.example.com", func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]CredentialHeader, error) {
 		return nil, nil
 	}, "X-Gatekeeper-Subject")
 

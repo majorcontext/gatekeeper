@@ -54,7 +54,7 @@ func TestPostgresResolverRunContextOverridesProxy(t *testing.T) {
 	p.SetPostgresResolver("*.neon.tech", proxyLevel)
 
 	rc := &RunContextData{
-		PostgresResolvers: []PostgresResolverEntry{{Pattern: "*.neon.tech", Resolver: runLevel}},
+		PostgresResolvers: []postgresResolverEntry{{Pattern: "*.neon.tech", Resolver: runLevel}},
 	}
 	if got := p.postgresResolverForHost(rc, "ep-foo.aws.neon.tech"); got != runLevel {
 		t.Errorf("run context resolver not preferred: got %v", got)
@@ -72,7 +72,7 @@ func TestPostgresResolverRunContextWithoutResolversBlocksProxyLevel(t *testing.T
 	// Postgres access — it must not inherit proxy-level resolvers.
 	for _, rc := range []*RunContextData{
 		{},
-		{PostgresResolvers: []PostgresResolverEntry{}},
+		{PostgresResolvers: []postgresResolverEntry{}},
 	} {
 		if got := p.postgresResolverForHost(rc, "ep-foo.aws.neon.tech"); got != nil {
 			t.Errorf("run context without resolvers fell back to proxy-level resolver: got %v", got)

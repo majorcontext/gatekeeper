@@ -158,7 +158,7 @@ func (p *Proxy) getMCPServersForRequest(r *http.Request) []MCPServerConfig {
 
 // getCredStoreForRequest returns the credential store from RunContextData
 // or falls back to the proxy's own store.
-func (p *Proxy) getCredStoreForRequest(r *http.Request) CredentialStore {
+func (p *Proxy) getCredStoreForRequest(r *http.Request) credentialStore {
 	if rc := getRunContext(r); rc != nil && rc.CredStore != nil {
 		return rc.CredStore
 	}

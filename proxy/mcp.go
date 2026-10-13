@@ -18,7 +18,7 @@ import (
 
 // findCredByGrant searches all credentials for one matching the given grant
 // name and returns its value. Returns "" if no match is found.
-func findCredByGrant(creds map[string][]credentialHeader, grant string) string {
+func findCredByGrant(creds map[string][]CredentialHeader, grant string) string {
 	for _, cs := range creds {
 		for _, c := range cs {
 			if c.Grant == grant {

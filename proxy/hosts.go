@@ -7,21 +7,21 @@ import (
 	"strings"
 )
 
-// hostPattern represents a parsed host pattern for matching.
-type hostPattern struct {
+// HostPattern represents a parsed host pattern for matching.
+type HostPattern struct {
 	pattern    string // the original pattern
 	host       string // the host part (without port)
 	port       int    // specific port, or 0 if unspecified (matches only ports 80 and 443)
 	isWildcard bool   // true if pattern starts with *.
 }
 
-// parseHostPattern parses a host pattern string into a hostPattern struct.
+// parseHostPattern parses a host pattern string into a HostPattern struct.
 // Supports patterns like:
 //   - api.example.com
 //   - api.example.com:8080
 //   - *.example.com
 //   - *.example.com:443
-func parseHostPattern(s string) hostPattern {
+func parseHostPattern(s string) HostPattern {
 	p, _ := parseHostPatternChecked(s)
 	return p
 }
@@ -34,8 +34,8 @@ func ValidateHostPattern(s string) error {
 	return err
 }
 
-func parseHostPatternChecked(s string) (hostPattern, error) {
-	p := hostPattern{
+func parseHostPatternChecked(s string) (HostPattern, error) {
+	p := HostPattern{
 		pattern: s,
 		port:    0, // 0 = unspecified, will match only ports 80 and 443
 	}
@@ -73,7 +73,7 @@ func parseHostPatternChecked(s string) (hostPattern, error) {
 //   - Wildcard: "*.github.com" matches "api.github.com", "foo.bar.github.com"
 //   - Port matching: if pattern has port, must match exactly;
 //     if pattern has no port (0), match 80 or 443
-func matchHost(patterns []hostPattern, host string, port int) bool {
+func matchHost(patterns []HostPattern, host string, port int) bool {
 	for _, pattern := range patterns {
 		if matchesPattern(pattern, host, port) {
 			return true
@@ -83,7 +83,7 @@ func matchHost(patterns []hostPattern, host string, port int) bool {
 }
 
 // matchesPattern checks if a single pattern matches the host:port.
-func matchesPattern(pattern hostPattern, host string, port int) bool {
+func matchesPattern(pattern HostPattern, host string, port int) bool {
 	if !allowPatternPortMatches(pattern.port, port) {
 		return false
 	}
@@ -159,10 +159,10 @@ func RegisterGrantHosts(grant string, hosts []string) {
 	grantHosts[grant] = hosts
 }
 
-// GetHostsForGrant returns the host patterns for a given grant name.
+// getHostsForGrant returns the host patterns for a given grant name.
 // Supports scoped grants like "github:repo" by extracting the provider name.
 // Returns an empty slice if the grant is unknown.
-func GetHostsForGrant(grant string) []string {
+func getHostsForGrant(grant string) []string {
 	// Extract provider from scoped grant (e.g., "github:repo" -> "github")
 	provider := grant
 	if idx := strings.Index(grant, ":"); idx != -1 {

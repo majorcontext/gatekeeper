@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-func withBundleContext(req *http.Request, bundles ...CredentialBundle) *http.Request {
+func withBundleContext(req *http.Request, bundles ...credentialBundle) *http.Request {
 	return withRunContext(req, &RunContextData{CredentialBundles: bundles})
 }
 
@@ -40,7 +40,7 @@ func TestHandleHTTP_SkippedBundleIsRecorded(t *testing.T) {
 	defer backend.Close()
 
 	bundle := codexTestBundle()
-	bundle.Scope = CredentialScope{Origins: []string{backend.URL}, Methods: []string{"POST"}, PathPrefixes: []string{"/backend-api/codex"}}
+	bundle.Scope = credentialScope{Origins: []string{backend.URL}, Methods: []string{"POST"}, PathPrefixes: []string{"/backend-api/codex"}}
 
 	p := NewProxy()
 	var policy []PolicyLogData
@@ -161,7 +161,7 @@ func TestRelay_CredentialBundleIsScoped(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	newRelay := func(t *testing.T, scope CredentialScope) (*Proxy, *sync.Mutex, *[]RequestLogData) {
+	newRelay := func(t *testing.T, scope credentialScope) (*Proxy, *sync.Mutex, *[]RequestLogData) {
 		t.Helper()
 		p := NewProxy()
 		if err := p.AddRelay("codex", backend.URL); err != nil {
@@ -173,7 +173,7 @@ func TestRelay_CredentialBundleIsScoped(t *testing.T) {
 
 	t.Run("in scope injects the real pair", func(t *testing.T) {
 		bundle := codexTestBundle()
-		bundle.Scope = CredentialScope{
+		bundle.Scope = credentialScope{
 			Origins:      []string{backend.URL},
 			Methods:      []string{"POST"},
 			PathPrefixes: []string{"/backend-api/codex"},
@@ -199,7 +199,7 @@ func TestRelay_CredentialBundleIsScoped(t *testing.T) {
 	t.Run("out of scope receives no credential", func(t *testing.T) {
 		gotAuth, gotAccount = "", ""
 		bundle := codexTestBundle()
-		bundle.Scope = CredentialScope{
+		bundle.Scope = credentialScope{
 			Origins:      []string{backend.URL},
 			Methods:      []string{"POST"},
 			PathPrefixes: []string{"/backend-api/codex"},
@@ -236,7 +236,7 @@ func TestIntercept_CredentialBundleIsScoped(t *testing.T) {
 	}))
 
 	bundle := codexTestBundle()
-	bundle.Scope = CredentialScope{
+	bundle.Scope = credentialScope{
 		RequireTLS:   true,
 		Origins:      []string{"https://" + mustParseURL(setup.Backend.URL).Host},
 		Methods:      []string{"POST"},
@@ -246,7 +246,7 @@ func TestIntercept_CredentialBundleIsScoped(t *testing.T) {
 		if token != "bundletest" {
 			return nil, false
 		}
-		return &RunContextData{Policy: "permissive", CredentialBundles: []CredentialBundle{bundle}}, true
+		return &RunContextData{Policy: "permissive", CredentialBundles: []credentialBundle{bundle}}, true
 	})
 	// A context resolver turns on proxy auth, so the tunnel needs the run token.
 	setup.Client.Transport.(*http.Transport).ProxyConnectHeader = http.Header{
@@ -308,7 +308,7 @@ func TestHandleHTTP_BundleHeaderSurvivesCollidingHostCredential(t *testing.T) {
 	defer backend.Close()
 
 	bundle := codexTestBundle()
-	bundle.Scope = CredentialScope{
+	bundle.Scope = credentialScope{
 		Origins:      []string{backend.URL},
 		Methods:      []string{"POST"},
 		PathPrefixes: []string{"/backend-api/codex"},
@@ -324,8 +324,8 @@ func TestHandleHTTP_BundleHeaderSurvivesCollidingHostCredential(t *testing.T) {
 	rec := httptest.NewRecorder()
 	// The same host also carries an ordinary Authorization credential.
 	p.handleHTTP(rec, withRunContext(req, &RunContextData{
-		CredentialBundles: []CredentialBundle{bundle},
-		Credentials: map[string][]credentialHeader{
+		CredentialBundles: []credentialBundle{bundle},
+		Credentials: map[string][]CredentialHeader{
 			host: {{AllowInsecure: true, Name: "Authorization", Value: "Bearer host-wide-token", Grant: "other"}},
 		},
 	}))
@@ -365,7 +365,7 @@ func TestHandleHTTP_BundleDoesNotTriggerAutoInjectionOfOtherHeaders(t *testing.T
 	defer backend.Close()
 
 	bundle := codexTestBundle()
-	bundle.Scope = CredentialScope{
+	bundle.Scope = credentialScope{
 		Origins:      []string{backend.URL},
 		Methods:      []string{"POST"},
 		PathPrefixes: []string{"/backend-api/codex"},
@@ -379,8 +379,8 @@ func TestHandleHTTP_BundleDoesNotTriggerAutoInjectionOfOtherHeaders(t *testing.T
 	req.Header.Set("ChatGPT-Account-ID", "fake-account")
 	rec := httptest.NewRecorder()
 	p.handleHTTP(rec, withRunContext(req, &RunContextData{
-		CredentialBundles: []CredentialBundle{bundle},
-		Credentials: map[string][]credentialHeader{
+		CredentialBundles: []credentialBundle{bundle},
+		Credentials: map[string][]CredentialHeader{
 			host: {
 				{AllowInsecure: true, Name: "Authorization", Value: "Bearer host-wide-token", Grant: "other"},
 				{AllowInsecure: true, Name: "X-Api-Key", Value: "host-api-key", Grant: "other"},
@@ -414,7 +414,7 @@ func TestMCPRelay_RecordsButDoesNotInjectBundlePlaceholders(t *testing.T) {
 	var policy []PolicyLogData
 	p.SetPolicyLogger(func(d PolicyLogData) { policy = append(policy, d) })
 	rc := &RunContextData{
-		CredentialBundles: []CredentialBundle{codexTestBundle()},
+		CredentialBundles: []credentialBundle{codexTestBundle()},
 		MCPServers:        []MCPServerConfig{{Name: "srv", URL: backend.URL}},
 	}
 
@@ -451,7 +451,7 @@ func TestMCPRelay_UnrelatedRequestIsUnaffectedByBundles(t *testing.T) {
 
 	p := NewProxy()
 	rc := &RunContextData{
-		CredentialBundles: []CredentialBundle{codexTestBundle()},
+		CredentialBundles: []credentialBundle{codexTestBundle()},
 		MCPServers:        []MCPServerConfig{{Name: "srv", URL: backend.URL}},
 	}
 
@@ -488,7 +488,7 @@ func TestOutOfScopeBundleRequestIsForwardedNotBlocked(t *testing.T) {
 	defer backend.Close()
 
 	bundle := codexTestBundle()
-	bundle.Scope = CredentialScope{
+	bundle.Scope = credentialScope{
 		Origins:      []string{backend.URL},
 		Methods:      []string{"POST"},
 		PathPrefixes: []string{"/backend-api/codex"},
@@ -533,7 +533,7 @@ func TestInScopeBundleStillInjectsAfterDegrade(t *testing.T) {
 	defer backend.Close()
 
 	bundle := codexTestBundle()
-	bundle.Scope = CredentialScope{
+	bundle.Scope = credentialScope{
 		Origins:      []string{backend.URL},
 		Methods:      []string{"POST"},
 		PathPrefixes: []string{"/backend-api/codex"},
@@ -566,7 +566,7 @@ func TestSkippedBundleIsNotReportedAsADenial(t *testing.T) {
 	defer backend.Close()
 
 	bundle := codexTestBundle()
-	bundle.Scope = CredentialScope{Origins: []string{backend.URL}, Methods: []string{"POST"}, PathPrefixes: []string{"/backend-api/codex"}}
+	bundle.Scope = credentialScope{Origins: []string{backend.URL}, Methods: []string{"POST"}, PathPrefixes: []string{"/backend-api/codex"}}
 
 	p := NewProxy()
 	var policy []PolicyLogData

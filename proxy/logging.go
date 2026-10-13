@@ -149,7 +149,7 @@ func (p *Proxy) logRequest(ctxReq *http.Request, data RequestLogData) {
 		if rc := getRunContext(ctxReq); rc != nil {
 			data.RunID = rc.RunID
 		}
-		if uid := UserIDFromContext(ctxReq.Context()); uid != "" {
+		if uid := userIDFromContext(ctxReq.Context()); uid != "" {
 			data.UserID = uid
 		}
 		data.Ctx = ctxReq.Context()

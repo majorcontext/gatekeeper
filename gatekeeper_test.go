@@ -1694,7 +1694,7 @@ func TestOTelSpanEventsViaHTTPRequest(t *testing.T) {
 		}
 	}
 	if !foundComplete {
-		t.Error("expected request.complete span event from RequestLogger callback")
+		t.Error("expected request.complete span event from requestLogger callback")
 	}
 }
 

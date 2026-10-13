@@ -43,12 +43,12 @@ func (p *Proxy) SetUpstreamCAs(pool *x509.CertPool) {
 }
 
 // SetLogger sets the request logger.
-func (p *Proxy) SetLogger(logger RequestLogger) {
+func (p *Proxy) SetLogger(logger requestLogger) {
 	p.logger = logger
 }
 
 // SetPolicyLogger sets the policy decision logger.
-func (p *Proxy) SetPolicyLogger(logger PolicyLogger) {
+func (p *Proxy) SetPolicyLogger(logger policyLogger) {
 	p.policyLogger = logger
 }
 
@@ -63,13 +63,13 @@ func (p *Proxy) SetMCPServers(servers []MCPServerConfig) {
 }
 
 // SetCredentialStore sets the credential store for MCP credential retrieval.
-func (p *Proxy) SetCredentialStore(store CredentialStore) {
+func (p *Proxy) SetCredentialStore(store credentialStore) {
 	p.credStore = store
 }
 
 // SetContextResolver sets the per-run context resolver for multi-tenant proxy use.
 // When set, the proxy can resolve auth tokens to per-run credential data.
-func (p *Proxy) SetContextResolver(resolver ContextResolver) {
+func (p *Proxy) SetContextResolver(resolver contextResolver) {
 	p.contextResolver = resolver
 }
 
@@ -105,16 +105,16 @@ func (p *Proxy) SetCredentialHeader(host, headerName, headerValue string) {
 // collisions when SetCredentialHeader is called multiple times with
 // different headers.
 func (p *Proxy) SetCredentialWithGrant(host, headerName, headerValue, grant string) {
-	p.setCredential(host, credentialHeader{Name: headerName, Value: headerValue, Grant: grant})
+	p.setCredential(host, CredentialHeader{Name: headerName, Value: headerValue, Grant: grant})
 }
 
 // SetInsecureCredentialWithGrant is SetCredentialWithGrant for a credential
 // that may also be injected into plain-HTTP requests.
 func (p *Proxy) SetInsecureCredentialWithGrant(host, headerName, headerValue, grant string) {
-	p.setCredential(host, credentialHeader{Name: headerName, Value: headerValue, Grant: grant, AllowInsecure: true})
+	p.setCredential(host, CredentialHeader{Name: headerName, Value: headerValue, Grant: grant, AllowInsecure: true})
 }
 
-func (p *Proxy) setCredential(host string, entry credentialHeader) {
+func (p *Proxy) setCredential(host string, entry CredentialHeader) {
 	headerName, grant := entry.Name, entry.Grant
 	if !isValidHost(host) {
 		slog.Debug("ignoring invalid host for credential injection",
@@ -188,7 +188,7 @@ func (p *Proxy) AddExtraHeader(host, headerName, headerValue string) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.extraHeaders[host] = append(p.extraHeaders[host], extraHeader{Name: headerName, Value: headerValue})
+	p.extraHeaders[host] = append(p.extraHeaders[host], ExtraHeader{Name: headerName, Value: headerValue})
 }
 
 // AddResponseTransformer registers a response transformer for a host.
@@ -217,7 +217,7 @@ func (p *Proxy) RemoveRequestHeader(host, headerName string) {
 func (p *Proxy) SetTokenSubstitution(host, placeholder, realToken string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.tokenSubstitutions[host] = &tokenSubstitution{
+	p.tokenSubstitutions[host] = &TokenSubstitution{
 		placeholder: placeholder,
 		realToken:   realToken,
 	}
@@ -228,7 +228,7 @@ func (p *Proxy) SetTokenSubstitution(host, placeholder, realToken string) {
 func (p *Proxy) SetInsecureTokenSubstitution(host, placeholder, realToken string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.tokenSubstitutions[host] = &tokenSubstitution{
+	p.tokenSubstitutions[host] = &TokenSubstitution{
 		placeholder:   placeholder,
 		realToken:     realToken,
 		AllowInsecure: true,
@@ -272,7 +272,7 @@ func (p *Proxy) SetNetworkPolicy(policy string, allows []string, grants []string
 
 	// Add hosts from grants
 	for _, grant := range grants {
-		grantHosts := GetHostsForGrant(grant)
+		grantHosts := getHostsForGrant(grant)
 		for _, pattern := range grantHosts {
 			p.allowedHosts = append(p.allowedHosts, parseHostPattern(pattern))
 		}
@@ -282,7 +282,7 @@ func (p *Proxy) SetNetworkPolicy(policy string, allows []string, grants []string
 // SetNetworkPolicyWithRules sets the network policy with per-host request rules.
 // The allows list should include hosts from rules (the caller extracts them).
 // checker evaluates per-request rules; pathChecker reports if path-level rules exist.
-func (p *Proxy) SetNetworkPolicyWithRules(policy string, allows []string, grants []string, checker RequestChecker, pathChecker PathRulesChecker) {
+func (p *Proxy) SetNetworkPolicyWithRules(policy string, allows []string, grants []string, checker requestChecker, pathChecker pathRulesChecker) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -295,7 +295,7 @@ func (p *Proxy) SetNetworkPolicyWithRules(policy string, allows []string, grants
 		p.allowedHosts = append(p.allowedHosts, parseHostPattern(pattern))
 	}
 	for _, grant := range grants {
-		for _, pattern := range GetHostsForGrant(grant) {
+		for _, pattern := range getHostsForGrant(grant) {
 			p.allowedHosts = append(p.allowedHosts, parseHostPattern(pattern))
 		}
 	}

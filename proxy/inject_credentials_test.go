@@ -42,7 +42,7 @@ func newInjectReq(t *testing.T, clientHeaders map[string]string) *http.Request {
 // contract it should only be injected when Claude Code explicitly asks for it
 // by sending the header.
 func TestInjectCredentials_PlaceholderSameHeaderPrefersClaude(t *testing.T) {
-	creds := []credentialHeader{
+	creds := []CredentialHeader{
 		{Name: "Authorization", Value: "Bearer other", Grant: "other"},
 		{Name: "Authorization", Value: "Bearer claude", Grant: "claude"},
 	}
@@ -64,7 +64,7 @@ func TestInjectCredentials_PlaceholderSameHeaderPrefersClaude(t *testing.T) {
 // Slice order must not decide the winner. Same as above with the credentials
 // reversed: claude still wins.
 func TestInjectCredentials_PlaceholderWinnerIndependentOfOrder(t *testing.T) {
-	creds := []credentialHeader{
+	creds := []CredentialHeader{
 		{Name: "Authorization", Value: "Bearer claude", Grant: "claude"},
 		{Name: "Authorization", Value: "Bearer other", Grant: "other"},
 	}
@@ -84,7 +84,7 @@ func TestInjectCredentials_PlaceholderWinnerIndependentOfOrder(t *testing.T) {
 // iteration wrote. A credential whose header the client never sent must not be
 // injected just because a same-named credential was injected before it.
 func TestInjectCredentials_PlaceholderDoesNotSelectUnsentHeaders(t *testing.T) {
-	creds := []credentialHeader{
+	creds := []CredentialHeader{
 		{Name: "Authorization", Value: "Bearer auth", Grant: "auth"},
 		{Name: "X-Api-Key", Value: "real-key", Grant: "apikey"},
 	}
@@ -109,7 +109,7 @@ func TestInjectCredentials_PlaceholderDoesNotSelectUnsentHeaders(t *testing.T) {
 // Unchanged behavior: with no placeholder, auto-injection prefers the
 // non-claude grant on a shared header name.
 func TestInjectCredentials_AutoInjectPrefersNonClaude(t *testing.T) {
-	creds := []credentialHeader{
+	creds := []CredentialHeader{
 		{Name: "Authorization", Value: "Bearer claude", Grant: "claude"},
 		{Name: "Authorization", Value: "Bearer other", Grant: "other"},
 	}
@@ -130,7 +130,7 @@ func TestInjectCredentials_AutoInjectPrefersNonClaude(t *testing.T) {
 
 // Unchanged behavior: distinct header names are all auto-injected.
 func TestInjectCredentials_AutoInjectDistinctHeaders(t *testing.T) {
-	creds := []credentialHeader{
+	creds := []CredentialHeader{
 		{Name: "Authorization", Value: "Bearer a", Grant: "a"},
 		{Name: "X-Api-Key", Value: "k", Grant: "b"},
 	}
@@ -153,7 +153,7 @@ func TestInjectCredentials_AutoInjectDistinctHeaders(t *testing.T) {
 // headers are not auto-injected in the same request (existing behavior: the
 // auto pass only runs when no placeholder matched).
 func TestInjectCredentials_PlaceholderSuppressesAutoInject(t *testing.T) {
-	creds := []credentialHeader{
+	creds := []CredentialHeader{
 		{Name: "Authorization", Value: "Bearer a", Grant: "a"},
 		{Name: "X-Api-Key", Value: "k", Grant: "b"},
 	}
@@ -175,7 +175,7 @@ func TestInjectCredentials_PlaceholderSuppressesAutoInject(t *testing.T) {
 // Grants must never name a credential that did not reach the wire: the
 // canonical log line is an audit record.
 func TestInjectCredentials_GrantsNeverOverReport(t *testing.T) {
-	creds := []credentialHeader{
+	creds := []CredentialHeader{
 		{Name: "Authorization", Value: "Bearer claude", Grant: "claude"},
 		{Name: "Authorization", Value: "Bearer other", Grant: "other"},
 		{Name: "Authorization", Value: "Bearer third", Grant: "third"},
