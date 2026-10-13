@@ -248,9 +248,9 @@ func TestStartCredentialRefresh_CancelEndsTheLoop(t *testing.T) {
 
 				time.Sleep(tt.cancelAt)
 				synctest.Wait()
+				src.stopped.Store(true)
 				cancel()
 				synctest.Wait()
-				src.stopped.Store(true)
 				time.Sleep(time.Hour)
 				synctest.Wait()
 				if n := src.late.Load(); n != 0 {
