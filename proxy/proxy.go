@@ -313,7 +313,8 @@ type Proxy struct {
 	captureHeaders     []string                                   // headers to capture in logs and strip before forwarding
 	branding           Branding                                   // client-visible wording of blocks and errors
 
-	h2UpstreamTransports map[poolKey]*http.Transport
+	h2UpstreamTransports  map[poolKey]*http.Transport
+	guardedHTTPTransports map[poolKey]*http.Transport
 
 	conns connTracker
 }

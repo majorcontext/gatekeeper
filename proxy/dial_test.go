@@ -288,3 +288,40 @@ func TestRunContextPolicyUnknownValueIsStrict(t *testing.T) {
 		}
 	}
 }
+
+func TestRelayRefusedWhenDelegateAuthHasNoToken(t *testing.T) {
+	var hits atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+	}))
+	defer backend.Close()
+	p := NewProxy()
+	if err := p.AddRelay("anthropic", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	_ = p.SetDelegateAuth(true)
+
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("POST", "/relay/anthropic/v1/messages", nil))
+	if rec.Code != http.StatusProxyAuthRequired {
+		t.Errorf("status = %d, want 407", rec.Code)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("relay target reached %d times", n)
+	}
+}
+
+func TestDirectGatewayIPRequestFollowsHostPortPolicy(t *testing.T) {
+	proxySrv := gatewayProxy(t)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxySrv.URL))}}
+	req, _ := http.NewRequest("GET", "http://10.254.254.254:8080/", nil)
+	req.Header.Set("Proxy-Authorization", "Bearer run")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Errorf("status = %d, want 407: HostGatewayIP is the gateway, so AllowedHostPorts applies", resp.StatusCode)
+	}
+}

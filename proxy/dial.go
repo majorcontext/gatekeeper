@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"sync"
 	"time"
 )
 
@@ -83,16 +82,20 @@ func poolKeyFor(rc *RunContextData) poolKey {
 	return poolKey{rc.HostGateway, rc.HostGatewayIP}
 }
 
-var guardedHTTPTransports sync.Map
-
-func httpTransportFor(rc *RunContextData) http.RoundTripper {
+func (p *Proxy) httpTransportFor(rc *RunContextData) http.RoundTripper {
 	k := poolKeyFor(rc)
 	if k == (poolKey{}) {
 		return httpTransport
 	}
-	if t, ok := guardedHTTPTransports.Load(k); ok {
-		return t.(*http.Transport)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	t := p.guardedHTTPTransports[k]
+	if t == nil {
+		if p.guardedHTTPTransports == nil {
+			p.guardedHTTPTransports = make(map[poolKey]*http.Transport)
+		}
+		t = newHTTPTransport()
+		p.guardedHTTPTransports[k] = t
 	}
-	t, _ := guardedHTTPTransports.LoadOrStore(k, newHTTPTransport())
-	return t.(*http.Transport)
+	return t
 }

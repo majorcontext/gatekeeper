@@ -67,8 +67,11 @@ func (p *Proxy) getH2UpstreamTransportFor(rc *RunContextData) (*http.Transport, 
 // Active requests and per-tunnel HTTP/1.1 transports are unaffected.
 func (p *Proxy) CloseIdleConnections() {
 	p.mu.RLock()
-	transports := make([]*http.Transport, 0, len(p.h2UpstreamTransports))
+	transports := make([]*http.Transport, 0, len(p.h2UpstreamTransports)+len(p.guardedHTTPTransports))
 	for _, transport := range p.h2UpstreamTransports {
+		transports = append(transports, transport)
+	}
+	for _, transport := range p.guardedHTTPTransports {
 		transports = append(transports, transport)
 	}
 	p.mu.RUnlock()
