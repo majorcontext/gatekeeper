@@ -9,9 +9,9 @@ import (
 	"github.com/majorcontext/gatekeeper/proxy"
 )
 
-// ResolveSource creates a CredentialSource from a SourceConfig.
+// resolveSource creates a CredentialSource from a SourceConfig.
 // Returns an error if the config contains fields not relevant to the selected type.
-func ResolveSource(cfg SourceConfig) (credentialsource.CredentialSource, error) {
+func resolveSource(cfg SourceConfig) (credentialsource.CredentialSource, error) {
 	switch cfg.Type {
 	case "env":
 		if cfg.Var == "" {
@@ -144,18 +144,18 @@ func readKeyMaterial(path, env string) ([]byte, error) {
 	return []byte(val), nil
 }
 
-// ResolveCredentialSource creates either a static CredentialSource or a dynamic
+// resolveCredentialSource creates either a static CredentialSource or a dynamic
 // CredentialResolver from a credential config. For static sources (env, static,
 // process, aws-secretsmanager, gcp-secretmanager, gcp-service-account,
 // github-app), the first return is non-nil. For dynamic sources
 // (token-exchange), the second return is non-nil.
-func ResolveCredentialSource(cred CredentialConfig) (credentialsource.CredentialSource, proxy.CredentialResolver, error) {
+func resolveCredentialSource(cred CredentialConfig) (credentialsource.CredentialSource, proxy.CredentialResolver, error) {
 	switch cred.Source.Type {
 	case "token-exchange":
 		resolver, err := resolveTokenExchange(cred)
 		return nil, resolver, err
 	default:
-		src, err := ResolveSource(cred.Source)
+		src, err := resolveSource(cred.Source)
 		return src, nil, err
 	}
 }

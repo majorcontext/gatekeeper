@@ -47,7 +47,8 @@ proxy/              Core TLS-intercepting proxy engine
   server.go          Proxy server lifecycle (start/stop/listen)
 
 gatekeeper.go       Standalone server wiring (config → proxy + credential sources)
-gatekeeper_tokenexchange.go  Token-exchange credential resolver wiring (config → CredentialResolver, proxy-auth subject/actor extraction)
+gatekeeper_logging.go  Canonical request log line, policy log, and span enrichment installed on the proxy
+gatekeeper_tokenexchange.go  Token-exchange config validation, proxy-auth subject/actor extraction, and conversion to proxy.CredentialResolver
 config.go           YAML config parsing (proxy, TLS, credentials, network, log)
 config_credential.go  Credential source resolution (maps source config to backends)
 
@@ -61,6 +62,7 @@ credentialsource/   Pluggable credential backends
   gcpserviceaccount.go  GCP service account OAuth2 token source
   githubapp.go       GitHub App installation token source
   tokenexchange.go   RFC 8693 token exchange source
+  tokenexchange_resolver.go  Per-request token-exchange resolver (subject extraction, bot_subject, header shaping)
   neon.go            Neon endpoint parsing + per-branch Postgres password resolver
   tokenresponse.go   Shared bounded token-response reader (readTokenResponse)
   jwt.go             Shared RS256 JWT signing (signRS256JWT)
