@@ -122,14 +122,21 @@ Gatekeeper has no knowledge of moat. It exposes the `ContextResolver` hook and `
 
 ## OTel middleware
 
-Wrap the proxy with `OTelHandler` for OpenTelemetry instrumentation:
+Wrap the proxy with `NewOTelHandler` for OpenTelemetry instrumentation:
 
 ```go
-handler := proxy.OTelHandler(p)
+handler, err := proxy.NewOTelHandler(p, proxy.OTelOptions{})
+if err != nil {
+	log.Printf("some otel instruments are disabled: %v", err)
+}
 log.Fatal(http.ListenAndServe("127.0.0.1:9080", handler))
 ```
 
-This adds request spans, duration histograms, and request counters. See [OpenTelemetry](./08-opentelemetry.md) for details on emitted signals.
+This adds request spans, duration histograms, and request counters. `OTelOptions` takes an optional `TracerProvider` and `MeterProvider`; a nil provider uses the global one. If an instrument cannot be created, the handler still works with that instrument disabled and the error names it. `proxy.RecordCredentialInjection` and `proxy.RecordPolicyDenial` always use the global providers.
+
+## Embedding the standalone server
+
+`gatekeeper.New(ctx, cfg, gatekeeper.Options{Version: v, Logger: logger})` never changes process-global state. It logs through `Options.Logger`, or `slog.Default()` when nil. The `log.level`, `log.format`, and `log.output` config keys apply only to the `gatekeeper` binary, which builds the logger from them and installs it with `slog.SetDefault`. The `proxy` and `credentialsource` packages log through the global `slog` default. See [OpenTelemetry](./08-opentelemetry.md) for details on emitted signals.
 
 ## Next steps
 

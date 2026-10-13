@@ -135,7 +135,7 @@ func TestServerMultiplexesOnSharedPort(t *testing.T) {
 	}
 	cfg.Network = NetworkConfig{Policy: "permissive"}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestServerMultiplexed_ProxyProtocolAdvertisedAddr(t *testing.T) {
 		},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestNewRejectsEqualPortsDifferentHosts(t *testing.T) {
 		TLS:      newTestCAConfig(t),
 		Postgres: &PostgresConfig{Port: 5432, Host: "10.0.0.5"},
 	}
-	_, err := New(context.Background(), cfg, "")
+	_, err := New(context.Background(), cfg, Options{})
 	if err == nil {
 		t.Fatal("New succeeded with equal ports but different hosts, want an error")
 	}
@@ -391,7 +391,7 @@ func TestNewRejectsMismatchedProxyProtocolOnSharedPort(t *testing.T) {
 		TLS:      newTestCAConfig(t),
 		Postgres: &PostgresConfig{Port: 5432, ProxyProtocol: false},
 	}
-	_, err := New(context.Background(), cfg, "")
+	_, err := New(context.Background(), cfg, Options{})
 	if err == nil {
 		t.Fatal("New succeeded with mismatched proxy_protocol settings on a shared port, want an error")
 	}

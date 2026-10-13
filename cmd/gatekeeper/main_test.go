@@ -6,8 +6,6 @@ import (
 	"errors"
 	"log/slog"
 	"testing"
-
-	"github.com/majorcontext/gatekeeper"
 )
 
 // TestOtelSDKDisabled pins the OTEL_SDK_DISABLED semantics: per the
@@ -110,14 +108,13 @@ func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
 func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
 
-// TestLogOTelError_MarksAsOTelDiagnostic encodes the fix for #48: gatekeeper.go's
-// configureLogging fans every slog record out to the otelslog bridge
-// unconditionally, so logOTelError's own DEBUG record on a failed OTel
+// TestLogOTelError_MarksAsOTelDiagnostic pins a feedback loop: newLogger fans
+// every slog record out to the otelslog bridge unconditionally, so logOTelError's own DEBUG record on a failed OTel
 // export was itself re-enqueued into the same failing OTel log-export
 // pipeline — failed export -> DEBUG diagnostic -> re-enqueued -> next
 // export fails carrying it -> another diagnostic, indefinitely while the
 // collector is unreachable. logOTelError must mark its record with
-// gatekeeper.OTelDiagnosticKey so configureLogging's bridge filter can keep
+// otelDiagnosticKey so newLogger's bridge filter can keep
 // it out of that pipeline.
 func TestLogOTelError_MarksAsOTelDiagnostic(t *testing.T) {
 	var handler recordingHandler
@@ -133,13 +130,13 @@ func TestLogOTelError_MarksAsOTelDiagnostic(t *testing.T) {
 
 	marked := false
 	handler.records[0].Attrs(func(a slog.Attr) bool {
-		if a.Key == gatekeeper.OTelDiagnosticKey && a.Value.Kind() == slog.KindBool && a.Value.Bool() {
+		if a.Key == otelDiagnosticKey && a.Value.Kind() == slog.KindBool && a.Value.Bool() {
 			marked = true
 			return false
 		}
 		return true
 	})
 	if !marked {
-		t.Errorf("logOTelError record missing %s=true attribute, so configureLogging's bridge filter can't exclude it from the OTel log-export pipeline", gatekeeper.OTelDiagnosticKey)
+		t.Errorf("logOTelError record missing %s=true attribute, so newLogger's bridge filter can't exclude it from the OTel log-export pipeline", otelDiagnosticKey)
 	}
 }
