@@ -345,6 +345,8 @@ type Proxy struct {
 	captureHeaders       []string                      // headers to capture in logs and strip before forwarding
 
 	h2UpstreamTransport *http.Transport
+
+	conns connTracker
 }
 
 // NewProxy creates a new auth proxy.

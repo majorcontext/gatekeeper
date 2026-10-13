@@ -118,6 +118,13 @@ func (p *Proxy) handleConnectTunnel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	done, ok := p.conns.add(clientConn)
+	if !ok {
+		clientConn.Close()
+		targetConn.Close()
+		return
+	}
+
 	_, _ = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 
 	var closeOnce sync.Once
@@ -128,13 +135,21 @@ func (p *Proxy) handleConnectTunnel(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	var copies sync.WaitGroup
+	copies.Add(2)
 	go func() {
+		defer copies.Done()
 		_, _ = io.Copy(targetConn, clientConn)
 		closeConns()
 	}()
 	go func() {
+		defer copies.Done()
 		_, _ = io.Copy(clientConn, targetConn)
 		closeConns()
+	}()
+	go func() {
+		copies.Wait()
+		done()
 	}()
 }
 

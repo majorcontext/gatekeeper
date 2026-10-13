@@ -837,6 +837,11 @@ func (s *Server) Stop(ctx context.Context) error {
 		}()
 	}
 	wg.Wait()
+	if s.proxy != nil {
+		if err := s.proxy.CloseConnections(ctx); httpErr == nil {
+			httpErr = err
+		}
+	}
 	return httpErr
 }
 

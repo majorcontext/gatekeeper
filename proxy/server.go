@@ -80,10 +80,16 @@ func (s *Server) Stop(ctx context.Context) error {
 	if s.proxy != nil {
 		defer s.proxy.CloseIdleConnections()
 	}
+	var err error
 	if s.server != nil {
-		return s.server.Shutdown(ctx)
+		err = s.server.Shutdown(ctx)
 	}
-	return nil
+	if s.proxy != nil {
+		if cerr := s.proxy.CloseConnections(ctx); err == nil {
+			err = cerr
+		}
+	}
+	return err
 }
 
 // Proxy returns the underlying proxy.
