@@ -28,14 +28,14 @@ proxy/              Core TLS-intercepting proxy engine
   options.go          Set*/Add* configuration API (credentials, network policy, CA, loggers)
   inject.go           Credential lookup, per-request resolution, bundles, header injection
   serve.go            ServeHTTP entry point and plain-HTTP request handling
-  auth.go             Proxy-Authorization parsing, network policy checks, deny responses
+  auth.go             ProxyAuth (Basic Proxy-Authorization parsing), network policy checks, deny responses
   connect.go          CONNECT handling, tunnels, interception context keys
   intercept.go        TLS interception, LLM response policy, intercepted request handling
   gateway.go          Host gateway rewriting, per-request policy lookups, /_aws/ and MCP relay routes
   httppolicy.go       Content-type checks, Keep HTTP policy call, duplicate JSON key detection
   logging.go          Request/policy logging, body capture, header filtering and sanitizing
   ca.go              CA certificate loading and per-host cert generation
-  hosts.go           Hostname matching (glob patterns, port stripping)
+  hosts.go           Hostname matching (glob patterns, port policies, host-keyed map lookup)
   mcp.go             MCP relay handler (SSE streaming, tool credential injection)
   llmpolicy.go       LLM response policy evaluation via Keep
   relay.go           HTTP relay for non-CONNECT requests

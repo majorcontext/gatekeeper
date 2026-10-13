@@ -199,22 +199,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 	invalidateCredentialsOnCredentialFailure(credResult.Injected, resp.StatusCode)
 
-	// Copy response headers
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-
-	// Copy status code and body with streaming support.
-	// Use a flushing copy loop so SSE/chunked streaming responses
-	// (e.g., Claude Code's /v1/messages with stream:true) are flushed
-	// incrementally rather than buffered in io.Copy's 32KB buffer.
-	w.WriteHeader(resp.StatusCode)
-	if flusher, canFlush := w.(http.Flusher); canFlush {
-		flusher.Flush()
-	}
-	written, streamErr := streamResponseBody(w, resp.Body, r.Context())
+	written, streamErr := forwardStreaming(r.Context(), w, resp)
 
 	p.logExit(r, logBase, start, resp.StatusCode, func(d *RequestLogData) {
 		d.Err = streamErr

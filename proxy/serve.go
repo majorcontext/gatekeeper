@@ -58,18 +58,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// resolve it to per-run context data, and store it in the request context.
 	// When no contextResolver is set (legacy single-run mode), use p.authToken check.
 	if p.contextResolver != nil {
-		token, ok := extractProxyToken(r)
+		token, ok := proxyToken(r)
 		if !ok {
 			writeProxyAuthRequired(w, "Proxy authentication required")
 			return
 		}
 		rc, found := p.contextResolver(token)
 		if !found {
-			writeProxyAuthRequired(w, "Invalid proxy token")
+			writeProxyAuthRequired(w, "Proxy authentication required")
 			return
 		}
 		ctx := context.WithValue(r.Context(), runContextKey, rc)
-		if uid := extractProxyUsername(r); uid != "" {
+		if uid, _, _ := ProxyAuth(r); uid != "" {
 			ctx = withUserID(ctx, uid)
 		}
 		r = r.WithContext(ctx)
@@ -78,11 +78,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if rejected, _ := p.rejectMismatchedAuth(w, r); rejected {
 			return
 		}
-		if !hasBasicProxyAuth(r) {
+		if _, pass, ok := ProxyAuth(r); !ok || pass == "" {
 			writeProxyAuthRequired(w, "Proxy authentication required")
 			return
 		}
-		if uid := extractProxyUsername(r); uid != "" {
+		if uid, _, _ := ProxyAuth(r); uid != "" {
 			r = r.WithContext(withUserID(r.Context(), uid))
 		}
 	} else if p.authToken != "" {
@@ -94,7 +94,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeProxyAuthRequired(w, "Proxy authentication required")
 			return
 		}
-		if uid := extractProxyUsername(r); uid != "" {
+		if uid, _, _ := ProxyAuth(r); uid != "" {
 			r = r.WithContext(withUserID(r.Context(), uid))
 		}
 	}

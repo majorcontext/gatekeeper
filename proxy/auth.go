@@ -9,67 +9,37 @@ import (
 	"strings"
 )
 
-// hasBasicProxyAuth returns true if the request carries a Basic
-// Proxy-Authorization with a non-empty password. Used by delegateAuth to
-// require credentials without comparing against a static token.
-func hasBasicProxyAuth(r *http.Request) bool {
+// ProxyAuth returns the user and password of a Basic Proxy-Authorization
+// header. ok is false when the header is absent, is not Basic, is not valid
+// base64, or has no ":" separator. Bearer credentials are not Basic and
+// report ok false.
+func ProxyAuth(r *http.Request) (user, pass string, ok bool) {
+	if r == nil {
+		return "", "", false
+	}
 	auth := r.Header.Get("Proxy-Authorization")
 	if !strings.HasPrefix(auth, "Basic ") {
-		return false
+		return "", "", false
 	}
 	decoded, err := base64.StdEncoding.DecodeString(auth[6:])
 	if err != nil {
-		return false
+		return "", "", false
 	}
-	_, password, ok := strings.Cut(string(decoded), ":")
-	return ok && password != ""
+	user, pass, ok = strings.Cut(string(decoded), ":")
+	if !ok {
+		return "", "", false
+	}
+	return user, pass, true
 }
 
-// extractProxyToken extracts the token from a Proxy-Authorization header.
-// Supports both Basic auth (from HTTP_PROXY=http://moat:token@host) and Bearer format.
-// Returns the extracted token and true, or empty string and false if no valid token found.
-func extractProxyToken(r *http.Request) (string, bool) {
-	auth := r.Header.Get("Proxy-Authorization")
-	if auth == "" {
-		return "", false
-	}
-
-	if strings.HasPrefix(auth, "Bearer ") {
+// proxyToken returns the token of a Bearer header or the password of a
+// Basic header.
+func proxyToken(r *http.Request) (string, bool) {
+	if auth := r.Header.Get("Proxy-Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		return auth[7:], true
 	}
-
-	if strings.HasPrefix(auth, "Basic ") {
-		decoded, err := base64.StdEncoding.DecodeString(auth[6:])
-		if err != nil {
-			return "", false
-		}
-		parts := strings.SplitN(string(decoded), ":", 2)
-		if len(parts) != 2 {
-			return "", false
-		}
-		return parts[1], true
-	}
-
-	return "", false
-}
-
-// extractProxyUsername extracts the username from a Basic Proxy-Authorization header.
-// For HTTP_PROXY=http://user:token@host, this returns "user".
-// Returns empty string for Bearer auth or if no valid username is found.
-func extractProxyUsername(r *http.Request) string {
-	auth := r.Header.Get("Proxy-Authorization")
-	if auth == "" || !strings.HasPrefix(auth, "Basic ") {
-		return ""
-	}
-	decoded, err := base64.StdEncoding.DecodeString(auth[6:])
-	if err != nil {
-		return ""
-	}
-	parts := strings.SplitN(string(decoded), ":", 2)
-	if len(parts) != 2 {
-		return ""
-	}
-	return parts[0]
+	_, pass, ok := ProxyAuth(r)
+	return pass, ok
 }
 
 // checkAuth validates the Proxy-Authorization header against the required
@@ -79,7 +49,7 @@ func extractProxyUsername(r *http.Request) string {
 // at all, in which case ok is meaningless; callers that only care whether
 // a mismatched password was presented check present before ok.
 func (p *Proxy) checkAuth(r *http.Request) (ok, present bool) {
-	token, present := extractProxyToken(r)
+	token, present := proxyToken(r)
 	if !present {
 		return false, false
 	}

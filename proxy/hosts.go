@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 )
@@ -83,17 +84,8 @@ func matchHost(patterns []hostPattern, host string, port int) bool {
 
 // matchesPattern checks if a single pattern matches the host:port.
 func matchesPattern(pattern hostPattern, host string, port int) bool {
-	// Check port matching first
-	if pattern.port != 0 {
-		// Pattern has specific port - must match exactly
-		if pattern.port != port {
-			return false
-		}
-	} else {
-		// Pattern has no port (0) - only match default ports 80 and 443
-		if port != 80 && port != 443 {
-			return false
-		}
+	if !allowPatternPortMatches(pattern.port, port) {
+		return false
 	}
 
 	// Check host matching
@@ -107,14 +99,19 @@ func matchesPattern(pattern hostPattern, host string, port int) bool {
 	return strings.EqualFold(pattern.host, host)
 }
 
+// allowPatternPortMatches is the port policy of network allow patterns: a
+// pattern port of 0 matches only the default ports 80 and 443.
+func allowPatternPortMatches(patternPort, port int) bool {
+	if patternPort != 0 {
+		return patternPort == port
+	}
+	return port == 80 || port == 443
+}
+
 // hostHasSuffixFold reports whether host ends with suffix, ignoring case.
-// This is the wildcard-suffix rule for network allow patterns
-// (matchesPattern); matchWildcardHostKey applies the same rule
-// against pre-lowered inputs for its per-key scan — a semantic change to
-// one must be mirrored in the other. Implemented via ToLower rather than
-// byte-length slicing: characters whose lowercase form has a different byte
-// length (e.g. U+1E9E ẞ → U+00DF ß) would make a fixed-length slice split
-// mid-rune and wrongly reject.
+// Lowercasing both sides, rather than slicing by byte length, keeps
+// characters whose lowercase form has a different byte length (U+1E9E to
+// U+00DF) from splitting mid-rune.
 func hostHasSuffixFold(host, suffix string) bool {
 	return strings.HasSuffix(strings.ToLower(host), strings.ToLower(suffix))
 }
@@ -178,3 +175,165 @@ func GetHostsForGrant(grant string) []string {
 	}
 	return hosts
 }
+
+// bareHost strips the port from a host:port string, returning the host
+// unchanged when it has no port.
+func bareHost(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil && h != "" {
+		return h
+	}
+	// A bracketed, portless IPv6 literal ("[::1]") fails SplitHostPort;
+	// unwrap it so it matches keys stored in canonical form ("::1").
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		return host[1 : len(host)-1]
+	}
+	return host
+}
+
+// matchWildcardHostKey is the credential-key policy for a "*." key: a key
+// without a port matches the host on any port (it is tried against the bare
+// host), and a key with a port matches only that host:port.
+func matchWildcardHostKey(key, host, bare string) bool {
+	if !strings.HasPrefix(key, "*.") {
+		return false
+	}
+	suffix := key[1:]
+	return hostHasSuffixFold(bare, suffix) ||
+		(host != bare && hostHasSuffixFold(host, suffix))
+}
+
+// compareHostKeySpecificity ranks two host keys of the same tier that match
+// the same host: positive when a is more specific than b, negative when
+// less, zero when equally specific. Specificity is the length of the key's
+// domain part — a port suffix must not make a domain-broader key outrank a
+// domain-narrower one — then a port-pinned key beats a port-less one. Both
+// in-map selection (lookupHostKeyed) and cross-map ranking
+// (hostMatch.outranks) use this single comparator so they cannot diverge.
+func compareHostKeySpecificity(a, b string) int {
+	da, db := bareHost(a), bareHost(b)
+	if len(da) != len(db) {
+		return len(da) - len(db)
+	}
+	aPinned, bPinned := len(a) > len(da), len(b) > len(db)
+	if aPinned != bPinned {
+		if aPinned {
+			return 1
+		}
+		return -1
+	}
+	return 0
+}
+
+// moreSpecificWildcardKey reports whether wildcard key a should be preferred
+// over b when both match the same host: higher specificity first, then the
+// lexicographically smallest key so the pick never depends on map iteration
+// order.
+func moreSpecificWildcardKey(a, b string) bool {
+	if c := compareHostKeySpecificity(a, b); c != 0 {
+		return c > 0
+	}
+	return a < b
+}
+
+// hostMatchTier classifies how lookupHostKeyed matched a host against a key.
+// Order matters: higher tiers outrank lower ones. A verbatim (case-exact)
+// key match outranks a case-fold match, which outranks a wildcard match.
+type hostMatchTier int
+
+const (
+	hostMatchNone hostMatchTier = iota
+	hostMatchWildcard
+	hostMatchExactFold
+	hostMatchExact
+)
+
+// hostMatch records how a lookup matched, for callers that rank matches
+// from different maps against each other (e.g. static credentials vs
+// credential resolvers).
+type hostMatch struct {
+	tier hostMatchTier
+	key  string
+}
+
+// outranks reports whether m is a strictly better match than other for the
+// same host: verbatim exact beats case-fold exact beats wildcard, and
+// within a tier compareHostKeySpecificity decides — so a port-pinned key
+// outranks a port-less one in the exact and fold tiers too, matching the
+// in-map ordering (host:port is tried before the bare host). Equal-rank
+// matches do not outrank each other (the caller's own preference order
+// breaks that tie).
+func (m hostMatch) outranks(other hostMatch) bool {
+	if m.tier != other.tier {
+		return m.tier > other.tier
+	}
+	return m.tier != hostMatchNone && compareHostKeySpecificity(m.key, other.key) > 0
+}
+
+// lookupHostKeyed resolves a host against a map keyed by exact hostnames or
+// "*." wildcard patterns, skipping entries the usable predicate rejects
+// (embedder-supplied maps may hold empty slices or nil values, which must
+// not shadow a key from a later tier). Exact keys win over wildcard keys:
+// the host is tried verbatim, then port-stripped, then case-insensitively;
+// only when every exact tier misses is the most specific (longest) matching
+// wildcard key used, ranked by moreSpecificWildcardKey. In the fold tier, a
+// key matching the full host:port beats a key matching only the bare host
+// (mirroring the verbatim tiers' order), and any remaining tie goes to the
+// lexicographically smallest key so the pick never depends on map iteration
+// order. The fallback scan is linear in the number of configured host keys;
+// it runs only when the verbatim and bare lookups miss, and the maps are
+// config-scale, not request-scale.
+func lookupHostKeyed[V any](m map[string]V, host string, usable func(V) bool) (V, hostMatch) {
+	if v, ok := m[host]; ok && usable(v) {
+		return v, hostMatch{hostMatchExact, host}
+	}
+	bare := bareHost(host)
+	if bare != host {
+		if v, ok := m[bare]; ok && usable(v) {
+			return v, hostMatch{hostMatchExact, bare}
+		}
+	}
+	lowerHost, lowerBare := strings.ToLower(host), strings.ToLower(bare)
+	var best V
+	var bestKey string
+	tier := hostMatchNone
+	bestFoldsHost := false // best fold key matches the full host:port, not just bare
+	for key, v := range m {
+		if !usable(v) {
+			continue
+		}
+		// The case-insensitive exact tier must fold both the bare host and
+		// the full host:port — port-bearing keys are expressible in
+		// embedder-built RunContextData maps. A host:port fold match beats
+		// a bare fold match, as in the verbatim tiers. Folding is via
+		// ToLower so this tier agrees with the wildcard tier's semantics
+		// (EqualFold's simple folding differs for e.g. U+017F ſ).
+		lowerKey := strings.ToLower(key)
+		if foldsHost := host != bare && lowerKey == lowerHost; foldsHost || lowerKey == lowerBare {
+			if tier != hostMatchExactFold ||
+				(foldsHost && !bestFoldsHost) ||
+				(foldsHost == bestFoldsHost && key < bestKey) {
+				bestKey, best, tier, bestFoldsHost = key, v, hostMatchExactFold, foldsHost
+			}
+			continue
+		}
+		if tier == hostMatchExactFold {
+			continue
+		}
+		if matchWildcardHostKey(key, host, bare) &&
+			(tier == hostMatchNone || moreSpecificWildcardKey(key, bestKey)) {
+			bestKey, best, tier = key, v, hostMatchWildcard
+		}
+	}
+	return best, hostMatch{tier, bestKey}
+}
+
+// Usable predicates for lookupHostKeyed. Credentials use nonEmptySlice,
+// preserving their historical len>0 gating: an empty entry falls through to
+// the next tier. The companion maps (extra headers, remove-headers, token
+// substitutions, response transformers) use presenceUsable, preserving
+// their historical presence gating: an explicit empty or nil entry matches
+// and terminates the lookup, letting embedders opt a specific host:port out
+// of a broader key's behavior.
+func nonEmptySlice[T any](v []T) bool { return len(v) > 0 }
+
+func presenceUsable[V any](V) bool { return true }
