@@ -6,9 +6,8 @@ import (
 	"net/http"
 )
 
-// ResolvedHeader is one header produced by a TokenExchangeResolver. It has the
-// same fields as the proxy package's credential header so the caller can
-// convert it without a lookup.
+// ResolvedHeader is one header produced by a TokenExchangeResolver. It carries
+// the subset of the proxy package's credential header that a resolver sets.
 type ResolvedHeader struct {
 	Name       string
 	Value      string

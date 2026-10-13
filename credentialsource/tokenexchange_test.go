@@ -834,3 +834,22 @@ func TestTokenExchange_RequestIDOmittedWhenEmpty(t *testing.T) {
 		t.Errorf("X-Request-Id header should not be set when requestID is empty, got %q", gotRequestID)
 	}
 }
+
+func TestTokenExchangeResolver_NilHooksUseDefaults(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"access_token": "gho_x", "expires_in": 3600})
+	}))
+	defer srv.Close()
+
+	resolve := TokenExchangeResolver(TokenExchangeResolverConfig{
+		TokenExchangeConfig: TokenExchangeConfig{Endpoint: srv.URL, ClientID: "c", ClientSecret: "s"},
+		SubjectHeader:       "X-Subject",
+	})
+	req := httptest.NewRequest("GET", "http://example.com/", nil)
+	req.Header.Set("X-Subject", "alice")
+	got, err := resolve(context.Background(), nil, req, "example.com")
+	if err != nil || len(got) != 1 || got[0].Value != "gho_x" {
+		t.Fatalf("resolve = %+v, %v; want one header with the bare token", got, err)
+	}
+}
