@@ -21,7 +21,7 @@ const drainLimit = 64 << 10
 // forwardStreaming writes resp's headers and status to w, flushes them so
 // streaming clients see the response start, and streams the body with
 // streamResponseBody. It returns the body bytes written and the stream error.
-func forwardStreaming(w http.ResponseWriter, resp *http.Response, ctx context.Context) (int64, error) {
+func forwardStreaming(ctx context.Context, w http.ResponseWriter, resp *http.Response) (int64, error) {
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)

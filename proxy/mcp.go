@@ -489,7 +489,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 
 	slog.Debug("MCP relay response", "server", serverName, "status", resp.StatusCode)
 
-	written, copyErr := forwardStreaming(w, resp, r.Context())
+	written, copyErr := forwardStreaming(r.Context(), w, resp)
 
 	p.logExit(r, logBase, start, resp.StatusCode, func(d *RequestLogData) {
 		d.Err = copyErr

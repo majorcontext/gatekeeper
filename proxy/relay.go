@@ -199,7 +199,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 	invalidateCredentialsOnCredentialFailure(credResult.Injected, resp.StatusCode)
 
-	written, streamErr := forwardStreaming(w, resp, r.Context())
+	written, streamErr := forwardStreaming(r.Context(), w, resp)
 
 	p.logExit(r, logBase, start, resp.StatusCode, func(d *RequestLogData) {
 		d.Err = streamErr
