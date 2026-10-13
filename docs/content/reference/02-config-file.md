@@ -8,6 +8,8 @@ keywords: ["gatekeeper", "config file", "YAML", "configuration reference"]
 
 gatekeeper.yaml defines proxy settings, TLS configuration, credentials, network policy, and logging.
 
+Gatekeeper rejects a config file with an unknown key at any level. The error names the key and its line, so a typo such as `polcy` fails at startup instead of being ignored.
+
 ## Top-level structure
 
 ```yaml

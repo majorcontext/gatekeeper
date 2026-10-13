@@ -1,7 +1,10 @@
 package gatekeeper
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/majorcontext/gatekeeper/proxy"
@@ -196,8 +199,21 @@ func resolveProxyAuthToken(cfg ProxyConfig) (string, error) {
 // ParseConfig parses a Gate Keeper config from YAML bytes.
 func ParseConfig(data []byte) (*Config, error) {
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
+	}
+	for {
+		var extra yaml.Node
+		if err := dec.Decode(&extra); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return nil, err
+		}
+		if len(extra.Content) > 0 && (extra.Content[0].Kind != yaml.ScalarNode || extra.Content[0].Tag != "!!null") {
+			return nil, errors.New("config must contain a single YAML document")
+		}
 	}
 	if err := cfg.Network.validate(); err != nil {
 		return nil, err
