@@ -510,7 +510,7 @@ log:
 - **Default:** `"stderr"`
 - **Valid values:** `"stderr"`, `"stdout"`, or a file path
 
-When set to a file path, gatekeeper opens the file in append mode (creating it if needed) and closes it on shutdown.
+When set to a file path, gatekeeper opens the file in append mode (creating it with mode `0600` if needed) and closes it on shutdown. The `gatekeeper` binary applies `log.level`, `log.format`, and `log.output`; `log.capture_headers` applies to every caller of `gatekeeper.New`. A program that embeds `gatekeeper.New` passes its own logger instead.
 
 ### log.capture_headers
 

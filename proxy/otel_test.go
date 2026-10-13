@@ -2,80 +2,90 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
-// reinitMetrics re-creates all metric instruments from a fresh meter.
-// This is needed because init() runs before tests can swap in a real
-// MeterProvider via otel.SetMeterProvider.
-func reinitMetrics() {
-	m := otel.Meter("gatekeeper")
-	var err error
-	requestDuration, err = m.Float64Histogram("proxy.request.duration",
-		metric.WithDescription("Duration of proxy requests"),
-		metric.WithUnit("s"),
-	)
-	if err != nil {
-		panic(err)
-	}
-	requestCount, err = m.Int64Counter("proxy.request.count",
-		metric.WithDescription("Total number of proxy requests"),
-	)
-	if err != nil {
-		panic(err)
-	}
-	credInjections, err = m.Int64Counter("proxy.credential.injections",
-		metric.WithDescription("Total number of credential injections"),
-	)
-	if err != nil {
-		panic(err)
-	}
-	policyDenials, err = m.Int64Counter("proxy.policy.denials",
-		metric.WithDescription("Total number of policy denials"),
-	)
-	if err != nil {
-		panic(err)
-	}
-}
-
-func setupTestOTel(t *testing.T) (*tracetest.InMemoryExporter, *sdkmetric.ManualReader) {
+func setupTestOTel(t *testing.T) (*tracetest.InMemoryExporter, *sdkmetric.ManualReader, OTelOptions) {
 	t.Helper()
 	spanExporter := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExporter))
-	otel.SetTracerProvider(tp)
 	t.Cleanup(func() { tp.Shutdown(context.Background()) })
 
 	metricReader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(metricReader))
-	otel.SetMeterProvider(mp)
 	t.Cleanup(func() { mp.Shutdown(context.Background()) })
 
-	// Re-create instruments so they use the new real MeterProvider
-	// instead of the no-op one from init().
-	reinitMetrics()
+	return spanExporter, metricReader, OTelOptions{TracerProvider: tp, MeterProvider: mp}
+}
 
-	// Also re-create the tracer so spans go to the new provider.
-	tracer = otel.Tracer("gatekeeper")
+func newTestOTelHandler(t *testing.T, next http.Handler, opts OTelOptions) http.Handler {
+	t.Helper()
+	h, err := NewOTelHandler(next, opts)
+	if err != nil {
+		t.Fatalf("NewOTelHandler: %v", err)
+	}
+	return h
+}
 
-	return spanExporter, metricReader
+type failingMeterProvider struct {
+	noop.MeterProvider
+}
+
+func (failingMeterProvider) Meter(string, ...metric.MeterOption) metric.Meter {
+	return failingMeter{}
+}
+
+type failingMeter struct {
+	noop.Meter
+}
+
+func (failingMeter) Float64Histogram(name string, _ ...metric.Float64HistogramOption) (metric.Float64Histogram, error) {
+	return nil, errors.New("instrument refused")
+}
+
+func (failingMeter) Int64Counter(name string, _ ...metric.Int64CounterOption) (metric.Int64Counter, error) {
+	return nil, errors.New("instrument refused")
+}
+
+// An embedder whose MeterProvider rejects instruments must get a working
+// handler plus an error, not a panic at package init.
+func TestNewOTelHandler_InstrumentFailureDoesNotPanic(t *testing.T) {
+	spanExporter, _, opts := setupTestOTel(t)
+	opts.MeterProvider = failingMeterProvider{}
+
+	h, err := NewOTelHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}), opts)
+	if err == nil {
+		t.Fatal("NewOTelHandler error = nil, want the instrument creation errors")
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://example.com/", nil))
+	if rec.Code != http.StatusAccepted {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	if got := len(spanExporter.GetSpans()); got != 1 {
+		t.Errorf("spans = %d, want 1 (tracing still works)", got)
+	}
 }
 
 // TestOTelHandler_CreatesSpanForHTTPRequest verifies that the OTelHandler
 // creates a span with the expected name and attributes for an HTTP request
 // proxied through the handler.
 func TestOTelHandler_CreatesSpanForHTTPRequest(t *testing.T) {
-	spanExporter, _ := setupTestOTel(t)
+	spanExporter, _, otelOpts := setupTestOTel(t)
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
@@ -83,7 +93,7 @@ func TestOTelHandler_CreatesSpanForHTTPRequest(t *testing.T) {
 	defer backend.Close()
 
 	p := NewProxy()
-	wrapped := OTelHandler(p)
+	wrapped := newTestOTelHandler(t, p, otelOpts)
 	proxyServer := httptest.NewServer(wrapped)
 	defer proxyServer.Close()
 
@@ -131,7 +141,7 @@ func TestOTelHandler_CreatesSpanForHTTPRequest(t *testing.T) {
 // TestOTelHandler_RecordsMetrics verifies that the OTelHandler records
 // proxy.request.count and proxy.request.duration metrics.
 func TestOTelHandler_RecordsMetrics(t *testing.T) {
-	_, metricReader := setupTestOTel(t)
+	_, metricReader, otelOpts := setupTestOTel(t)
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
@@ -139,7 +149,7 @@ func TestOTelHandler_RecordsMetrics(t *testing.T) {
 	defer backend.Close()
 
 	p := NewProxy()
-	wrapped := OTelHandler(p)
+	wrapped := newTestOTelHandler(t, p, otelOpts)
 	proxyServer := httptest.NewServer(wrapped)
 	defer proxyServer.Close()
 
@@ -173,7 +183,7 @@ func TestOTelHandler_RecordsMetrics(t *testing.T) {
 // TestOTelHandler_SetsErrorStatusOnFailure verifies that the OTelHandler sets
 // span status to Error when the backend returns a 502 status code.
 func TestOTelHandler_SetsErrorStatusOnFailure(t *testing.T) {
-	spanExporter, _ := setupTestOTel(t)
+	spanExporter, _, otelOpts := setupTestOTel(t)
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
@@ -182,7 +192,7 @@ func TestOTelHandler_SetsErrorStatusOnFailure(t *testing.T) {
 	defer backend.Close()
 
 	p := NewProxy()
-	wrapped := OTelHandler(p)
+	wrapped := newTestOTelHandler(t, p, otelOpts)
 	proxyServer := httptest.NewServer(wrapped)
 	defer proxyServer.Close()
 
@@ -301,14 +311,14 @@ func TestOTelHandler_PropagatesFlush(t *testing.T) {
 	rec := &countingFlushRecorder{ResponseRecorder: httptest.NewRecorder()}
 
 	var gotFlusher bool
-	handler := OTelHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := newTestOTelHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f, ok := w.(http.Flusher)
 		gotFlusher = ok
 		w.Write([]byte("chunk"))
 		if ok {
 			f.Flush()
 		}
-	}))
+	}), OTelOptions{})
 
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
 	handler.ServeHTTP(rec, req)

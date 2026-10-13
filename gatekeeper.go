@@ -12,7 +12,6 @@ package gatekeeper
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -28,7 +27,6 @@ import (
 	"github.com/majorcontext/gatekeeper/credentialsource"
 	"github.com/majorcontext/gatekeeper/proxy"
 
-	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -36,144 +34,6 @@ import (
 // defaultProxyHost is the default bind address when none is configured.
 // Binding to localhost prevents accidental exposure on all interfaces.
 const defaultProxyHost = "127.0.0.1"
-
-// configureLogging sets up slog based on the LogConfig.
-// Returns a cleanup function to close any opened log file and an error.
-func configureLogging(cfg LogConfig) (func(), error) {
-	var level slog.Level
-	switch strings.ToLower(cfg.Level) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn", "warning":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	default:
-		level = slog.LevelInfo
-	}
-
-	var (
-		w       *os.File
-		cleanup func()
-	)
-	switch strings.ToLower(cfg.Output) {
-	case "", "stderr":
-		w = os.Stderr
-	case "stdout":
-		w = os.Stdout
-	default:
-		f, err := os.OpenFile(cfg.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			return nil, fmt.Errorf("opening log output %q: %w", cfg.Output, err)
-		}
-		w = f
-		cleanup = func() { f.Close() }
-	}
-
-	opts := &slog.HandlerOptions{Level: level}
-	var handler slog.Handler
-	if strings.ToLower(cfg.Format) == "json" {
-		handler = slog.NewJSONHandler(w, opts)
-	} else {
-		handler = slog.NewTextHandler(w, opts)
-	}
-	handler = newMultiHandler(handler, newOTelDiagnosticFilter(otelslog.NewHandler("gatekeeper")))
-	slog.SetDefault(slog.New(handler))
-	return cleanup, nil
-}
-
-// OTelDiagnosticKey marks a log record as gatekeeper's own diagnostic about
-// the OTel pipeline itself — currently, the OTel SDK/export error records
-// cmd/gatekeeper's logOTelError logs at DEBUG. configureLogging's otelslog
-// bridge handler excludes any record carrying this attribute (see
-// newOTelDiagnosticFilter): without the exclusion, a failed OTel log export
-// produces a DEBUG diagnostic that is itself fanned out to the same OTel
-// log-export pipeline that just failed, so it gets queued, fails on the
-// next export attempt, produces another diagnostic, and so on indefinitely
-// while a collector is unreachable. The console/file handler still receives
-// every record regardless of this marker.
-const OTelDiagnosticKey = "otel_diagnostic"
-
-// otelDiagnosticFilter wraps a slog.Handler — the otelslog bridge — and
-// drops any record carrying OTelDiagnosticKey before it reaches the wrapped
-// handler, keeping gatekeeper's own OTel diagnostics out of the OTel log
-// export pipeline. Records without the marker pass through unchanged.
-type otelDiagnosticFilter struct {
-	slog.Handler
-}
-
-func newOTelDiagnosticFilter(h slog.Handler) slog.Handler {
-	return &otelDiagnosticFilter{Handler: h}
-}
-
-func (f *otelDiagnosticFilter) Handle(ctx context.Context, record slog.Record) error {
-	marked := false
-	record.Attrs(func(a slog.Attr) bool {
-		if a.Key == OTelDiagnosticKey && a.Value.Kind() == slog.KindBool && a.Value.Bool() {
-			marked = true
-			return false
-		}
-		return true
-	})
-	if marked {
-		return nil
-	}
-	return f.Handler.Handle(ctx, record)
-}
-
-func (f *otelDiagnosticFilter) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &otelDiagnosticFilter{Handler: f.Handler.WithAttrs(attrs)}
-}
-
-func (f *otelDiagnosticFilter) WithGroup(name string) slog.Handler {
-	return &otelDiagnosticFilter{Handler: f.Handler.WithGroup(name)}
-}
-
-// multiHandler fans out log records to multiple slog handlers.
-type multiHandler struct {
-	handlers []slog.Handler
-}
-
-func newMultiHandler(handlers ...slog.Handler) *multiHandler {
-	return &multiHandler{handlers: handlers}
-}
-
-func (m *multiHandler) Enabled(ctx context.Context, level slog.Level) bool {
-	for _, h := range m.handlers {
-		if h.Enabled(ctx, level) {
-			return true
-		}
-	}
-	return false
-}
-
-func (m *multiHandler) Handle(ctx context.Context, record slog.Record) error {
-	var errs []error
-	for _, h := range m.handlers {
-		if h.Enabled(ctx, record.Level) {
-			if err := h.Handle(ctx, record); err != nil {
-				errs = append(errs, err)
-			}
-		}
-	}
-	return errors.Join(errs...)
-}
-
-func (m *multiHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	handlers := make([]slog.Handler, len(m.handlers))
-	for i, h := range m.handlers {
-		handlers[i] = h.WithAttrs(attrs)
-	}
-	return &multiHandler{handlers: handlers}
-}
-
-func (m *multiHandler) WithGroup(name string) slog.Handler {
-	handlers := make([]slog.Handler, len(m.handlers))
-	for i, h := range m.handlers {
-		handlers[i] = h.WithGroup(name)
-	}
-	return &multiHandler{handlers: handlers}
-}
 
 // healthHandler wraps an HTTP handler to add a /healthz endpoint on the proxy port.
 type healthHandler struct {
@@ -211,7 +71,7 @@ type Server struct {
 	pgServer    *proxy.PostgresServer // postgres data-plane listener, if configured
 	pgAddr      string                // actual postgres listener address after Start
 	demux       *proxy.Demux          // non-nil when proxy and postgres share one listener (see resolveListenTopology)
-	logCleanup  func()                // closes log file if output is a file path
+	logger      *slog.Logger          // nil means slog.Default() at each use
 
 	pendingRefreshes []pendingRefresh
 	refreshCancel    context.CancelFunc
@@ -229,24 +89,36 @@ type Server struct {
 	started bool
 }
 
+// Options are the process-level inputs to New that are not part of the
+// YAML configuration.
+type Options struct {
+	// Version is included in the startup log line.
+	Version string
+	// Logger receives the server's own log lines. Nil means slog.Default().
+	// The log.level, log.format, and log.output config keys apply only to
+	// the gatekeeper binary, which builds this logger from them.
+	Logger *slog.Logger
+}
+
+func (s *Server) log() *slog.Logger {
+	if s.logger != nil {
+		return s.logger
+	}
+	return slog.Default()
+}
+
 // New creates a new Gate Keeper server from the given configuration.
 // The context is used for credential fetching (e.g., AWS Secrets Manager)
 // and can be used to cancel startup if the process receives a signal.
-// The version string is included in the startup log line; pass "" if unknown.
-func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
-	// Configure structured logging before anything else.
-	logCleanup, err := configureLogging(cfg.Log)
-	if err != nil {
-		return nil, err
-	}
-
+// New never changes process-global state.
+func New(ctx context.Context, cfg *Config, opts Options) (*Server, error) {
 	p := proxy.NewProxy()
 
 	s := &Server{
-		version:    version,
-		proxy:      p,
-		logCleanup: logCleanup,
-		cfg:        cfg,
+		version: opts.Version,
+		proxy:   p,
+		logger:  opts.Logger,
+		cfg:     cfg,
 	}
 
 	// Load TLS CA for HTTPS interception. Without a CA, the proxy cannot
@@ -382,7 +254,7 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 		for i, a := range attrs {
 			args[i] = a
 		}
-		slog.Log(logCtx, level, "request", args...)
+		s.log().Log(logCtx, level, "request", args...)
 
 		// OpenTelemetry span enrichment
 		if data.Ctx != nil {
@@ -444,7 +316,7 @@ func New(ctx context.Context, cfg *Config, version string) (*Server, error) {
 			msg, event = "policy observation", "policy.observation"
 			level = slog.LevelInfo
 		}
-		slog.Log(context.Background(), level, msg,
+		s.log().Log(context.Background(), level, msg,
 			"run_id", data.RunID,
 			"scope", data.Scope,
 			"operation", data.Operation,
@@ -694,7 +566,7 @@ func (s *Server) loadPostgresCredential(ctx context.Context, cred CredentialConf
 	case "neon":
 		if envName := cred.Postgres.ProjectEnv; envName != "" {
 			if project = os.Getenv(envName); project == "" {
-				slog.Info("postgres credential skipped: project_env is empty", "host", cred.Host, "project_env", envName)
+				s.log().Info("postgres credential skipped: project_env is empty", "host", cred.Host, "project_env", envName)
 				return nil
 			}
 		}
@@ -785,7 +657,7 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 					hosts = append(hosts, c.Host)
 					grants = append(grants, c.Grant)
 				}
-				slog.Warn("credential refresh failed, retrying",
+				s.log().Warn("credential refresh failed, retrying",
 					"hosts", strings.Join(hosts, ","),
 					"grants", strings.Join(grants, ","),
 					"backoff", backoff.String(),
@@ -805,7 +677,7 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 					val = ensureAuthScheme(val, cred.Prefix, cred.Format)
 				}
 				s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
-				slog.Debug("credential refreshed",
+				s.log().Debug("credential refreshed",
 					"host", cred.Host,
 					"grant", cred.Grant,
 					"ttl", ttl.String())
@@ -932,9 +804,9 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	if topology.multiplex {
-		slog.Info("proxy and postgres multiplexed on one listener", "addr", ln.Addr().String(), "version", s.version)
+		s.log().Info("proxy and postgres multiplexed on one listener", "addr", ln.Addr().String(), "version", s.version)
 	} else {
-		slog.Info("gatekeeper listening", "addr", ln.Addr().String(), "version", s.version)
+		s.log().Info("gatekeeper listening", "addr", ln.Addr().String(), "version", s.version)
 	}
 
 	s.mu.Lock()
@@ -942,9 +814,14 @@ func (s *Server) Start(ctx context.Context) error {
 	s.proxyAddr = ln.Addr().String()
 	s.mu.Unlock()
 
+	otelHandler, err := proxy.NewOTelHandler(&healthHandler{next: s.proxy}, proxy.OTelOptions{})
+	if err != nil {
+		s.log().Warn("some otel instruments are disabled", "error", err)
+	}
+
 	// Start proxy HTTP server with health check wrapper.
 	s.proxyServer = &http.Server{
-		Handler:           proxy.OTelHandler(&healthHandler{next: s.proxy}),
+		Handler:           otelHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		// WriteTimeout is intentionally omitted for the proxy server.
@@ -980,7 +857,7 @@ func (s *Server) Start(ctx context.Context) error {
 		s.pgServer = pg
 		s.pgAddr = pg.Addr()
 		s.mu.Unlock()
-		slog.Info("gatekeeper postgres listener", "addr", pg.Addr(), "subsystem", "proxy")
+		s.log().Info("gatekeeper postgres listener", "addr", pg.Addr(), "subsystem", "proxy")
 	} else {
 		go func() { _ = s.proxyServer.Serve(ln) }()
 
@@ -1019,7 +896,7 @@ func (s *Server) Start(ctx context.Context) error {
 			s.pgServer = pg
 			s.pgAddr = pg.Addr()
 			s.mu.Unlock()
-			slog.Info("gatekeeper postgres listener", "addr", pg.Addr(), "subsystem", "proxy")
+			s.log().Info("gatekeeper postgres listener", "addr", pg.Addr(), "subsystem", "proxy")
 		}
 	}
 
@@ -1066,14 +943,11 @@ func (s *Server) Stop(ctx context.Context) error {
 	case <-drained:
 		for _, c := range s.closers {
 			if err := c.Close(); err != nil {
-				slog.Warn("credential source close failed", "error", err)
+				s.log().Warn("credential source close failed", "error", err)
 			}
 		}
 	case <-ctx.Done():
-		slog.Warn("credential refresh did not stop before the shutdown deadline; sources left open")
-	}
-	if s.logCleanup != nil {
-		defer s.logCleanup()
+		s.log().Warn("credential refresh did not stop before the shutdown deadline; sources left open")
 	}
 	if s.demux != nil {
 		// Stop accepting new connections on the shared listener immediately.
@@ -1094,7 +968,7 @@ func (s *Server) Stop(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			if err := s.pgServer.Shutdown(ctx); err != nil {
-				slog.Warn("postgres listener shutdown timed out; active connections were closed", "error", err)
+				s.log().Warn("postgres listener shutdown timed out; active connections were closed", "error", err)
 			}
 		}()
 	}

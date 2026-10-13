@@ -36,26 +36,12 @@ func otelSDKDisabled(getenv func(string) string) bool {
 	return strings.EqualFold(getenv("OTEL_SDK_DISABLED"), "true")
 }
 
-// logOTelError is registered as the global OTel error handler. Without it,
-// SDK/export errors (e.g. no collector reachable) fall through to the OTel
-// SDK's default handler, which calls the standard library "log" package.
-// gatekeeper's logging setup (configureLogging in gatekeeper.go) calls
-// slog.SetDefault, which per slog's documented behavior rewires the
-// standard "log" package's output through the configured slog handler at
-// INFO level — so every failed export attempt (once per batch interval,
-// with no backoff between attempts) produced an INFO log line that drowned
-// the canonical request lines whenever no collector was present. Logging
-// export errors at DEBUG here keeps them observable without the noise.
-//
-// The record is tagged with gatekeeper.OTelDiagnosticKey so
-// configureLogging's otelslog bridge filter excludes it from the OTel log
-// export pipeline. Without that exclusion, a failed OTel log export
-// produces this very DEBUG record, which — like any other record — gets
-// fanned out to the same OTel log pipeline that just failed; it's queued,
-// fails on the next export attempt, produces another diagnostic, and so on
-// indefinitely while the collector stays unreachable.
+// logOTelError is the global OTel error handler. The SDK's default handler
+// writes through the standard "log" package, which slog.SetDefault routes to
+// INFO, so a missing collector would flood the request log. The otelDiagnosticKey
+// mark keeps the record out of the OTel log pipeline that just failed.
 func logOTelError(err error) {
-	slog.Default().Debug("otel error", "error", err, gatekeeper.OTelDiagnosticKey, true)
+	slog.Default().Debug("otel error", "error", err, otelDiagnosticKey, true)
 }
 
 func initOTel(ctx context.Context, getenv func(string) string) (shutdown func(context.Context) error, err error) {
@@ -132,6 +118,23 @@ func initOTel(ctx context.Context, getenv func(string) string) (shutdown func(co
 	return shutdown, nil
 }
 
+// newServer builds the process logger from cfg.Log, installs it as the
+// slog default, and creates the server. On error it closes any log file it
+// opened. On success the caller closes the log file after the server stops.
+func newServer(ctx context.Context, cfg *gatekeeper.Config) (*gatekeeper.Server, func(), error) {
+	logger, closeLog, err := newLogger(cfg.Log)
+	if err != nil {
+		return nil, nil, err
+	}
+	slog.SetDefault(logger)
+	srv, err := gatekeeper.New(ctx, cfg, gatekeeper.Options{Version: version, Logger: logger})
+	if err != nil {
+		closeLog()
+		return nil, nil, err
+	}
+	return srv, closeLog, nil
+}
+
 func main() {
 	configPath := flag.String("config", "", "path to gatekeeper.yaml")
 	flag.Parse()
@@ -166,11 +169,12 @@ func main() {
 		}
 	}()
 
-	srv, err := gatekeeper.New(ctx, cfg, version)
+	srv, closeLog, err := newServer(ctx, cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating server: %v\n", err)
 		os.Exit(1)
 	}
+	defer closeLog()
 
 	if err := srv.Start(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

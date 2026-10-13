@@ -19,13 +19,15 @@ The `gatekeeper` package (standalone server wiring) sets these callbacks at star
 
 ## OTelHandler middleware
 
-`proxy.OTelHandler` wraps the proxy's `http.Handler` with OpenTelemetry tracing and metrics:
+`proxy.NewOTelHandler` wraps the proxy's `http.Handler` with OpenTelemetry tracing and metrics:
 
 ```go
 s.proxyServer = &http.Server{
-    Handler: proxy.OTelHandler(&healthHandler{next: s.proxy}),
+    Handler: otelHandler, // proxy.NewOTelHandler(&healthHandler{next: s.proxy}, proxy.OTelOptions{})
 }
 ```
+
+`OTelOptions` takes optional tracer and meter providers that default to the global ones. If an instrument cannot be created, the handler still works with it disabled and the call returns an error.
 
 For each request, the handler:
 
@@ -37,7 +39,7 @@ For each request, the handler:
 
 The `statusRecorder` implements `http.Hijacker` by delegating to the underlying writer. This is critical — CONNECT requests call `Hijack()` to take over the raw connection, and the OTel wrapper must not break this.
 
-`OTelHandler` wraps only the HTTP proxy listener. The Postgres data-plane listener (see [Postgres Data Plane](./08-postgres-data-plane.md)) is a separate `net.Listener` that this middleware never sees, so it produces no `proxy.request`-family spans or `proxy.request.duration`/`proxy.request.count` metrics — `postgres` connections are observable only through the canonical log line below.
+`NewOTelHandler` wraps only the HTTP proxy listener. The Postgres data-plane listener (see [Postgres Data Plane](./08-postgres-data-plane.md)) is a separate `net.Listener` that this middleware never sees, so it produces no `proxy.request`-family spans or `proxy.request.duration`/`proxy.request.count` metrics — `postgres` connections are observable only through the canonical log line below.
 
 ## Canonical log lines
 

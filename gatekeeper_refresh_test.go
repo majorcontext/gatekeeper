@@ -93,7 +93,7 @@ func runRefreshBubble(t *testing.T, body func(t *testing.T, f *refreshFixture)) 
 		srv, err := New(context.Background(), &Config{
 			Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1"},
 			Network: NetworkConfig{Policy: "permissive"},
-		}, "")
+		}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}

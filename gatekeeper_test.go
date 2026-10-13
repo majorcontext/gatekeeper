@@ -35,7 +35,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/pires/go-proxyproto"
-	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
@@ -99,7 +98,7 @@ func TestServerStartStop(t *testing.T) {
 		},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -128,7 +127,7 @@ func TestServerHealthEndpoint(t *testing.T) {
 	cfg := &Config{
 		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
 	}
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +177,7 @@ func TestStaticCredentialsNoContextResolver(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -204,7 +203,7 @@ func TestDefaultHeader(t *testing.T) {
 	}
 
 	// Should succeed — header defaults to "Authorization" when omitted.
-	_, err := New(context.Background(), cfg, "")
+	_, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -220,7 +219,7 @@ func TestMissingHost(t *testing.T) {
 		},
 	}
 
-	_, err := New(context.Background(), cfg, "")
+	_, err := New(context.Background(), cfg, Options{})
 	if err == nil {
 		t.Fatal("expected error for credential without host")
 	}
@@ -244,7 +243,7 @@ func TestAuthToken(t *testing.T) {
 		},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -296,7 +295,7 @@ func TestAuthTokenFromEnv(t *testing.T) {
 		},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -345,7 +344,7 @@ func TestAuthTokenBothSetIsConfigError(t *testing.T) {
 		},
 	}
 
-	_, err := New(context.Background(), cfg, "")
+	_, err := New(context.Background(), cfg, Options{})
 	if err == nil {
 		t.Fatal("New: expected error when auth_token and auth_token_env are both set, got nil")
 	}
@@ -363,7 +362,7 @@ func TestAuthTokenEnvMissingIsFatal(t *testing.T) {
 		},
 	}
 
-	_, err := New(context.Background(), cfg, "")
+	_, err := New(context.Background(), cfg, Options{})
 	if err == nil {
 		t.Fatal("New: expected error for missing auth_token_env variable, got nil")
 	}
@@ -377,7 +376,7 @@ func TestDefaultProxyHost(t *testing.T) {
 		Proxy: ProxyConfig{Port: 0}, // no host specified
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -433,7 +432,7 @@ func TestTLSCALoading(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New with TLS: %v", err)
 	}
@@ -474,7 +473,7 @@ func TestTLSCAMissingCert(t *testing.T) {
 		},
 	}
 
-	_, err := New(context.Background(), cfg, "")
+	_, err := New(context.Background(), cfg, Options{})
 	if err == nil {
 		t.Fatal("expected error for missing CA cert")
 	}
@@ -492,7 +491,7 @@ func TestTLSCAPartialConfig(t *testing.T) {
 		},
 	}
 
-	_, err := New(context.Background(), cfg, "")
+	_, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New with partial TLS should succeed (no interception): %v", err)
 	}
@@ -546,7 +545,7 @@ func TestTLSCAWithECKey(t *testing.T) {
 		},
 	}
 
-	_, err = New(context.Background(), cfg, "")
+	_, err = New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New with EC CA: %v", err)
 	}
@@ -590,7 +589,7 @@ func TestHTTPSCredentialInjection(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -646,7 +645,7 @@ func TestTLSCAInvalidPEM(t *testing.T) {
 		},
 	}
 
-	_, err := New(context.Background(), cfg, "")
+	_, err := New(context.Background(), cfg, Options{})
 	if err == nil {
 		t.Fatal("expected error for invalid PEM")
 	}
@@ -679,7 +678,7 @@ func TestHTTPCredentialInjection(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -741,7 +740,7 @@ func TestHTTPSCustomHeaderInjection(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -811,7 +810,7 @@ func TestServerProxyProtocol_V1(t *testing.T) {
 		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1", ProxyProtocol: true},
 		Network: NetworkConfig{Policy: "permissive"},
 	}
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -871,7 +870,7 @@ func TestServerProxyProtocol_V2(t *testing.T) {
 		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1", ProxyProtocol: true},
 		Network: NetworkConfig{Policy: "permissive"},
 	}
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -926,13 +925,12 @@ func TestServerProxyProtocol_V2(t *testing.T) {
 // own health checks and any direct probe of the port do not send one, and
 // must not be rejected.
 func TestServerProxyProtocol_FailSafeNoHeader(t *testing.T) {
-	logPath := filepath.Join(t.TempDir(), "gatekeeper.log")
+	logBuf := captureDefaultSlog(t)
 	cfg := &Config{
 		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1", ProxyProtocol: true},
 		Network: NetworkConfig{Policy: "permissive"},
-		Log:     LogConfig{Level: "debug", Output: logPath},
 	}
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -965,7 +963,7 @@ func TestServerProxyProtocol_FailSafeNoHeader(t *testing.T) {
 
 	// The headerless path is the fail-open case, not a parse failure: it must
 	// stay quiet even at DEBUG, so a real LB health check never spams logs.
-	logData, _ := os.ReadFile(logPath)
+	logData := []byte(logBuf.String())
 	if strings.Contains(string(logData), "malformed PROXY protocol header") {
 		t.Errorf("expected no malformed-header log for a connection with no PROXY header at all, got: %s", logData)
 	}
@@ -982,13 +980,12 @@ func TestServerProxyProtocol_FailSafeNoHeader(t *testing.T) {
 // treats as a dead connection and closes silently, leaving the operator with
 // a dropped connection and zero trace.
 func TestServerProxyProtocol_MalformedHeader(t *testing.T) {
-	logPath := filepath.Join(t.TempDir(), "gatekeeper.log")
+	logBuf := captureDefaultSlog(t)
 	cfg := &Config{
 		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1", ProxyProtocol: true},
 		Network: NetworkConfig{Policy: "permissive"},
-		Log:     LogConfig{Level: "debug", Output: logPath},
 	}
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1023,7 +1020,7 @@ func TestServerProxyProtocol_MalformedHeader(t *testing.T) {
 	var logData []byte
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		logData, _ = os.ReadFile(logPath)
+		logData = []byte(logBuf.String())
 		if strings.Contains(string(logData), "malformed PROXY protocol header") {
 			break
 		}
@@ -1056,7 +1053,7 @@ func TestServerProxyProtocol_DisabledDefault(t *testing.T) {
 		Proxy:   ProxyConfig{Port: 0, Host: "127.0.0.1"},
 		Network: NetworkConfig{Policy: "permissive"}, // proxy_protocol left unset
 	}
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1114,7 +1111,7 @@ func TestServerProxyProtocol_ConnectIntercepted(t *testing.T) {
 		},
 		Network: NetworkConfig{Policy: "permissive"},
 	}
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1200,7 +1197,7 @@ func TestStrictNetworkPolicy(t *testing.T) {
 		},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1271,7 +1268,7 @@ func TestMultipleCredentialsSameHost(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1320,7 +1317,7 @@ func TestAuthSchemeAutoDetectionThroughProxy(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1369,7 +1366,7 @@ func TestBasicFormatCredentialInjection(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1432,7 +1429,7 @@ func TestBasicFormatHTTPSCredentialInjection(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1478,7 +1475,7 @@ func TestBasicFormatValidation(t *testing.T) {
 				},
 			},
 		}
-		_, err := New(context.Background(), cfg, "")
+		_, err := New(context.Background(), cfg, Options{})
 		if err == nil {
 			t.Fatal("expected error for unknown format")
 		}
@@ -1506,7 +1503,7 @@ func TestBasicFormatValidation(t *testing.T) {
 				},
 			},
 		}
-		_, err := New(context.Background(), cfg, "")
+		_, err := New(context.Background(), cfg, Options{})
 		if err != nil {
 			t.Fatalf("format: basic should be accepted for token-exchange: %v", err)
 		}
@@ -1524,7 +1521,7 @@ func TestBasicFormatValidation(t *testing.T) {
 				},
 			},
 		}
-		_, err := New(context.Background(), cfg, "")
+		_, err := New(context.Background(), cfg, Options{})
 		if err == nil {
 			t.Fatal("expected error for basic format with non-Authorization header")
 		}
@@ -1583,7 +1580,6 @@ func TestEnsureAuthScheme(t *testing.T) {
 func TestOTelSpanEventsViaHTTPRequest(t *testing.T) {
 	spanExporter := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExporter))
-	otel.SetTracerProvider(tp)
 	t.Cleanup(func() { tp.Shutdown(context.Background()) })
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1594,12 +1590,15 @@ func TestOTelSpanEventsViaHTTPRequest(t *testing.T) {
 	cfg := &Config{
 		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
 	}
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	handler := proxy.OTelHandler(&healthHandler{next: srv.proxy})
+	handler, err := proxy.NewOTelHandler(&healthHandler{next: srv.proxy}, proxy.OTelOptions{TracerProvider: tp})
+	if err != nil {
+		t.Fatalf("NewOTelHandler: %v", err)
+	}
 	proxyServer := httptest.NewServer(handler)
 	defer proxyServer.Close()
 
@@ -1695,7 +1694,7 @@ func TestLoadCredentials_DedupSharedEnvSource(t *testing.T) {
 		},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1713,7 +1712,7 @@ func TestLoadCredentials_DedupSharedRefreshingSource(t *testing.T) {
 	// the resolveSource override so we can inject a mock RefreshingSource.
 	srv, err := New(context.Background(), &Config{
 		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
-	}, "")
+	}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1828,7 +1827,7 @@ func TestHTTPSTokenExchangeEndToEnd(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1952,7 +1951,7 @@ func TestHTTPSTokenExchangeNoSubject(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -2065,7 +2064,7 @@ func TestHTTPSTokenExchangeProxyAuthSubject(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -2188,7 +2187,7 @@ func TestHTTPSTokenExchangeActorToken(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -2316,7 +2315,7 @@ func TestHTTPSTokenExchangeActorTokenWithAuthTokenMismatchRejected(t *testing.T)
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -2433,7 +2432,7 @@ func TestHTTPSTokenExchangeBasicFormat(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -2537,7 +2536,7 @@ func TestHTTPTokenExchangeRelay(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -2638,7 +2637,7 @@ func TestHTTPTokenExchangeProxyAuthRelay(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -2734,7 +2733,7 @@ func TestHTTPSTokenExchangeFallbackToStatic(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -2838,7 +2837,7 @@ func TestServerStartsPostgresListener(t *testing.T) {
 		},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -2919,7 +2918,7 @@ func TestServerPostgresProxyProtocol(t *testing.T) {
 		},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -3066,7 +3065,7 @@ func TestServerPostgresLogsApplicationName(t *testing.T) {
 				},
 			}
 
-			srv, err := New(context.Background(), cfg, "")
+			srv, err := New(context.Background(), cfg, Options{})
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -3190,7 +3189,7 @@ func TestServerPostgresStartFailureCleansUpHTTP(t *testing.T) {
 		},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -3235,7 +3234,7 @@ func TestServerPostgresRequiresCA(t *testing.T) {
 		Postgres: &PostgresConfig{Port: 0},
 	}
 
-	_, err := New(context.Background(), cfg, "")
+	_, err := New(context.Background(), cfg, Options{})
 	if err == nil {
 		t.Fatal("expected error for postgres listener without CA")
 	}
@@ -3258,95 +3257,12 @@ func TestServerPostgresUnknownResolver(t *testing.T) {
 		},
 	}
 
-	_, err := New(context.Background(), cfg, "")
+	_, err := New(context.Background(), cfg, Options{})
 	if err == nil {
 		t.Fatal("expected error for unknown postgres resolver")
 	}
 	if !strings.Contains(err.Error(), "unknown resolver") {
 		t.Errorf("error = %q, want mention of 'unknown resolver'", err)
-	}
-}
-
-// ── multiHandler (slog fan-out) ───────────────────────────────────────────────
-
-// TestMultiHandler_WithAttrs verifies that WithAttrs propagates to all child
-// handlers, exercising the previously uncovered branch.
-func TestMultiHandler_WithAttrs(t *testing.T) {
-	h1 := slog.NewTextHandler(io.Discard, nil)
-	h2 := slog.NewTextHandler(io.Discard, nil)
-	mh := newMultiHandler(h1, h2)
-
-	derived := mh.WithAttrs([]slog.Attr{slog.String("k", "v")})
-	if derived == nil {
-		t.Fatal("WithAttrs returned nil")
-	}
-	// Derived handler should still respond to Enabled.
-	if !derived.Enabled(context.Background(), slog.LevelInfo) {
-		t.Error("derived handler Enabled(Info) = false, want true")
-	}
-}
-
-// TestMultiHandler_WithGroup verifies that WithGroup propagates to all child
-// handlers.
-func TestMultiHandler_WithGroup(t *testing.T) {
-	h1 := slog.NewTextHandler(io.Discard, nil)
-	mh := newMultiHandler(h1)
-
-	derived := mh.WithGroup("mygroup")
-	if derived == nil {
-		t.Fatal("WithGroup returned nil")
-	}
-	if !derived.Enabled(context.Background(), slog.LevelInfo) {
-		t.Error("derived handler Enabled(Info) = false, want true")
-	}
-}
-
-// fakeSlogHandler is a minimal slog.Handler that records every record it
-// receives, for observing what actually reaches a handler in tests.
-type fakeSlogHandler struct {
-	records []slog.Record
-}
-
-func (f *fakeSlogHandler) Enabled(context.Context, slog.Level) bool { return true }
-
-func (f *fakeSlogHandler) Handle(_ context.Context, r slog.Record) error {
-	f.records = append(f.records, r)
-	return nil
-}
-
-func (f *fakeSlogHandler) WithAttrs([]slog.Attr) slog.Handler { return f }
-func (f *fakeSlogHandler) WithGroup(string) slog.Handler      { return f }
-
-// TestOTelDiagnosticFilter_KeepsBridgeOutOfLoop encodes the fix for #48:
-// gatekeeper's own OTel diagnostics (logOTelError's DEBUG record on a
-// failed export) must never reach the otelslog bridge handler, or the
-// diagnostic itself gets enqueued into the same failing OTel log-export
-// pipeline — producing another diagnostic on the next failed attempt, and
-// so on indefinitely while a collector is unreachable. The console handler
-// must still see every record, marked or not.
-func TestOTelDiagnosticFilter_KeepsBridgeOutOfLoop(t *testing.T) {
-	var console, bridge fakeSlogHandler
-	handler := newMultiHandler(&console, newOTelDiagnosticFilter(&bridge))
-	logger := slog.New(handler)
-
-	logger.Debug("otel error", "error", "dial tcp [::1]:4318: connect: connection refused", OTelDiagnosticKey, true)
-	logger.Info("normal request", "host", "example.com")
-	// A record carrying the key set to false is not a diagnostic and must
-	// still reach the bridge — the filter keys off the value, not mere
-	// presence of the attribute.
-	logger.Info("opted-in request", "host", "example.com", OTelDiagnosticKey, false)
-
-	if got := len(console.records); got != 3 {
-		t.Fatalf("console handler received %d records, want 3 (all records)", got)
-	}
-	if got := len(bridge.records); got != 2 {
-		t.Fatalf("bridge handler received %d records, want 2 (only the true-marked diagnostic is filtered out)", got)
-	}
-	if got := bridge.records[0].Message; got != "normal request" {
-		t.Errorf("bridge handler's first surviving record = %q, want %q", got, "normal request")
-	}
-	if got := bridge.records[1].Message; got != "opted-in request" {
-		t.Errorf("bridge handler's second surviving record = %q, want %q (key=false must pass through)", got, "opted-in request")
 	}
 }
 
@@ -3424,7 +3340,7 @@ func TestHTTPSTokenExchangeOutrankedByStatic(t *testing.T) {
 		Network: NetworkConfig{Policy: "permissive"},
 	}
 
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -3554,7 +3470,7 @@ func (g gateSource) Type() string { return "gate" }
 // one put 1.5 s between container start and the listener.
 func TestLoadCredentials_FetchesDistinctSourcesConcurrently(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
+		srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -3612,7 +3528,7 @@ func (f failAfterSource) Fetch(ctx context.Context) (string, error) {
 func (f failAfterSource) Type() string { return "fail" }
 
 func TestLoadCredentials_FetchFailureNamesTheFirstFailingCredentialInConfigOrder(t *testing.T) {
-	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
+	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3648,7 +3564,7 @@ func (c closeTrackingSource) Type() string { return "close-tracking" }
 func (c closeTrackingSource) Close() error { c.closed.Add(1); return nil }
 
 func TestLoadCredentials_ClosesEveryBuiltSourceWhenAFetchFails(t *testing.T) {
-	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
+	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3688,7 +3604,7 @@ func (p inflightSource) Type() string { return "inflight" }
 
 func TestLoadCredentials_BoundsConcurrentFetches(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
+		srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -3716,7 +3632,7 @@ func TestLoadCredentials_BoundsConcurrentFetches(t *testing.T) {
 }
 
 func TestLoadCredentials_ClosesPostgresResolversWhenALaterFetchFails(t *testing.T) {
-	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, "")
+	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3758,7 +3674,7 @@ func startNeonRelay(t *testing.T, pg *PostgresCredentialConfig, neonAPI string) 
 			Source:   SourceConfig{Type: "static", Value: "neon-api-key"},
 		}},
 	}
-	srv, err := New(context.Background(), cfg, "")
+	srv, err := New(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -3886,8 +3802,45 @@ func TestPostgresCredentialProjectEnv_RejectsProjectAndProjectEnv(t *testing.T) 
 			Source:   SourceConfig{Type: "static", Value: "k"},
 		}},
 	}
-	_, err := New(context.Background(), cfg, "")
+	_, err := New(context.Background(), cfg, Options{})
 	if err == nil || !strings.Contains(err.Error(), "project_env") {
 		t.Fatalf("New error = %v, want one naming project_env", err)
+	}
+}
+
+func TestNewLeavesProcessLoggerAlone(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	mine := slog.New(slog.NewTextHandler(io.Discard, nil))
+	slog.SetDefault(mine)
+
+	cfg := &Config{
+		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
+		Log:   LogConfig{Level: "debug", Format: "json"},
+	}
+	if _, err := New(context.Background(), cfg, Options{}); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if slog.Default() != mine {
+		t.Error("New replaced the embedding program's slog default logger")
+	}
+}
+
+func TestNewLogsToOptionsLogger(t *testing.T) {
+	var buf syncLogBuffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	cfg := &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}
+	srv, err := New(context.Background(), cfg, Options{Version: "v9.9.9", Logger: logger})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+
+	got := buf.String()
+	if !strings.Contains(got, `msg="gatekeeper listening"`) || !strings.Contains(got, "version=v9.9.9") {
+		t.Errorf("Options.Logger output = %q, want the startup line with version", got)
 	}
 }

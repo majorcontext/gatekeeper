@@ -96,7 +96,7 @@ func newRefreshServer(t *testing.T, result error) (*Server, *blockingSource, *re
 	}
 	srv, err := New(context.Background(), &Config{
 		Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"},
-	}, "")
+	}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

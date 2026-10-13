@@ -55,7 +55,7 @@ credentialsource/   Pluggable credential backends
   httputil.go        Shared bounded token-response reader (readTokenResponse)
   jwt.go             Shared RS256 JWT signing (signRS256JWT)
 
-cmd/gatekeeper/     CLI entry point (--config flag)
+cmd/gatekeeper/     CLI entry point (--config flag), logging setup (logging.go), OTel providers (main.go)
 
 examples/           Sample config, CA generation script, and test harness
 ```
@@ -86,10 +86,10 @@ The `HostGateway` field in `RunContextData` maps a synthetic hostname (used insi
 
 OTel integration uses a callback-based architecture — the proxy core (`proxy/proxy.go`) has no OTel imports. Instrumentation is layered on externally:
 
-- **`proxy.OTelHandler`** wraps the proxy as HTTP middleware, creating root spans and recording request duration/count metrics. Its `statusRecorder` implements `http.Hijacker` so CONNECT requests still work after hijack.
+- **`proxy.NewOTelHandler`** wraps the proxy as HTTP middleware, creating root spans and recording request duration/count metrics. Its `statusRecorder` implements `http.Hijacker` so CONNECT requests still work after hijack.
 - **Request/policy loggers** (set in `gatekeeper.go`) attach span events and record credential injection/policy denial metrics via exported functions `proxy.RecordCredentialInjection` and `proxy.RecordPolicyDenial`.
-- **slog bridge** — `gatekeeper.go` uses a `multiHandler` to fan out log records to both the configured slog handler and `otelslog.NewHandler`, correlating logs with trace context.
-- **Provider setup** — `cmd/gatekeeper/main.go` creates OTLP HTTP exporters for traces, metrics, and logs, registering them as global providers, unless the standard `OTEL_SDK_DISABLED=true` env var is set (case-insensitive), in which case no exporters or providers are created at all. A dedicated OTel error handler (`logOTelError`, `main.go:31-54`) logs SDK/export failures — e.g. no collector reachable — at DEBUG instead of letting them fall through to the OTel SDK's default handler, which routes through the standard `log` package and, once `slog.SetDefault` rewires it, would otherwise flood the canonical request log at INFO. All configuration is via standard `OTEL_*` env vars (no YAML knobs).
+- **slog bridge** — `cmd/gatekeeper/logging.go` uses a `multiHandler` to fan out log records to both the configured slog handler and `otelslog.NewHandler`, correlating logs with trace context.
+- **Provider setup** — `cmd/gatekeeper/main.go` creates OTLP HTTP exporters for traces, metrics, and logs, registering them as global providers, unless the standard `OTEL_SDK_DISABLED=true` env var is set (case-insensitive), in which case no exporters or providers are created at all. A dedicated OTel error handler (`logOTelError` in `cmd/gatekeeper/main.go`) logs SDK/export failures — e.g. no collector reachable — at DEBUG instead of letting them fall through to the OTel SDK's default handler, which routes through the standard `log` package and, once `slog.SetDefault` rewires it, would otherwise flood the canonical request log at INFO. All configuration is via standard `OTEL_*` env vars (no YAML knobs).
 
 ## Development Commands
 
