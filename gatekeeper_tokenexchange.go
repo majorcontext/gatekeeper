@@ -30,82 +30,40 @@ type tokenExchangeResolverConfig struct {
 }
 
 func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialResolver {
-	src := credentialsource.NewTokenExchangeSource(credentialsource.TokenExchangeConfig{
-		Endpoint:         cfg.Endpoint,
-		ClientID:         cfg.ClientID,
-		ClientSecret:     cfg.ClientSecret,
-		Resource:         cfg.Resource,
-		SubjectTokenType: cfg.SubjectTokenType,
-		ActorTokenType:   cfg.ActorTokenType,
+	resolve := credentialsource.TokenExchangeResolver(credentialsource.TokenExchangeResolverConfig{
+		TokenExchangeConfig: credentialsource.TokenExchangeConfig{
+			Endpoint:         cfg.Endpoint,
+			ClientID:         cfg.ClientID,
+			ClientSecret:     cfg.ClientSecret,
+			Resource:         cfg.Resource,
+			SubjectTokenType: cfg.SubjectTokenType,
+			ActorTokenType:   cfg.ActorTokenType,
+		},
+		SubjectHeader:  cfg.SubjectHeader,
+		SubjectFrom:    cfg.SubjectFrom,
+		ActorTokenFrom: cfg.ActorTokenFrom,
+		BotSubject:     cfg.BotSubject,
+		Grant:          cfg.Grant,
+		Header:         cfg.Header,
+		Prefix:         cfg.Prefix,
+		Format:         cfg.Format,
+		ProxyAuth:      extractProxyAuthCredentials,
+		RequestID:      proxy.RequestIDFromContext,
+		AuthValue:      ensureAuthScheme,
 	})
-
-	header := cfg.Header
-	if header == "" {
-		header = "Authorization"
-	}
-
 	return func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]proxy.CredentialHeader, error) {
-		var subject, actorToken string
-		switch cfg.SubjectFrom {
-		case "proxy-auth":
-			var password string
-			subject, password = extractProxyAuthCredentials(proxyReq)
-			if cfg.ActorTokenFrom == "proxy-auth-password" {
-				if password == "" {
-					return nil, fmt.Errorf("actor_token_from %q requires a proxy auth password", cfg.ActorTokenFrom)
-				}
-				actorToken = password
-			}
-		default:
-			// This deletion is declared to the proxy by
-			// credentialResolverStripHeaders — keep the two in sync.
-			subject = innerReq.Header.Get(cfg.SubjectHeader)
-			if subject != "" {
-				innerReq.Header.Del(cfg.SubjectHeader)
-			}
-		}
-
-		// A configured bot_subject sentinel gets the exact same treatment as
-		// an empty subject: skip the STS round trip entirely and let
-		// getCredentialsForRequest fall through to the next
-		// matching credential for this host -- typically a github-app (bot)
-		// rule. The cfg.BotSubject != "" guard keeps this inert when
-		// unconfigured (the zero value, every config written before this
-		// field existed) -- an empty BotSubject must never match subject,
-		// since subject == "" is already handled by the first clause.
-		//
-		// cfg.SubjectFrom == "proxy-auth" is load-bearing, not incidental:
-		// without it, subject_header mode -- a header ANY caller sets
-		// (self-asserted, no authentication of its own) -- would let a
-		// caller simply send the configured sentinel value in that header
-		// to skip the STS and fall through to the (typically broader)
-		// credential below, bypassing per-subject authentication for the
-		// host entirely. resolveTokenExchange additionally rejects
-		// bot_subject configured outside subject_from: proxy-auth at
-		// config-load time (belt and suspenders for a credential-injection
-		// path); this runtime check is the second layer, so the property
-		// holds even for a resolver built some other way. See
-		// TestNewTokenExchangeResolver_BotSubjectIgnoredOutsideProxyAuthMode.
-		if subject == "" || (cfg.SubjectFrom == "proxy-auth" && cfg.BotSubject != "" && subject == cfg.BotSubject) {
-			return nil, nil
-		}
-
-		token, err := src.Resolve(ctx, subject, actorToken, proxy.RequestIDFromContext(ctx))
+		headers, err := resolve(ctx, proxyReq, innerReq, host)
 		if err != nil {
 			return nil, err
 		}
-
-		value := ensureAuthScheme(token, cfg.Prefix, cfg.Format)
-
-		return []proxy.CredentialHeader{{
-			Name:  header,
-			Value: value,
-			Grant: cfg.Grant,
-			// The destination rejecting this token means the credential behind
-			// the exchange was rotated or re-authorized; drop the cached copy so
-			// the next request exchanges afresh. The source rate-limits this.
-			Invalidate: func() { src.Invalidate(subject, actorToken) },
-		}}, nil
+		if headers == nil {
+			return nil, nil
+		}
+		out := make([]proxy.CredentialHeader, len(headers))
+		for i, h := range headers {
+			out[i] = proxy.CredentialHeader{Name: h.Name, Value: h.Value, Grant: h.Grant, Invalidate: h.Invalidate}
+		}
+		return out, nil
 	}
 }
 
@@ -129,21 +87,6 @@ func extractProxyAuthCredentials(r *http.Request) (username, password string) {
 		return "", ""
 	}
 	return u, p
-}
-
-// credentialResolverStripHeaders returns the request headers a dynamic
-// credential's resolver consumes and removes, for declaration at
-// registration time. For token-exchange sources this is the configured
-// subject header (empty when the subject comes from proxy auth). This list
-// must name exactly the headers newTokenExchangeResolver's resolver deletes
-// from innerReq — if a future resolver-backed source type removes request
-// headers, it must be added here too, or the proxy will skip its
-// sanitization when the resolver is outranked by a static credential.
-func credentialResolverStripHeaders(cred CredentialConfig) []string {
-	if cred.Source.Type == "token-exchange" && cred.Source.SubjectHeader != "" {
-		return []string{cred.Source.SubjectHeader}
-	}
-	return nil
 }
 
 func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, error) {
@@ -177,7 +120,7 @@ func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, erro
 		// fall through to the credential below (typically broader, e.g. a
 		// github-app bot rule), bypassing per-subject authentication for
 		// the host entirely. Config-time rejection here is the first of
-		// two layers; newTokenExchangeResolver's own runtime check on
+		// two layers; credentialsource.TokenExchangeResolver's own runtime check on
 		// cfg.SubjectFrom == "proxy-auth" is the second, so the property
 		// holds even for a resolver built some other way than through this
 		// function.
@@ -223,4 +166,11 @@ func resolveTokenExchange(cred CredentialConfig) (proxy.CredentialResolver, erro
 		Prefix:           cred.Prefix,
 		Format:           cred.Format,
 	}), nil
+}
+
+func tokenExchangeStripHeaders(cred CredentialConfig) []string {
+	if cred.Source.Type != "token-exchange" {
+		return nil
+	}
+	return credentialsource.TokenExchangeStripHeaders(cred.Source.SubjectHeader)
 }

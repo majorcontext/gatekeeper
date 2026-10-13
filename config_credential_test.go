@@ -18,9 +18,9 @@ func TestResolveSourceEnv(t *testing.T) {
 	const key = "MOAT_TEST_RESOLVE_ENV"
 	t.Setenv(key, "token-abc")
 
-	src, err := ResolveSource(SourceConfig{Type: "env", Var: key})
+	src, err := resolveSource(SourceConfig{Type: "env", Var: key})
 	if err != nil {
-		t.Fatalf("ResolveSource() error: %v", err)
+		t.Fatalf("resolveSource() error: %v", err)
 	}
 	if src.Type() != "env" {
 		t.Fatalf("Type() = %q, want %q", src.Type(), "env")
@@ -35,16 +35,16 @@ func TestResolveSourceEnv(t *testing.T) {
 }
 
 func TestResolveSourceEnvMissingVar(t *testing.T) {
-	_, err := ResolveSource(SourceConfig{Type: "env"})
+	_, err := resolveSource(SourceConfig{Type: "env"})
 	if err == nil {
 		t.Fatal("expected error for missing var field, got nil")
 	}
 }
 
 func TestResolveSourceStatic(t *testing.T) {
-	src, err := ResolveSource(SourceConfig{Type: "static", Value: "my-key"})
+	src, err := resolveSource(SourceConfig{Type: "static", Value: "my-key"})
 	if err != nil {
-		t.Fatalf("ResolveSource() error: %v", err)
+		t.Fatalf("resolveSource() error: %v", err)
 	}
 	if src.Type() != "static" {
 		t.Fatalf("Type() = %q, want %q", src.Type(), "static")
@@ -59,35 +59,35 @@ func TestResolveSourceStatic(t *testing.T) {
 }
 
 func TestResolveSourceStaticEmptyValue(t *testing.T) {
-	_, err := ResolveSource(SourceConfig{Type: "static"})
+	_, err := resolveSource(SourceConfig{Type: "static"})
 	if err == nil {
 		t.Fatal("expected error for empty static value, got nil")
 	}
 }
 
 func TestResolveSourceUnknown(t *testing.T) {
-	_, err := ResolveSource(SourceConfig{Type: "vault"})
+	_, err := resolveSource(SourceConfig{Type: "vault"})
 	if err == nil {
 		t.Fatal("expected error for unknown type, got nil")
 	}
 }
 
 func TestResolveSourceAWSMissingSecret(t *testing.T) {
-	_, err := ResolveSource(SourceConfig{Type: "aws-secretsmanager"})
+	_, err := resolveSource(SourceConfig{Type: "aws-secretsmanager"})
 	if err == nil {
 		t.Fatal("expected error for missing secret field, got nil")
 	}
 }
 
 func TestResolveSourceGCPMissingSecret(t *testing.T) {
-	_, err := ResolveSource(SourceConfig{Type: "gcp-secretmanager", Project: "my-project"})
+	_, err := resolveSource(SourceConfig{Type: "gcp-secretmanager", Project: "my-project"})
 	if err == nil {
 		t.Fatal("expected error for missing secret field, got nil")
 	}
 }
 
 func TestResolveSourceGCPMissingProject(t *testing.T) {
-	_, err := ResolveSource(SourceConfig{Type: "gcp-secretmanager", Secret: "my-secret"})
+	_, err := resolveSource(SourceConfig{Type: "gcp-secretmanager", Secret: "my-secret"})
 	if err == nil {
 		t.Fatal("expected error for missing project field, got nil")
 	}
@@ -112,7 +112,7 @@ func TestResolveSourceGCPExtraneousFields(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := ResolveSource(tt.cfg)
+			_, err := resolveSource(tt.cfg)
 			if err == nil {
 				t.Fatal("expected error for extraneous fields")
 			}
@@ -154,7 +154,7 @@ func TestResolveSourceExtraneousFields(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := ResolveSource(tt.cfg)
+			_, err := resolveSource(tt.cfg)
 			if err == nil {
 				t.Fatal("expected error for extraneous fields")
 			}
@@ -176,14 +176,14 @@ func TestResolveSourceGitHubApp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	src, err := ResolveSource(SourceConfig{
+	src, err := resolveSource(SourceConfig{
 		Type:           "github-app",
 		AppID:          "12345",
 		InstallationID: "67890",
 		PrivateKeyPath: keyFile,
 	})
 	if err != nil {
-		t.Fatalf("ResolveSource: %v", err)
+		t.Fatalf("resolveSource: %v", err)
 	}
 	if src.Type() != "github-app" {
 		t.Errorf("Type() = %q, want github-app", src.Type())
@@ -201,14 +201,14 @@ func TestResolveSourceGitHubAppFromEnv(t *testing.T) {
 	})
 	t.Setenv("TEST_GH_APP_KEY", string(keyPEM))
 
-	src, err := ResolveSource(SourceConfig{
+	src, err := resolveSource(SourceConfig{
 		Type:           "github-app",
 		AppID:          "12345",
 		InstallationID: "67890",
 		PrivateKeyEnv:  "TEST_GH_APP_KEY",
 	})
 	if err != nil {
-		t.Fatalf("ResolveSource: %v", err)
+		t.Fatalf("resolveSource: %v", err)
 	}
 	if src.Type() != "github-app" {
 		t.Errorf("Type() = %q, want github-app", src.Type())
@@ -216,7 +216,7 @@ func TestResolveSourceGitHubAppFromEnv(t *testing.T) {
 }
 
 func TestResolveSourceGitHubAppMissingAppID(t *testing.T) {
-	_, err := ResolveSource(SourceConfig{
+	_, err := resolveSource(SourceConfig{
 		Type:           "github-app",
 		InstallationID: "67890",
 		PrivateKeyEnv:  "X",
@@ -227,7 +227,7 @@ func TestResolveSourceGitHubAppMissingAppID(t *testing.T) {
 }
 
 func TestResolveSourceGitHubAppMissingInstallationID(t *testing.T) {
-	_, err := ResolveSource(SourceConfig{
+	_, err := resolveSource(SourceConfig{
 		Type:          "github-app",
 		AppID:         "12345",
 		PrivateKeyEnv: "X",
@@ -238,7 +238,7 @@ func TestResolveSourceGitHubAppMissingInstallationID(t *testing.T) {
 }
 
 func TestResolveSourceGitHubAppNoKey(t *testing.T) {
-	_, err := ResolveSource(SourceConfig{
+	_, err := resolveSource(SourceConfig{
 		Type:           "github-app",
 		AppID:          "12345",
 		InstallationID: "67890",
@@ -249,7 +249,7 @@ func TestResolveSourceGitHubAppNoKey(t *testing.T) {
 }
 
 func TestResolveSourceGitHubAppBothKeys(t *testing.T) {
-	_, err := ResolveSource(SourceConfig{
+	_, err := resolveSource(SourceConfig{
 		Type:           "github-app",
 		AppID:          "12345",
 		InstallationID: "67890",
@@ -276,7 +276,7 @@ func TestResolveSourceGitHubAppExtraneousFields(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := ResolveSource(tt.cfg)
+			_, err := resolveSource(tt.cfg)
 			if err == nil {
 				t.Fatal("expected error for extraneous fields")
 			}
@@ -314,13 +314,13 @@ func TestResolveSourceGCPServiceAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	src, err := ResolveSource(SourceConfig{
+	src, err := resolveSource(SourceConfig{
 		Type:           "gcp-service-account",
 		PrivateKeyPath: keyFile,
 		Scopes:         "https://www.googleapis.com/auth/devstorage.read_write",
 	})
 	if err != nil {
-		t.Fatalf("ResolveSource: %v", err)
+		t.Fatalf("resolveSource: %v", err)
 	}
 	if src.Type() != "gcp-service-account" {
 		t.Errorf("Type() = %q, want gcp-service-account", src.Type())
@@ -330,12 +330,12 @@ func TestResolveSourceGCPServiceAccount(t *testing.T) {
 func TestResolveSourceGCPServiceAccountFromEnv(t *testing.T) {
 	t.Setenv("TEST_GCP_SA_KEY", string(testGCPSAKeyJSON(t)))
 
-	src, err := ResolveSource(SourceConfig{
+	src, err := resolveSource(SourceConfig{
 		Type:          "gcp-service-account",
 		PrivateKeyEnv: "TEST_GCP_SA_KEY",
 	})
 	if err != nil {
-		t.Fatalf("ResolveSource: %v", err)
+		t.Fatalf("resolveSource: %v", err)
 	}
 	if src.Type() != "gcp-service-account" {
 		t.Errorf("Type() = %q, want gcp-service-account", src.Type())
@@ -343,7 +343,7 @@ func TestResolveSourceGCPServiceAccountFromEnv(t *testing.T) {
 }
 
 func TestResolveSourceGCPServiceAccountNoKey(t *testing.T) {
-	_, err := ResolveSource(SourceConfig{Type: "gcp-service-account"})
+	_, err := resolveSource(SourceConfig{Type: "gcp-service-account"})
 	if err == nil {
 		t.Fatal("expected error when no key location is set")
 	}
@@ -360,7 +360,7 @@ func TestResolveSourceGCPServiceAccountMultipleKeyLocations(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := ResolveSource(tt.cfg)
+			_, err := resolveSource(tt.cfg)
 			if err == nil {
 				t.Fatal("expected error for multiple key locations")
 			}
@@ -369,14 +369,14 @@ func TestResolveSourceGCPServiceAccountMultipleKeyLocations(t *testing.T) {
 }
 
 func TestResolveSourceGCPServiceAccountSecretWithoutProject(t *testing.T) {
-	_, err := ResolveSource(SourceConfig{Type: "gcp-service-account", Secret: "s"})
+	_, err := resolveSource(SourceConfig{Type: "gcp-service-account", Secret: "s"})
 	if err == nil {
 		t.Fatal("expected error for secret without project")
 	}
 }
 
 func TestResolveSourceGCPServiceAccountProjectWithoutSecret(t *testing.T) {
-	_, err := ResolveSource(SourceConfig{Type: "gcp-service-account", PrivateKeyEnv: "E", Project: "pr"})
+	_, err := resolveSource(SourceConfig{Type: "gcp-service-account", PrivateKeyEnv: "E", Project: "pr"})
 	if err == nil {
 		t.Fatal("expected error for project without secret")
 	}
@@ -399,7 +399,7 @@ func TestResolveSourceGCPServiceAccountExtraneousFields(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := ResolveSource(tt.cfg)
+			_, err := resolveSource(tt.cfg)
 			if err == nil {
 				t.Fatal("expected error for extraneous fields")
 			}
@@ -420,7 +420,7 @@ func TestResolveSourceScopesExtraneousOnOtherTypes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := ResolveSource(tt.cfg)
+			_, err := resolveSource(tt.cfg)
 			if err == nil {
 				t.Fatal("expected error for extraneous scopes field")
 			}
@@ -447,9 +447,9 @@ func TestResolveSourceBotSubjectExtraneousOnAllTypes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := ResolveSource(tt.cfg)
+			_, err := resolveSource(tt.cfg)
 			if err == nil {
-				t.Fatalf("ResolveSource(%+v) = nil error, want an error for extraneous bot_subject", tt.cfg)
+				t.Fatalf("resolveSource(%+v) = nil error, want an error for extraneous bot_subject", tt.cfg)
 			}
 			// Must fail specifically on the extraneous-fields check, not
 			// incidentally on something else (e.g. github-app/
@@ -458,14 +458,14 @@ func TestResolveSourceBotSubjectExtraneousOnAllTypes(t *testing.T) {
 			// did NOT fire first -- that would be a false pass that
 			// doesn't actually prove bot_subject is rejected).
 			if !strings.Contains(err.Error(), "extraneous") {
-				t.Errorf("ResolveSource(%+v) error = %q, want it to mention 'extraneous' (must be rejected by the extraneous-fields check itself, not some other validation)", tt.cfg, err)
+				t.Errorf("resolveSource(%+v) error = %q, want it to mention 'extraneous' (must be rejected by the extraneous-fields check itself, not some other validation)", tt.cfg, err)
 			}
 		})
 	}
 }
 
 func TestResolveSourceTokenExchangeScopesExtraneous(t *testing.T) {
-	_, _, err := ResolveCredentialSource(CredentialConfig{
+	_, _, err := resolveCredentialSource(CredentialConfig{
 		Host: "api.github.com",
 		Source: SourceConfig{
 			Type:          "token-exchange",
@@ -482,7 +482,7 @@ func TestResolveSourceTokenExchangeScopesExtraneous(t *testing.T) {
 }
 
 func TestResolveSourceTokenExchangeMissingEndpoint(t *testing.T) {
-	_, _, err := ResolveCredentialSource(CredentialConfig{
+	_, _, err := resolveCredentialSource(CredentialConfig{
 		Host: "api.github.com",
 		Source: SourceConfig{
 			Type:            "token-exchange",
@@ -498,7 +498,7 @@ func TestResolveSourceTokenExchangeMissingEndpoint(t *testing.T) {
 }
 
 func TestResolveSourceTokenExchangeMissingClientID(t *testing.T) {
-	_, _, err := ResolveCredentialSource(CredentialConfig{
+	_, _, err := resolveCredentialSource(CredentialConfig{
 		Host: "api.github.com",
 		Source: SourceConfig{
 			Type:            "token-exchange",
@@ -513,7 +513,7 @@ func TestResolveSourceTokenExchangeMissingClientID(t *testing.T) {
 }
 
 func TestResolveSourceTokenExchangeNoSecret(t *testing.T) {
-	_, _, err := ResolveCredentialSource(CredentialConfig{
+	_, _, err := resolveCredentialSource(CredentialConfig{
 		Host: "api.github.com",
 		Source: SourceConfig{
 			Type:          "token-exchange",
@@ -529,7 +529,7 @@ func TestResolveSourceTokenExchangeNoSecret(t *testing.T) {
 
 func TestResolveSourceTokenExchangeValid(t *testing.T) {
 	t.Setenv("TEST_TE_SECRET", "my-secret")
-	_, resolver, err := ResolveCredentialSource(CredentialConfig{
+	_, resolver, err := resolveCredentialSource(CredentialConfig{
 		Host: "api.github.com",
 		Source: SourceConfig{
 			Type:            "token-exchange",
@@ -542,7 +542,7 @@ func TestResolveSourceTokenExchangeValid(t *testing.T) {
 		Grant: "github",
 	})
 	if err != nil {
-		t.Fatalf("ResolveCredentialSource: %v", err)
+		t.Fatalf("resolveCredentialSource: %v", err)
 	}
 	if resolver == nil {
 		t.Fatal("expected non-nil resolver for token-exchange type")
@@ -551,7 +551,7 @@ func TestResolveSourceTokenExchangeValid(t *testing.T) {
 
 func TestResolveSourceTokenExchangeSubjectFromProxyAuth(t *testing.T) {
 	t.Setenv("TEST_TE_SECRET_PXA", "s")
-	_, resolver, err := ResolveCredentialSource(CredentialConfig{
+	_, resolver, err := resolveCredentialSource(CredentialConfig{
 		Host: "api.github.com",
 		Source: SourceConfig{
 			Type:            "token-exchange",
@@ -564,7 +564,7 @@ func TestResolveSourceTokenExchangeSubjectFromProxyAuth(t *testing.T) {
 		Grant: "github",
 	})
 	if err != nil {
-		t.Fatalf("ResolveCredentialSource: %v", err)
+		t.Fatalf("resolveCredentialSource: %v", err)
 	}
 	if resolver == nil {
 		t.Fatal("expected non-nil resolver for token-exchange with subject_from")
@@ -573,7 +573,7 @@ func TestResolveSourceTokenExchangeSubjectFromProxyAuth(t *testing.T) {
 
 func TestResolveSourceTokenExchangeSubjectFromAndHeaderConflict(t *testing.T) {
 	t.Setenv("TEST_TE_SECRET_CONFLICT", "s")
-	_, _, err := ResolveCredentialSource(CredentialConfig{
+	_, _, err := resolveCredentialSource(CredentialConfig{
 		Host: "api.github.com",
 		Source: SourceConfig{
 			Type:            "token-exchange",
@@ -591,7 +591,7 @@ func TestResolveSourceTokenExchangeSubjectFromAndHeaderConflict(t *testing.T) {
 
 func TestResolveSourceTokenExchangeSubjectFromInvalid(t *testing.T) {
 	t.Setenv("TEST_TE_SECRET_INVALID", "s")
-	_, _, err := ResolveCredentialSource(CredentialConfig{
+	_, _, err := resolveCredentialSource(CredentialConfig{
 		Host: "api.github.com",
 		Source: SourceConfig{
 			Type:            "token-exchange",
@@ -608,7 +608,7 @@ func TestResolveSourceTokenExchangeSubjectFromInvalid(t *testing.T) {
 
 func TestResolveSourceTokenExchangeNoSubjectSource(t *testing.T) {
 	t.Setenv("TEST_TE_SECRET_NOSRC", "s")
-	_, _, err := ResolveCredentialSource(CredentialConfig{
+	_, _, err := resolveCredentialSource(CredentialConfig{
 		Host: "api.github.com",
 		Source: SourceConfig{
 			Type:            "token-exchange",
@@ -641,7 +641,7 @@ func TestResolveSourceTokenExchangeExtraneousFields(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := ResolveCredentialSource(CredentialConfig{
+			_, _, err := resolveCredentialSource(CredentialConfig{
 				Host:   "api.github.com",
 				Source: tt.cfg,
 			})
@@ -653,9 +653,9 @@ func TestResolveSourceTokenExchangeExtraneousFields(t *testing.T) {
 }
 
 func TestResolveSourceProcess(t *testing.T) {
-	src, err := ResolveSource(SourceConfig{Type: "process", Command: "printf 'proc-token'"})
+	src, err := resolveSource(SourceConfig{Type: "process", Command: "printf 'proc-token'"})
 	if err != nil {
-		t.Fatalf("ResolveSource() error: %v", err)
+		t.Fatalf("resolveSource() error: %v", err)
 	}
 	if src.Type() != "process" {
 		t.Fatalf("Type() = %q, want %q", src.Type(), "process")
@@ -670,9 +670,9 @@ func TestResolveSourceProcess(t *testing.T) {
 }
 
 func TestResolveSourceProcessTTL(t *testing.T) {
-	src, err := ResolveSource(SourceConfig{Type: "process", Command: "printf 'proc-token'", TTL: "90s"})
+	src, err := resolveSource(SourceConfig{Type: "process", Command: "printf 'proc-token'", TTL: "90s"})
 	if err != nil {
-		t.Fatalf("ResolveSource() error: %v", err)
+		t.Fatalf("resolveSource() error: %v", err)
 	}
 	if _, err := src.Fetch(context.Background()); err != nil {
 		t.Fatalf("Fetch() error: %v", err)
@@ -689,7 +689,7 @@ func TestResolveSourceProcessTTL(t *testing.T) {
 func TestResolveSourceProcessInvalidTTL(t *testing.T) {
 	for _, ttl := range []string{"banana", "-5s", "0s"} {
 		t.Run(ttl, func(t *testing.T) {
-			_, err := ResolveSource(SourceConfig{Type: "process", Command: "printf x", TTL: ttl})
+			_, err := resolveSource(SourceConfig{Type: "process", Command: "printf x", TTL: ttl})
 			if err == nil {
 				t.Fatalf("expected error for ttl %q, got nil", ttl)
 			}
@@ -701,28 +701,28 @@ func TestResolveSourceProcessInvalidTTL(t *testing.T) {
 }
 
 func TestResolveSourceEnvRejectsTTLField(t *testing.T) {
-	_, err := ResolveSource(SourceConfig{Type: "env", Var: "SOME_VAR", TTL: "90s"})
+	_, err := resolveSource(SourceConfig{Type: "env", Var: "SOME_VAR", TTL: "90s"})
 	if err == nil {
 		t.Fatal("expected error: env source must reject the process-only ttl field")
 	}
 }
 
 func TestResolveSourceProcessMissingCommand(t *testing.T) {
-	_, err := ResolveSource(SourceConfig{Type: "process"})
+	_, err := resolveSource(SourceConfig{Type: "process"})
 	if err == nil {
 		t.Fatal("expected error for missing command field, got nil")
 	}
 }
 
 func TestResolveSourceProcessExtraneousField(t *testing.T) {
-	_, err := ResolveSource(SourceConfig{Type: "process", Command: "printf x", Var: "SOME_VAR"})
+	_, err := resolveSource(SourceConfig{Type: "process", Command: "printf x", Var: "SOME_VAR"})
 	if err == nil {
 		t.Fatal("expected error for extraneous field on process source, got nil")
 	}
 }
 
 func TestResolveSourceEnvRejectsCommandField(t *testing.T) {
-	_, err := ResolveSource(SourceConfig{Type: "env", Var: "SOME_VAR", Command: "printf x"})
+	_, err := resolveSource(SourceConfig{Type: "env", Var: "SOME_VAR", Command: "printf x"})
 	if err == nil {
 		t.Fatal("expected error: env source must reject the process-only command field")
 	}

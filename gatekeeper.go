@@ -15,16 +15,12 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/majorcontext/gatekeeper/credentialsource"
 	"github.com/majorcontext/gatekeeper/proxy"
-
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 )
 
 // defaultProxyHost is the default bind address when none is configured.
@@ -75,8 +71,8 @@ type Server struct {
 	stopping         bool        // guarded by mu; set once Stop begins
 	closers          []io.Closer // credential sources that hold resources
 
-	// resolveSource overrides ResolveSource for testing. When non-nil,
-	// loadCredentials calls this instead of ResolveSource.
+	// resolveSource overrides resolveSource for testing. When non-nil,
+	// loadCredentials calls this instead of resolveSource.
 	resolveSource func(SourceConfig) (credentialsource.CredentialSource, error)
 	// neonBaseURL overrides the Neon API base URL for testing.
 	neonBaseURL string
@@ -121,22 +117,8 @@ func New(ctx context.Context, cfg *Config, opts Options) (*Server, error) {
 		cfg:     cfg,
 	}
 
-	// Load TLS CA for HTTPS interception. Without a CA, the proxy cannot
-	// inject credentials into HTTPS requests (CONNECT tunnels pass through).
-	if cfg.TLS.CACert != "" && cfg.TLS.CAKey != "" {
-		certPEM, err := os.ReadFile(cfg.TLS.CACert)
-		if err != nil {
-			return nil, fmt.Errorf("reading CA cert: %w", err)
-		}
-		keyPEM, err := os.ReadFile(cfg.TLS.CAKey)
-		if err != nil {
-			return nil, fmt.Errorf("reading CA key: %w", err)
-		}
-		ca, err := proxy.LoadCA(certPEM, keyPEM)
-		if err != nil {
-			return nil, fmt.Errorf("loading CA: %w", err)
-		}
-		p.SetCA(ca)
+	if err := s.loadCA(cfg); err != nil {
+		return nil, err
 	}
 
 	// The Postgres data-plane listener terminates client TLS with CA-minted
@@ -160,186 +142,37 @@ func New(ctx context.Context, cfg *Config, opts Options) (*Server, error) {
 		return nil, fmt.Errorf("loading credentials: %w", err)
 	}
 
-	// Canonical log line: one wide structured entry per request at completion.
-	// Accumulates all request context (method, host, status, duration,
-	// credentials, policy decisions, sizes) into a single log line for
-	// grep-ability and dashboard extraction.
-	p.SetLogger(func(data proxy.RequestLogData) {
-		durationMS := float64(data.Duration.Nanoseconds()) / 1e6
-		attrs := []slog.Attr{
-			slog.String("request_id", data.RequestID),
-			slog.String("http_method", data.Method),
-			slog.String("http_host", data.Host),
-			slog.String("http_path", data.Path),
-			slog.Int("http_status", data.StatusCode),
-			slog.Float64("duration_ms", durationMS),
-			slog.String("proxy_type", data.RequestType),
-		}
-		if data.RunID != "" {
-			attrs = append(attrs, slog.String("run_id", data.RunID))
-		}
-		if data.UserID != "" {
-			attrs = append(attrs, slog.String("user_id", data.UserID))
-		}
-		if data.ClientAddr != "" {
-			clientIP := data.ClientAddr
-			if host, _, err := net.SplitHostPort(clientIP); err == nil {
-				clientIP = host
-			}
-			attrs = append(attrs, slog.String("client_ip", clientIP))
-		}
-		if data.ApplicationName != "" {
-			// A correlation slug the client set (e.g. via PGAPPNAME), not a
-			// trusted identity — run_id, above, is the trusted identity.
-			attrs = append(attrs, slog.String("application_name", data.ApplicationName))
-		}
-		if data.AuthInjected {
-			attrs = append(attrs, slog.Bool("credential_injected", true))
-			var headerNames []string
-			for name := range data.InjectedHeaders {
-				headerNames = append(headerNames, name)
-			}
-			slices.Sort(headerNames)
-			attrs = append(attrs, slog.String("injected_headers", strings.Join(headerNames, ",")))
-			if len(data.Grants) > 0 {
-				sortedGrants := slices.Clone(data.Grants)
-				slices.Sort(sortedGrants)
-				attrs = append(attrs, slog.String("grants", strings.Join(sortedGrants, ",")))
-			}
-		}
-		if data.Denied {
-			attrs = append(attrs, slog.Bool("denied", true))
-			attrs = append(attrs, slog.String("deny_reason", data.DenyReason))
-		}
-		if data.RequestSize >= 0 {
-			attrs = append(attrs, slog.Int64("request_size", data.RequestSize))
-		}
-		if data.ResponseSize >= 0 {
-			attrs = append(attrs, slog.Int64("response_size", data.ResponseSize))
-		}
-		if data.RequestMessages > 0 {
-			attrs = append(attrs, slog.Int64("request_messages", data.RequestMessages))
-		}
-		if data.ResponseMessages > 0 {
-			attrs = append(attrs, slog.Int64("response_messages", data.ResponseMessages))
-		}
-		if data.Err != nil {
-			attrs = append(attrs, slog.String("error", data.Err.Error()))
-		}
+	s.installLoggers()
 
-		// Append captured request headers as structured log attributes.
-		// SanitizeLogValue bounds and cleans the value the same way
-		// data.ApplicationName above already was — see its doc comment.
-		if data.RequestHeaders != nil {
-			for _, h := range cfg.Log.CaptureHeaders {
-				if v := data.RequestHeaders.Get(h); v != "" {
-					key := strings.ReplaceAll(strings.ToLower(h), "-", "_")
-					attrs = append(attrs, slog.String(key, proxy.SanitizeLogValue(v)))
-				}
-			}
-		}
+	if err := s.configurePolicy(cfg); err != nil {
+		return nil, err
+	}
 
-		level := slog.LevelInfo
-		if data.Err != nil || data.StatusCode >= 500 {
-			level = slog.LevelError
-		} else if data.Denied || data.StatusCode >= 400 {
-			level = slog.LevelWarn
-		}
+	return s, nil
+}
 
-		logCtx := context.Background()
-		if data.Ctx != nil {
-			logCtx = data.Ctx
+func (s *Server) loadCA(cfg *Config) error {
+	// Load TLS CA for HTTPS interception. Without a CA, the proxy cannot
+	// inject credentials into HTTPS requests (CONNECT tunnels pass through).
+	if cfg.TLS.CACert != "" && cfg.TLS.CAKey != "" {
+		certPEM, err := os.ReadFile(cfg.TLS.CACert)
+		if err != nil {
+			return fmt.Errorf("reading CA cert: %w", err)
 		}
-		args := make([]any, len(attrs))
-		for i, a := range attrs {
-			args[i] = a
+		keyPEM, err := os.ReadFile(cfg.TLS.CAKey)
+		if err != nil {
+			return fmt.Errorf("reading CA key: %w", err)
 		}
-		s.log().Log(logCtx, level, "request", args...)
-
-		// OpenTelemetry span enrichment
-		if data.Ctx != nil {
-			span := trace.SpanFromContext(data.Ctx)
-			if span.SpanContext().IsValid() {
-				spanAttrs := []attribute.KeyValue{
-					attribute.String("request_id", data.RequestID),
-					attribute.Float64("duration_ms", durationMS),
-					attribute.Bool("credential_injected", data.AuthInjected),
-					attribute.String("proxy.request.type", data.RequestType),
-					attribute.String("http.host", data.Host),
-				}
-				if data.RunID != "" {
-					spanAttrs = append(spanAttrs, attribute.String("run_id", data.RunID))
-				}
-				if data.UserID != "" {
-					spanAttrs = append(spanAttrs, attribute.String("user_id", data.UserID))
-				}
-				var headerNames []string
-				for name := range data.InjectedHeaders {
-					headerNames = append(headerNames, name)
-				}
-				slices.Sort(headerNames)
-				if len(headerNames) > 0 {
-					spanAttrs = append(spanAttrs, attribute.StringSlice("injected_headers", headerNames))
-				}
-				if len(data.Grants) > 0 {
-					sortedGrants := slices.Clone(data.Grants)
-					slices.Sort(sortedGrants)
-					spanAttrs = append(spanAttrs, attribute.StringSlice("grants", sortedGrants))
-				}
-				if data.Denied {
-					spanAttrs = append(spanAttrs, attribute.Bool("denied", true))
-					spanAttrs = append(spanAttrs, attribute.String("deny_reason", data.DenyReason))
-				}
-				span.AddEvent("request.complete", trace.WithAttributes(spanAttrs...))
-				if data.Err != nil {
-					span.RecordError(data.Err)
-				}
-
-				if data.AuthInjected {
-					for name := range data.InjectedHeaders {
-						proxy.RecordCredentialInjection(data.Ctx, data.Host, name)
-					}
-				}
-			}
+		ca, err := proxy.LoadCA(certPEM, keyPEM)
+		if err != nil {
+			return fmt.Errorf("loading CA: %w", err)
 		}
-	})
+		s.proxy.SetCA(ca)
+	}
+	return nil
+}
 
-	p.SetPolicyLogger(func(data proxy.PolicyLogData) {
-		// A non-blocking entry is something policy noticed and let through. It
-		// is still worth surfacing — a credential bundle whose scope disagrees
-		// with where its client goes shows up here — but counting it as a
-		// denial would page whoever alerts on that rate for traffic nothing
-		// stopped.
-		msg, event := "policy denial", "policy.denial"
-		level := slog.LevelWarn
-		if data.NonBlocking {
-			msg, event = "policy observation", "policy.observation"
-			level = slog.LevelInfo
-		}
-		s.log().Log(context.Background(), level, msg,
-			"run_id", data.RunID,
-			"scope", data.Scope,
-			"operation", data.Operation,
-			"rule", data.Rule,
-			"message", data.Message,
-		)
-
-		if data.Ctx != nil {
-			span := trace.SpanFromContext(data.Ctx)
-			if span.SpanContext().IsValid() {
-				span.AddEvent(event, trace.WithAttributes(
-					attribute.String("scope", data.Scope),
-					attribute.String("operation", data.Operation),
-					attribute.String("rule", data.Rule),
-					attribute.String("message", data.Message),
-				))
-				if !data.NonBlocking {
-					proxy.RecordPolicyDenial(data.Ctx, data.Scope, data.Rule)
-				}
-			}
-		}
-	})
-
+func (s *Server) configurePolicy(cfg *Config) error {
 	// Optional defense-in-depth: require a static token for proxy access.
 	// Clients provide it via Proxy-Authorization header or
 	// HTTP_PROXY=http://user:token@host. The token comes from either the
@@ -347,33 +180,32 @@ func New(ctx context.Context, cfg *Config, opts Options) (*Server, error) {
 	// auth_token_env; resolveProxyAuthToken rejects setting both.
 	authToken, err := resolveProxyAuthToken(cfg.Proxy)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if authToken != "" {
-		p.SetAuthToken(authToken)
+		s.proxy.SetAuthToken(authToken)
 	}
 
 	// actor_token_from requires a non-empty proxy password.
 	for _, cred := range cfg.Credentials {
 		if cred.Source.ActorTokenFrom != "" {
-			p.SetDelegateAuth(true)
+			s.proxy.SetDelegateAuth(true)
 			break
 		}
 	}
 
 	// Configure capture headers if specified.
 	if len(cfg.Log.CaptureHeaders) > 0 {
-		if err := p.SetCaptureHeaders(cfg.Log.CaptureHeaders); err != nil {
-			return nil, fmt.Errorf("capture_headers: %w", err)
+		if err := s.proxy.SetCaptureHeaders(cfg.Log.CaptureHeaders); err != nil {
+			return fmt.Errorf("capture_headers: %w", err)
 		}
 	}
 
 	// Configure network policy if specified.
 	if cfg.Network.Policy != "" {
-		p.SetNetworkPolicy(cfg.Network.Policy, cfg.Network.Allow, nil)
+		s.proxy.SetNetworkPolicy(cfg.Network.Policy, cfg.Network.Allow, nil)
 	}
-
-	return s, nil
+	return nil
 }
 
 // loadCredentials resolves each credential from config and sets it on the proxy.
@@ -466,7 +298,7 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 		} else {
 			var resolver proxy.CredentialResolver
 			var err error
-			src, resolver, err = ResolveCredentialSource(cred)
+			src, resolver, err = resolveCredentialSource(cred)
 			if err != nil {
 				return fmt.Errorf("credential for %s: %w", cred.Host, err)
 			}
@@ -474,7 +306,7 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 				// Declare the subject header so the proxy still strips it
 				// when a better-matched static credential outranks (and
 				// therefore skips) this resolver.
-				s.proxy.SetCredentialResolverWithStripHeaders(cred.Host, allowInsecureResolver(resolver, cred.AllowInsecure), credentialResolverStripHeaders(cred)...)
+				s.proxy.SetCredentialResolverWithStripHeaders(cred.Host, allowInsecureResolver(resolver, cred.AllowInsecure), tokenExchangeStripHeaders(cred)...)
 				continue
 			}
 		}
@@ -553,7 +385,7 @@ func (s *Server) loadPostgresCredential(ctx context.Context, cred CredentialConf
 		if s.resolveSource != nil {
 			return s.resolveSource(cred.Source)
 		}
-		return ResolveSource(cred.Source)
+		return resolveSource(cred.Source)
 	}
 
 	if cred.Postgres.Project != "" && cred.Postgres.ProjectEnv != "" {
