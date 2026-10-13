@@ -210,34 +210,35 @@ func (s *Server) configurePolicy(cfg *Config) error {
 
 // loadCredentials resolves each credential from config and sets it on the proxy.
 //
-// Sources are deduped by SourceConfig: when multiple credentials share the same
-// source (e.g., two hosts using the same github-app), a single Fetch is made at
-// startup and a single background refresh goroutine is registered. The token is
-// applied to all hosts that share the source.
+// Sources are deduped by SourceConfig across header, Postgres, and
+// token-exchange credentials: credentials that share a source share one
+// instance, one startup Fetch, one background refresh goroutine, and (for
+// token exchange) one cache. Sources are built in config order, fetched
+// concurrently (each fetch is a network round trip, and a production config
+// has about a dozen), and applied in config order. The first fetch failure
+// cancels the other fetches. Build errors come before fetch errors, and the
+// fetch error reported is the one that caused the cancellation.
 func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
-	// Dedup sources: same SourceConfig → one Fetch, one refresh goroutine.
-	// Sources are built in config order, fetched concurrently (each fetch is
-	// a network round trip, and a production config has about a dozen), and
-	// applied in config order. Build errors come before fetch errors; among
-	// fetch errors the first credential in the file is the one reported.
 	type pendingSource struct {
-		src credentialsource.CredentialSource
-		val string
-		err error
+		src   credentialsource.CredentialSource
+		fetch bool
+		val   string
+		err   error
 	}
 	type credEntry struct {
 		cred   CredentialConfig
 		header string
 		source *pendingSource
-		first  bool
+		pg     bool
+		neon   *credentialsource.NeonResolver
 	}
 	sources := make(map[SourceConfig]*pendingSource)
+	exchanges := make(map[SourceConfig]*credentialsource.TokenExchangeSource)
 	var unique []*pendingSource
 	var entries []credEntry
+	var neons []io.Closer
 	// New returns no Server on failure, so Stop never runs: release every
-	// source and Postgres resolver built here instead. Header sources join
-	// s.closers only once all of them loaded.
-	closersBase := len(s.closers)
+	// source and Postgres resolver built here instead.
 	defer func() {
 		if err == nil {
 			return
@@ -247,23 +248,69 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 				_ = c.Close()
 			}
 		}
-		for _, c := range s.closers[closersBase:] {
+		for _, c := range neons {
 			_ = c.Close()
 		}
-		s.closers = s.closers[:closersBase]
 	}()
-	var sourceClosers []io.Closer
+
+	sourceFor := func(cred CredentialConfig) (*pendingSource, error) {
+		if ps, ok := sources[cred.Source]; ok {
+			return ps, nil
+		}
+		var (
+			src credentialsource.CredentialSource
+			err error
+		)
+		if s.resolveSource != nil {
+			src, err = s.resolveSource(cred.Source)
+		} else {
+			src, err = resolveSource(cred.Source)
+		}
+		if err != nil {
+			return nil, err
+		}
+		ps := &pendingSource{src: src}
+		sources[cred.Source] = ps
+		unique = append(unique, ps)
+		return ps, nil
+	}
 
 	for _, cred := range cfg.Credentials {
 		if cred.Host == "" {
 			return fmt.Errorf("credential %q: host is required", cred.Grant)
 		}
 
-		// Postgres credentials use the data-plane listener, not HTTP header
-		// injection, so they bypass the header/format logic below.
 		if cred.Postgres != nil {
-			if err := s.loadPostgresCredential(ctx, cred); err != nil {
-				return err
+			if cred.Postgres.Project != "" && cred.Postgres.ProjectEnv != "" {
+				return fmt.Errorf("postgres credential for %s: project and project_env are mutually exclusive", cred.Host)
+			}
+			project := cred.Postgres.Project
+			switch strings.ToLower(cred.Postgres.Resolver) {
+			case "neon":
+				if envName := cred.Postgres.ProjectEnv; envName != "" {
+					if project = os.Getenv(envName); project == "" {
+						s.log().Info("postgres credential skipped: project_env is empty", "host", cred.Host, "project_env", envName)
+						continue
+					}
+				}
+				ps, err := sourceFor(cred)
+				if err != nil {
+					return fmt.Errorf("postgres credential for %s: %w", cred.Host, err)
+				}
+				// Closed on shutdown (before the listener drain) so in-flight
+				// Neon API calls are cancelled rather than holding up the drain.
+				neon := &credentialsource.NeonResolver{APIKey: ps.src, Project: project, BaseURL: s.neonBaseURL}
+				neons = append(neons, neon)
+				entries = append(entries, credEntry{cred: cred, source: ps, pg: true, neon: neon})
+			case "static":
+				ps, err := sourceFor(cred)
+				if err != nil {
+					return fmt.Errorf("postgres credential for %s: %w", cred.Host, err)
+				}
+				ps.fetch = true
+				entries = append(entries, credEntry{cred: cred, source: ps, pg: true})
+			default:
+				return fmt.Errorf("postgres credential for %s: unknown resolver %q (valid values: \"neon\", \"static\")", cred.Host, cred.Postgres.Resolver)
 			}
 			continue
 		}
@@ -281,69 +328,78 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 			return fmt.Errorf("credential for %s: format %q is only supported with the Authorization header", cred.Host, cred.Format)
 		}
 
-		// Reuse a previously built source with the same config, avoiding
-		// redundant source construction (e.g., os.ReadFile for github-app keys).
-		if ps, ok := sources[cred.Source]; ok {
-			entries = append(entries, credEntry{cred: cred, header: header, source: ps})
+		if s.resolveSource == nil && cred.Source.Type == "token-exchange" {
+			resolver, err := resolveSharedTokenExchange(cred, exchanges)
+			if err != nil {
+				return fmt.Errorf("credential for %s: %w", cred.Host, err)
+			}
+			// Declare the subject header so the proxy still strips it
+			// when a better-matched static credential outranks (and
+			// therefore skips) this resolver.
+			s.proxy.SetCredentialResolverWithStripHeaders(cred.Host, allowInsecureResolver(resolver, cred.AllowInsecure), tokenExchangeStripHeaders(cred)...)
 			continue
 		}
 
-		var src credentialsource.CredentialSource
-		if s.resolveSource != nil {
-			var err error
-			src, err = s.resolveSource(cred.Source)
-			if err != nil {
-				return fmt.Errorf("credential for %s: %w", cred.Host, err)
-			}
-		} else {
-			var resolver proxy.CredentialResolver
-			var err error
-			src, resolver, err = resolveCredentialSource(cred)
-			if err != nil {
-				return fmt.Errorf("credential for %s: %w", cred.Host, err)
-			}
-			if resolver != nil {
-				// Declare the subject header so the proxy still strips it
-				// when a better-matched static credential outranks (and
-				// therefore skips) this resolver.
-				s.proxy.SetCredentialResolverWithStripHeaders(cred.Host, allowInsecureResolver(resolver, cred.AllowInsecure), tokenExchangeStripHeaders(cred)...)
-				continue
-			}
+		ps, err := sourceFor(cred)
+		if err != nil {
+			return fmt.Errorf("credential for %s: %w", cred.Host, err)
 		}
-
-		ps := &pendingSource{src: src}
-		sources[cred.Source] = ps
-		unique = append(unique, ps)
-		entries = append(entries, credEntry{cred: cred, header: header, source: ps, first: true})
+		ps.fetch = true
+		entries = append(entries, credEntry{cred: cred, header: header, source: ps})
 	}
 
 	const maxConcurrentFetches = 16
+	fetchCtx, cancelFetches := context.WithCancel(ctx)
+	defer cancelFetches()
 	var wg sync.WaitGroup
+	var firstFailure sync.Once
+	var failed *pendingSource
 	slots := make(chan struct{}, maxConcurrentFetches)
 	for _, ps := range unique {
-		wg.Add(1)
+		if !ps.fetch {
+			continue
+		}
 		slots <- struct{}{}
+		if fetchCtx.Err() != nil {
+			<-slots
+			ps.err = fetchCtx.Err()
+			continue
+		}
+		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer func() { <-slots }()
-			fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			c, cancel := context.WithTimeout(fetchCtx, 10*time.Second)
 			defer cancel()
-			ps.val, ps.err = ps.src.Fetch(fetchCtx)
+			ps.val, ps.err = ps.src.Fetch(c)
+			if ps.err != nil {
+				firstFailure.Do(func() {
+					failed = ps
+					cancelFetches()
+				})
+			}
 		}()
 	}
 	wg.Wait()
 
+	for _, e := range entries {
+		if e.source != nil && e.source.err != nil && (failed == nil || e.source == failed) {
+			return fetchError(e.cred, e.pg, e.source.err)
+		}
+	}
+
 	refreshMap := make(map[*pendingSource]*pendingRefresh)
 	var refreshOrder []*pendingSource
 	for _, e := range entries {
-		if e.source.err != nil {
-			// Never include the credential value in the error.
-			return fmt.Errorf("credential for %s: fetch failed: %w", e.cred.Host, e.source.err)
-		}
-		if e.first {
-			if c, ok := e.source.src.(io.Closer); ok {
-				sourceClosers = append(sourceClosers, c)
+		if e.pg {
+			var resolver proxy.PostgresCredentialResolver
+			if e.neon != nil {
+				resolver = e.neon
+			} else {
+				resolver = proxy.NewStaticPostgresResolver(e.source.val)
 			}
+			s.proxy.SetPostgresResolver(e.cred.Host, resolver)
+			continue
 		}
 
 		// For Authorization headers, ensure the value includes an auth
@@ -366,76 +422,24 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 		}
 	}
 
-	s.closers = append(s.closers, sourceClosers...)
+	for _, ps := range unique {
+		if c, ok := ps.src.(io.Closer); ok {
+			s.closers = append(s.closers, c)
+		}
+	}
+	s.closers = append(s.closers, neons...)
 	for _, ps := range refreshOrder {
 		s.pendingRefreshes = append(s.pendingRefreshes, *refreshMap[ps])
 	}
 	return nil
 }
 
-// loadPostgresCredential resolves a Postgres credential and registers a
-// resolver for its host pattern on the proxy's data-plane listener.
-//
-// The "neon" resolver mints per-branch passwords lazily from the Neon API
-// using the configured Source as the API key; nothing secret is fetched here.
-// The "static" resolver fetches the password once at startup — that value is
-// the database password and must never be logged.
-func (s *Server) loadPostgresCredential(ctx context.Context, cred CredentialConfig) error {
-	buildSource := func() (credentialsource.CredentialSource, error) {
-		if s.resolveSource != nil {
-			return s.resolveSource(cred.Source)
-		}
-		return resolveSource(cred.Source)
+// fetchError never includes the credential value.
+func fetchError(cred CredentialConfig, postgres bool, err error) error {
+	if postgres {
+		return fmt.Errorf("postgres credential for %s: fetch failed: %w", cred.Host, err)
 	}
-
-	if cred.Postgres.Project != "" && cred.Postgres.ProjectEnv != "" {
-		return fmt.Errorf("postgres credential for %s: project and project_env are mutually exclusive", cred.Host)
-	}
-	project := cred.Postgres.Project
-
-	var resolver proxy.PostgresCredentialResolver
-	switch strings.ToLower(cred.Postgres.Resolver) {
-	case "neon":
-		if envName := cred.Postgres.ProjectEnv; envName != "" {
-			if project = os.Getenv(envName); project == "" {
-				s.log().Info("postgres credential skipped: project_env is empty", "host", cred.Host, "project_env", envName)
-				return nil
-			}
-		}
-		src, err := buildSource()
-		if err != nil {
-			return fmt.Errorf("postgres credential for %s: %w", cred.Host, err)
-		}
-		if c, ok := src.(io.Closer); ok {
-			s.closers = append(s.closers, c)
-		}
-		neon := &credentialsource.NeonResolver{APIKey: src, Project: project, BaseURL: s.neonBaseURL}
-		// Closed on shutdown (before the listener drain) so in-flight Neon API
-		// calls are cancelled rather than holding up the drain.
-		s.closers = append(s.closers, neon)
-		resolver = neon
-	case "static":
-		src, err := buildSource()
-		if err != nil {
-			return fmt.Errorf("postgres credential for %s: %w", cred.Host, err)
-		}
-		if c, ok := src.(io.Closer); ok {
-			s.closers = append(s.closers, c)
-		}
-		fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		val, fetchErr := src.Fetch(fetchCtx)
-		cancel()
-		if fetchErr != nil {
-			// Never include the credential value in the error.
-			return fmt.Errorf("postgres credential for %s: fetch failed: %w", cred.Host, fetchErr)
-		}
-		resolver = proxy.NewStaticPostgresResolver(val)
-	default:
-		return fmt.Errorf("postgres credential for %s: unknown resolver %q (valid values: \"neon\", \"static\")", cred.Host, cred.Postgres.Resolver)
-	}
-
-	s.proxy.SetPostgresResolver(cred.Host, resolver)
-	return nil
+	return fmt.Errorf("credential for %s: fetch failed: %w", cred.Host, err)
 }
 
 // startCredentialRefresh starts a background goroutine that periodically

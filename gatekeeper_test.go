@@ -3565,51 +3565,6 @@ func TestLoadCredentials_FetchesDistinctSourcesConcurrently(t *testing.T) {
 	})
 }
 
-// failAfterSource fails once release closes; failNow fails at once.
-type failAfterSource struct {
-	release <-chan struct{}
-	msg     string
-	done    chan<- struct{}
-}
-
-func (f failAfterSource) Fetch(ctx context.Context) (string, error) {
-	if f.release != nil {
-		select {
-		case <-f.release:
-		case <-ctx.Done():
-			return "", ctx.Err()
-		}
-	}
-	if f.done != nil {
-		close(f.done)
-	}
-	return "", errors.New(f.msg)
-}
-
-func (f failAfterSource) Type() string { return "fail" }
-
-func TestLoadCredentials_FetchFailureNamesTheFirstFailingCredentialInConfigOrder(t *testing.T) {
-	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	bFailed := make(chan struct{})
-	srv.resolveSource = func(sc SourceConfig) (credentialsource.CredentialSource, error) {
-		if sc.Secret == "a" {
-			return failAfterSource{release: bFailed, msg: "boom a"}, nil
-		}
-		return failAfterSource{msg: "boom b", done: bFailed}, nil
-	}
-	cfg := &Config{Credentials: []CredentialConfig{
-		{Host: "a.example.com", Grant: "a", Source: SourceConfig{Type: "mock", Secret: "a"}},
-		{Host: "b.example.com", Grant: "b", Source: SourceConfig{Type: "mock", Secret: "b"}},
-	}}
-	err = srv.loadCredentials(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "a.example.com") || !strings.Contains(err.Error(), "boom a") {
-		t.Fatalf("err = %v, want the failure of a.example.com though b.example.com failed first", err)
-	}
-}
-
 type closeTrackingSource struct {
 	closed *atomic.Int32
 	fail   bool

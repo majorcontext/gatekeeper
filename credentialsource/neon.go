@@ -47,7 +47,7 @@ func ParseNeonEndpointID(host string) (string, error) {
 // The zero value is not usable: APIKey must be set. All other fields are
 // optional. NeonResolver is safe for concurrent use.
 type NeonResolver struct {
-	APIKey CredentialSource // source for the Neon API key
+	APIKey CredentialSource // source for the Neon API key; fetched once per source TTL
 	// Project is an optional Neon project ID. When set, the resolver queries
 	// this project directly instead of enumerating all projects — required for
 	// project-scoped API keys, which cannot list projects.
@@ -58,6 +58,8 @@ type NeonResolver struct {
 
 	mu        sync.Mutex
 	passwords map[string]neonCachedPassword
+	apiKey    string
+	keyExpiry time.Time
 	endpoints map[string]neonEndpointInfo
 	// endpointsGen increments on every InvalidatePassword. A goroutine that
 	// resolved an endpoint while a concurrent invalidation occurred must not
@@ -69,6 +71,7 @@ type NeonResolver struct {
 	// the same for the connection_uri fetch, keyed on (endpoint, role, database).
 	findGroup     singleflight.Group
 	passwordGroup singleflight.Group
+	keyGroup      singleflight.Group
 	// baseCtx is the resolver's lifetime context. The singleflight closures
 	// derive their per-call deadline from it (not from any one caller's context,
 	// which would let one caller's cancellation cascade to all waiters), and
@@ -344,13 +347,70 @@ func (r *NeonResolver) fetchPassword(ctx context.Context, info neonEndpointInfo,
 	return password, nil
 }
 
+// cachedAPIKey returns the API key, fetching it from the source only when the
+// cached copy has expired. A refreshing source sets the lifetime (75% of its
+// TTL, as the server's refresh loop does); any other source uses the
+// password TTL.
+func (r *NeonResolver) cachedAPIKey(ctx context.Context) (string, error) {
+	if key, ok := r.freshAPIKey(); ok {
+		return key, nil
+	}
+	// Concurrent misses share one Fetch, which runs on the resolver's own
+	// deadline so one caller giving up does not fail the others.
+	v, err, _ := r.keyGroup.Do("key", func() (any, error) {
+		if key, ok := r.freshAPIKey(); ok {
+			return key, nil
+		}
+		fctx, cancel := context.WithTimeout(r.baseContext(), neonResolveTimeout)
+		defer cancel()
+		key, err := r.APIKey.Fetch(fctx)
+		if err != nil {
+			return "", fmt.Errorf("fetch neon API key: %w", err)
+		}
+		life := r.TTL
+		if life <= 0 {
+			life = defaultNeonPasswordTTL
+		}
+		if rs, ok := r.APIKey.(RefreshingSource); ok {
+			life = rs.TTL() * 3 / 4
+		}
+		r.mu.Lock()
+		r.apiKey, r.keyExpiry = key, time.Now().Add(life)
+		r.mu.Unlock()
+		return key, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return v.(string), nil
+}
+
+func (r *NeonResolver) freshAPIKey() (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.apiKey != "" && time.Now().Before(r.keyExpiry) {
+		return r.apiKey, true
+	}
+	return "", false
+}
+
+// dropAPIKey forgets key if it is still the cached one, so a rejected key is
+// not reused for the rest of its lifetime.
+func (r *NeonResolver) dropAPIKey(key string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.apiKey == key {
+		r.apiKey = ""
+	}
+}
+
 // apiGet performs an authenticated GET against the Neon API and decodes the
 // JSON response into out. Error messages never include the API key or the
 // response body (which may contain credentials).
 func (r *NeonResolver) apiGet(ctx context.Context, pathAndQuery string, out any) error {
-	apiKey, err := r.APIKey.Fetch(ctx)
+	apiKey, err := r.cachedAPIKey(ctx)
 	if err != nil {
-		return fmt.Errorf("fetch neon API key: %w", err)
+		return err
 	}
 	baseURL := r.BaseURL
 	if baseURL == "" {
@@ -375,6 +435,9 @@ func (r *NeonResolver) apiGet(ctx context.Context, pathAndQuery string, out any)
 
 	path, _, _ := strings.Cut(pathAndQuery, "?")
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusUnauthorized {
+			r.dropAPIKey(apiKey)
+		}
 		return fmt.Errorf("neon API %s returned status %d", path, resp.StatusCode)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {

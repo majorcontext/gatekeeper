@@ -606,3 +606,120 @@ func TestNeonResolverBadAPIKey(t *testing.T) {
 		t.Errorf("error %q does not mention status 401", msg)
 	}
 }
+
+type countingKeySource struct {
+	fetches atomic.Int64
+	ttl     time.Duration
+
+	mu  sync.Mutex
+	key string
+}
+
+func (c *countingKeySource) setKey(k string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.key = k
+}
+
+func (c *countingKeySource) Fetch(context.Context) (string, error) {
+	c.fetches.Add(1)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.key, nil
+}
+func (c *countingKeySource) Type() string       { return "counting" }
+func (c *countingKeySource) TTL() time.Duration { return c.ttl }
+
+func TestNeonResolverFetchesAPIKeyOncePerSourceTTL(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := &fakeNeonAPI{t: t, password: "s3cret", branchID: "br-9"}
+		key := &countingKeySource{ttl: 8 * time.Minute, key: testNeonAPIKey}
+		r := &NeonResolver{
+			APIKey:     key,
+			BaseURL:    "http://neon.test",
+			TTL:        time.Minute,
+			HTTPClient: &http.Client{Transport: recorderTransport{f}},
+		}
+		resolve := func() {
+			t.Helper()
+			if _, err := r.ResolvePassword(context.Background(), testNeonHost, testNeonRole, testNeonDatabase); err != nil {
+				t.Fatalf("ResolvePassword: %v", err)
+			}
+		}
+
+		resolve()
+		time.Sleep(2 * time.Minute)
+		resolve()
+		if got := key.fetches.Load(); got != 1 {
+			t.Fatalf("API key fetches after 6 Neon API calls within the source TTL = %d, want 1", got)
+		}
+
+		time.Sleep(5 * time.Minute)
+		resolve()
+		if got := key.fetches.Load(); got != 2 {
+			t.Fatalf("API key fetches after the source TTL = %d, want 2", got)
+		}
+	})
+}
+
+func TestNeonResolverRefetchesAPIKeyAfterUnauthorized(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := &fakeNeonAPI{t: t, password: "s3cret", branchID: "br-9"}
+		key := &countingKeySource{ttl: time.Hour, key: "rotated-out"}
+		r := &NeonResolver{
+			APIKey:     key,
+			BaseURL:    "http://neon.test",
+			HTTPClient: &http.Client{Transport: recorderTransport{f}},
+		}
+		if _, err := r.ResolvePassword(context.Background(), testNeonHost, testNeonRole, testNeonDatabase); err == nil {
+			t.Fatal("ResolvePassword with a rejected key succeeded")
+		}
+		key.setKey(testNeonAPIKey)
+		if _, err := r.ResolvePassword(context.Background(), testNeonHost, testNeonRole, testNeonDatabase); err != nil {
+			t.Fatalf("ResolvePassword after key rotation: %v", err)
+		}
+	})
+}
+
+type gatedKeySource struct {
+	fetches *atomic.Int64
+	gate    <-chan struct{}
+}
+
+func (g gatedKeySource) Fetch(ctx context.Context) (string, error) {
+	g.fetches.Add(1)
+	select {
+	case <-g.gate:
+		return testNeonAPIKey, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+func (g gatedKeySource) Type() string { return "gated" }
+
+func TestNeonResolverConcurrentResolvesShareOneAPIKeyFetch(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := &fakeNeonAPI{t: t, password: "s3cret", branchID: "br-9"}
+		var fetches atomic.Int64
+		gate := make(chan struct{})
+		r := &NeonResolver{
+			APIKey:     gatedKeySource{fetches: &fetches, gate: gate},
+			BaseURL:    "http://neon.test",
+			HTTPClient: &http.Client{Transport: recorderTransport{f}},
+		}
+		var wg sync.WaitGroup
+		for _, host := range []string{"ep-aaa-111111.us-east-2.aws.neon.tech", "ep-bbb-222222.us-east-2.aws.neon.tech"} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, _ = r.ResolvePassword(context.Background(), host, testNeonRole, testNeonDatabase)
+			}()
+		}
+		synctest.Wait()
+		close(gate)
+		wg.Wait()
+		if got := fetches.Load(); got != 1 {
+			t.Errorf("API key fetches for two concurrent resolves on cold start = %d, want 1", got)
+		}
+	})
+}
