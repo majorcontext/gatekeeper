@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"crypto/x509"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -101,5 +102,16 @@ func TestNewCA_SubjectNeutralByDefaultAndOverridable(t *testing.T) {
 	}
 	if got := ca.cert.Subject.CommonName; got != "Moat CA" {
 		t.Errorf("CommonName = %q, want Moat CA", got)
+	}
+	leaf, err := ca.GenerateCert("leaf.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := x509.ParseCertificate(leaf.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Subject.Organization; len(got) != 1 || got[0] != "Moat" {
+		t.Errorf("leaf Organization = %v, want [Moat]", got)
 	}
 }
