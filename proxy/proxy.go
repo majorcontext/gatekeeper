@@ -43,6 +43,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -1894,9 +1895,22 @@ func isHostGateway(rc *RunContextData, host string) bool {
 		return true
 	}
 	if gatewayRoutesToLoopback(rc) {
-		return host == "localhost" || host == "127.0.0.1" || host == "::1"
+		return isLoopbackAlias(host)
 	}
 	return false
+}
+
+func isLoopbackAlias(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+	if host == "localhost" {
+		return true
+	}
+	a, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	a = a.WithZone("").Unmap()
+	return a.IsLoopback() || a.IsUnspecified()
 }
 
 // gatewayRoutesToLoopback reports whether the host gateway ultimately routes

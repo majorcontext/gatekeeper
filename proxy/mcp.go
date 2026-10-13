@@ -33,6 +33,7 @@ func findCredByGrant(creds map[string][]credentialHeader, grant string) string {
 // It bypasses proxy settings to prevent circular proxy loops.
 // No client-level Timeout — MCP uses SSE streaming which is long-lived.
 var mcpRelayClient = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	Transport: &http.Transport{
 		Proxy: nil,
 		DialContext: (&net.Dialer{

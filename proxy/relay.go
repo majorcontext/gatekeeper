@@ -14,6 +14,7 @@ import (
 // settings to prevent circular proxy loops — the proxy runs on the host,
 // where localhost correctly reaches host-side services.
 var relayClient = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	Transport: &http.Transport{
 		Proxy: nil,
 		DialContext: (&net.Dialer{
