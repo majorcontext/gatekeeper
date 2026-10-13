@@ -130,6 +130,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "MOAT: Failed to create relay request", http.StatusInternalServerError)
 		return
 	}
+	proxyReq.ContentLength = r.ContentLength
 
 	// Resolve credentials before copying headers so resolver side effects
 	// (e.g., subject header stripping) are reflected in proxyReq.
@@ -156,14 +157,13 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	if bundleResult.Skipped {
 		p.logPolicyObservation(r, "credential-bundle", "http.request", "", bundleResult.Reason)
 	}
-	credResult := mergeCredentialInjectionResults(bundleResult.credentialInjectionResult, injectCredentials(proxyReq, creds, host, r.Method, rest, bundleResult.InjectedHeaders))
-	mergeExtraHeaders(proxyReq, host, p.getExtraHeadersForRequest(r, host))
-	for _, headerName := range p.getRemoveHeadersForRequest(r, host) {
-		if credResult.InjectedHeaders[strings.ToLower(headerName)] {
-			continue
-		}
-		proxyReq.Header.Del(headerName)
-	}
+	credResult := p.prepareOutbound(r, proxyReq, outboundPrep{
+		creds:      creds,
+		bundle:     bundleResult.credentialInjectionResult,
+		host:       host,
+		lookupHost: host,
+		path:       rest,
+	})
 
 	if proxyReq.Header.Get("X-Request-Id") == "" {
 		proxyReq.Header.Set("X-Request-Id", RequestIDFromContext(r.Context()))
