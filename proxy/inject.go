@@ -78,8 +78,8 @@ func (p *Proxy) refusesCleartextInjection(in *http.Request, scheme, lookupHost s
 	return sub != nil && !sub.AllowInsecure
 }
 
-func cleartextRefusalMessage(host string) string {
-	return "gatekeeper: credential injection over plain HTTP is refused for host " + host +
+func (p *Proxy) cleartextRefusalMessage(host string) string {
+	return p.brandName() + ": credential injection over plain HTTP is refused for host " + host +
 		". Use https, or set allow_insecure on the credential.\n"
 }
 
@@ -88,9 +88,10 @@ func (p *Proxy) writeCleartextRefusal(w http.ResponseWriter, host string) {
 		"subsystem", "proxy",
 		"action", "refuse-cleartext",
 		"host", host)
+	setBlocked(w.Header(), "cleartext-credential")
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusForbidden)
-	_, _ = w.Write([]byte(cleartextRefusalMessage(host)))
+	_, _ = w.Write([]byte(p.cleartextRefusalMessage(host)))
 }
 
 type outboundPrep struct {

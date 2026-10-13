@@ -138,7 +138,7 @@ Gatekeeper has no knowledge of moat. It exposes the `ContextResolver` hook and `
 
 ## Branding
 
-Blocked responses, relay errors, MCP stub values, and a newly generated CA are neutral by default: blocked bodies start with `gatekeeper:`, the MCP stub prefix is `gatekeeper-stub-`, the CA subject is `Gatekeeper CA`, and `Proxy-Authenticate` uses the `Gatekeeper-Policy` scheme. Each response that carried `X-Moat-Blocked` before (network policy, host service, Keep `http` scope, LLM policy) now carries `X-Gatekeeper-Blocked` and the alias `X-Moat-Blocked` with the same value. MCP-scope denials and cleartext-injection refusals set neither header.
+Blocked responses, relay errors, MCP stub values, and a newly generated CA are neutral by default: blocked bodies start with `gatekeeper:`, the MCP stub prefix is `gatekeeper-stub-`, the CA subject is `Gatekeeper CA`, and `Proxy-Authenticate` uses the `Gatekeeper-Policy` scheme. Every blocked response (network policy, host service, Keep `http` and MCP scopes, LLM policy, cleartext-injection refusal) carries `X-Gatekeeper-Blocked` and the alias `X-Moat-Blocked` with the same value.
 
 An embedder phrases these differently with `Proxy.SetBranding(proxy.Branding{...})` (`Name`, `ErrorPrefix`, `PolicyScheme`, `MCPStubPrefix`, `NetworkHint`, `HostHint`, `GrantHint`) and `proxy.NewCAWithSubject(dir, organization, commonName)`. A CA loaded from disk keeps its own subject.
 

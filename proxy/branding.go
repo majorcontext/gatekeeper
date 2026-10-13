@@ -94,3 +94,8 @@ func setBlocked(h http.Header, reason string) {
 	h.Set("X-Gatekeeper-Blocked", reason)
 	h.Set("X-Moat-Blocked", reason)
 }
+
+func (p *Proxy) writeMCPBlocked(w http.ResponseWriter, msg string) {
+	setBlocked(w.Header(), "mcp-policy")
+	http.Error(w, msg, http.StatusForbidden)
+}

@@ -292,7 +292,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 					d.Denied = true
 					d.DenyReason = "Keep policy fail-closed: MCP request body is not valid JSON"
 				})
-				http.Error(w, p.brandName()+": MCP request blocked — invalid JSON body.", http.StatusForbidden)
+				p.writeMCPBlocked(w, p.brandName()+": MCP request blocked — invalid JSON body.")
 				return
 			}
 			if mcpReq.Method == "tools/call" && mcpReq.Params.Name != "" {
@@ -311,7 +311,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 						d.DenyReason = "Keep policy evaluation error"
 						d.Err = evalErr
 					})
-					http.Error(w, p.brandName()+": MCP tool call blocked — policy evaluation error.", http.StatusForbidden)
+					p.writeMCPBlocked(w, p.brandName()+": MCP tool call blocked — policy evaluation error.")
 					return
 				}
 				switch result.Decision {
@@ -325,7 +325,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 					if result.Message != "" {
 						msg += " " + result.Message
 					}
-					http.Error(w, msg, http.StatusForbidden)
+					p.writeMCPBlocked(w, msg)
 					return
 				case keeplib.Redact:
 					mutated := keeplib.ApplyMutations(mcpReq.Params.Arguments, result.Mutations)
@@ -340,7 +340,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 							d.DenyReason = "Keep policy redaction failed: could not unmarshal body"
 							d.Err = unmarshalErr
 						})
-						http.Error(w, p.brandName()+": MCP tool call blocked — redaction failed.", http.StatusForbidden)
+						p.writeMCPBlocked(w, p.brandName()+": MCP tool call blocked — redaction failed.")
 						return
 					}
 					params, ok := raw["params"].(map[string]any)
@@ -353,7 +353,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 							d.DenyReason = "Keep policy redaction failed: body missing params map"
 							d.Err = errors.New("mutated MCP request lacked a params map")
 						})
-						http.Error(w, p.brandName()+": MCP tool call blocked — redaction failed.", http.StatusForbidden)
+						p.writeMCPBlocked(w, p.brandName()+": MCP tool call blocked — redaction failed.")
 						return
 					}
 					params["arguments"] = mutated
@@ -367,7 +367,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 							d.DenyReason = "Keep policy redaction failed: could not marshal mutated body"
 							d.Err = marshalErr
 						})
-						http.Error(w, p.brandName()+": MCP tool call blocked — redaction failed.", http.StatusForbidden)
+						p.writeMCPBlocked(w, p.brandName()+": MCP tool call blocked — redaction failed.")
 						return
 					}
 					bodyBytes = mutatedBody

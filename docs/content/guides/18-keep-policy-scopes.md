@@ -58,7 +58,7 @@ Evaluated inside the [MCP relay](./16-mcp-relay.md) handler, before the request 
 
 **Fail-closed condition:** once an engine is configured for a server, *every* request body to that server must parse as JSON, not just `tools/call` bodies — gatekeeper reads and unmarshals the body before it can even check the method name, and denies with `403` if that unmarshal fails. Only a body that does parse as JSON goes on to the method check above, where non-`tools/call` requests (and `tools/call` requests with an empty tool name) pass through without Keep evaluation.
 
-> **Note:** This scope does not set `X-Gatekeeper-Blocked`. All of its denial responses use a plain `http.Error` call with no policy header, unlike the `http` and `llm-gateway` scopes below. Don't rely on the header's presence to detect an MCP-scope denial in logs or client-side handling — use the response body and the `mcp.tool_call` operation in the policy log instead (see [Observability](#observability)).
+> **Note:** This scope sets `X-Gatekeeper-Blocked: mcp-policy` (also sent as `X-Moat-Blocked`) on every `403` denial, including the fail-closed invalid-JSON and evaluation-error denials. The `mcp.tool_call` operation in the policy log still carries the rule detail (see [Observability](#observability)).
 
 ## `llm-gateway` scope
 
@@ -127,7 +127,8 @@ Each denial also, when a trace context is present, adds a `policy.denial` span e
 | `host-service` | Host gateway | `407` |
 | `keep-policy` | `http` scope | `403` |
 | `llm-policy` | `llm-gateway` scope | `400` |
-| *(none)* | `mcp-<server-name>` scope | `403` |
+| `mcp-policy` | `mcp-<server-name>` scope | `403` |
+| `cleartext-credential` | Credential injection over plain HTTP refused | `403` |
 
 ## Next steps
 
