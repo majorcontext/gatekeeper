@@ -344,3 +344,38 @@ func TestValidateCaptureHeaders_Duplicate(t *testing.T) {
 		t.Errorf("error = %q, want mention of duplicate", err.Error())
 	}
 }
+
+func TestParseConfig_RejectsBadNetworkPolicy(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{"capitalized policy", "network:\n  policy: Strict\n", `"Strict"`},
+		{"unknown policy", "network:\n  policy: deny\n", `"deny"`},
+		{"trailing space", "network:\n  policy: \"strict \"\n", `"strict "`},
+		{"non-numeric port", "network:\n  policy: strict\n  allow:\n    - host:abc\n", `"host:abc"`},
+		{"port out of range", "network:\n  policy: strict\n  allow:\n    - api.example.com:99999\n", `"api.example.com:99999"`},
+		{"empty host", "network:\n  policy: strict\n  allow:\n    - \":443\"\n", `":443"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseConfig([]byte(tt.yaml))
+			if err == nil {
+				t.Fatalf("ParseConfig accepted %q", tt.yaml)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q does not name %s", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseConfig_AcceptsValidNetworkPolicy(t *testing.T) {
+	for _, policy := range []string{"", "permissive", "strict"} {
+		y := "network:\n  policy: \"" + policy + "\"\n  allow:\n    - api.example.com\n    - \"*.example.com:8443\"\n"
+		if _, err := ParseConfig([]byte(y)); err != nil {
+			t.Errorf("policy %q: %v", policy, err)
+		}
+	}
+}

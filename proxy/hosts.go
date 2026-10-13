@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -43,6 +44,23 @@ func parseHostPattern(s string) hostPattern {
 	}
 
 	return p
+}
+
+// ValidateHostPattern reports why s is not a usable host pattern. Unlike
+// ParseHostPattern, which treats an unparsable port as "ports 80 and 443",
+// it rejects the pattern.
+func ValidateHostPattern(s string) error {
+	host, portStr, hasPort := strings.Cut(strings.TrimPrefix(s, "*."), ":")
+	if host == "" {
+		return fmt.Errorf("host pattern %q has no host", s)
+	}
+	if hasPort {
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port <= 0 || port > 65535 {
+			return fmt.Errorf("host pattern %q has an invalid port", s)
+		}
+	}
+	return nil
 }
 
 // matchHost checks if the given host:port matches any of the patterns.
