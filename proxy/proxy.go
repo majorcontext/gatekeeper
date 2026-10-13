@@ -1894,9 +1894,18 @@ func isHostGateway(rc *RunContextData, host string) bool {
 		return true
 	}
 	if gatewayRoutesToLoopback(rc) {
-		return host == "localhost" || host == "127.0.0.1" || host == "::1"
+		return isLoopbackAlias(host)
 	}
 	return false
+}
+
+func isLoopbackAlias(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
 }
 
 // gatewayRoutesToLoopback reports whether the host gateway ultimately routes

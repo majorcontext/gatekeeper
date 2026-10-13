@@ -700,5 +700,38 @@ func TestRelay_StripsCaptureHeadersAndSubstitutesTokens(t *testing.T) {
 	}
 	if w.body != `{"t":"real-secret"}` {
 		t.Errorf("relay body = %q, want %q", w.body, `{"t":"real-secret"}`)
+func TestRelay_CrossHostRedirectNotFollowed(t *testing.T) {
+	var secondHits atomic.Int32
+	var leaked atomic.Value
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondHits.Add(1)
+		leaked.Store(r.Header.Get("x-api-key"))
+	}))
+	defer second.Close()
+	secondURL := strings.Replace(second.URL, "127.0.0.1", "localhost", 1)
+
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, secondURL, http.StatusFound)
+	}))
+	defer first.Close()
+
+	p := NewProxy()
+	if err := p.AddRelay("api", first.URL); err != nil {
+		t.Fatalf("AddRelay: %v", err)
+	}
+	p.SetCredentialWithGrant("127.0.0.1", "x-api-key", "sk-secret", "api")
+
+	req := httptest.NewRequest("GET", "/relay/api/v1", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Errorf("status = %d, want 302 returned unfollowed", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != secondURL {
+		t.Errorf("Location = %q, want %q", loc, secondURL)
+	}
+	if n := secondHits.Load(); n != 0 {
+		t.Errorf("redirect target received %d requests (x-api-key=%v), want 0", n, leaked.Load())
 	}
 }

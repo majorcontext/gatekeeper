@@ -34,7 +34,7 @@ Gatekeeper intercepts this as a CONNECT (for HTTPS) or plain HTTP request, check
 
 ## Loopback equivalence
 
-When `HostGatewayIP` resolves to a loopback address (`127.0.0.1`, `::1`), gatekeeper treats `localhost`, `127.0.0.1`, and `::1` as equivalent to the gateway hostname. This prevents a bypass: without this equivalence, a container can connect directly to `localhost` or `127.0.0.1` to skip network policy that only checks the gateway hostname.
+When `HostGatewayIP` resolves to a loopback address (`127.0.0.1`, `::1`), gatekeeper treats `localhost` (any case, optional trailing dot) and every loopback or unspecified IP literal (such as `127.0.0.1`, `127.0.0.2`, `::1`, `0.0.0.0`, and `::ffff:127.0.0.1`) as equivalent to the gateway hostname. This prevents a bypass: without this equivalence, a container can connect directly to `localhost` or `127.0.0.1` to skip network policy that only checks the gateway hostname.
 
 The equivalence check follows this logic:
 

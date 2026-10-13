@@ -4573,3 +4573,30 @@ func TestProxy_HandleHTTP_DenialLogRedactsDeclaredHeaders(t *testing.T) {
 		}
 	}
 }
+
+func TestProxy_HostGatewayLoopbackSpellingsRestricted(t *testing.T) {
+	p := NewProxy()
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		return &RunContextData{
+			Policy:           "permissive",
+			HostGateway:      "moat-host",
+			HostGatewayIP:    "127.0.0.1",
+			AllowedHostPorts: []int{9999},
+		}, token == "gw_run"
+	})
+
+	for _, host := range []string{
+		"127.0.0.1", "127.0.0.2", "LOCALHOST", "localhost.", "0.0.0.0",
+		"[::1]", "[::ffff:127.0.0.1]", "[::]",
+	} {
+		t.Run(host, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "http://"+host+":8080/", nil)
+			req.Header.Set("Proxy-Authorization", "Bearer gw_run")
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, req)
+			if rec.Code != http.StatusProxyAuthRequired {
+				t.Errorf("GET %s:8080 status = %d, want 407", host, rec.Code)
+			}
+		})
+	}
+}
