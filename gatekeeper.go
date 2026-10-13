@@ -8,7 +8,6 @@ package gatekeeper
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -226,6 +225,9 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 		fetch bool
 		val   string
 		err   error
+		// canceled marks a fetch that ended because another fetch failed;
+		// its error need not wrap context.Canceled.
+		canceled bool
 	}
 	type credEntry struct {
 		cred   CredentialConfig
@@ -362,7 +364,7 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 		slots <- struct{}{}
 		if fetchCtx.Err() != nil {
 			<-slots
-			ps.err = fetchCtx.Err()
+			ps.err, ps.canceled = fetchCtx.Err(), true
 			continue
 		}
 		wg.Add(1)
@@ -373,14 +375,18 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 			defer cancel()
 			ps.val, ps.err = ps.src.Fetch(c)
 			if ps.err != nil {
-				cancelFetches()
+				if fetchCtx.Err() != nil {
+					ps.canceled = true
+				} else {
+					cancelFetches()
+				}
 			}
 		}()
 	}
 	wg.Wait()
 
 	for _, e := range entries {
-		if e.source != nil && e.source.err != nil && !errors.Is(e.source.err, context.Canceled) {
+		if e.source != nil && e.source.err != nil && !e.source.canceled {
 			return fetchError(e.cred, e.pg, e.source.err)
 		}
 	}

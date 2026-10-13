@@ -128,8 +128,8 @@ type blockUntilCanceledSource struct{ saw chan<- error }
 
 func (b blockUntilCanceledSource) Fetch(ctx context.Context) (string, error) {
 	<-ctx.Done()
-	b.saw <- context.Cause(ctx)
-	return "", ctx.Err()
+	b.saw <- ctx.Err()
+	return "", errors.New("signal: killed")
 }
 func (b blockUntilCanceledSource) Type() string { return "block" }
 
