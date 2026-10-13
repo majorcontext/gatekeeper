@@ -40,8 +40,12 @@ func TestBlockedResponse_NeutralByDefaultWithAliasHeader(t *testing.T) {
 
 func TestBlockedResponse_BrandingOptionRestoresHints(t *testing.T) {
 	p := NewProxy()
-	p.SetBranding(Branding{Name: "Moat", NetworkHint: "Add it to network.rules in moat.yaml."})
-	body := blockedRecorder(t, p).Body.String()
+	p.SetBranding(Branding{Name: "Moat", PolicyScheme: "Moat-Policy", NetworkHint: "Add it to network.rules in moat.yaml."})
+	rec := blockedRecorder(t, p)
+	if got := rec.Header().Get("Proxy-Authenticate"); got != "Moat-Policy" {
+		t.Errorf("Proxy-Authenticate = %q, want Moat-Policy", got)
+	}
+	body := rec.Body.String()
 	if !strings.HasPrefix(body, "Moat: request blocked") || !strings.Contains(body, "network.rules in moat.yaml") {
 		t.Errorf("body = %q, want moat hint", body)
 	}

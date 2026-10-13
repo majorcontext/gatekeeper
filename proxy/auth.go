@@ -120,7 +120,7 @@ func writeProxyAuthRequired(w http.ResponseWriter, msg string) {
 // writeBlockedResponse writes a 407 response when a request is blocked by network policy.
 func (p *Proxy) writeBlockedResponse(w http.ResponseWriter, host string) {
 	setBlocked(w.Header(), "request-rule")
-	w.Header().Set("Proxy-Authenticate", policyScheme)
+	w.Header().Set("Proxy-Authenticate", p.policyScheme())
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusProxyAuthRequired)
 	_, _ = w.Write([]byte(p.brandName() + ": request blocked by network policy.\nHost \"" + host + "\" is not in the allow list.\n" + p.networkHint()))
@@ -129,7 +129,7 @@ func (p *Proxy) writeBlockedResponse(w http.ResponseWriter, host string) {
 // writeHostBlockedResponse writes a 407 response when a request to the host gateway is blocked.
 func (p *Proxy) writeHostBlockedResponse(w http.ResponseWriter, host string, port int) {
 	setBlocked(w.Header(), "host-service")
-	w.Header().Set("Proxy-Authenticate", policyScheme)
+	w.Header().Set("Proxy-Authenticate", p.policyScheme())
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusProxyAuthRequired)
 	_, _ = fmt.Fprintf(w, "%s: request blocked — host service access to %s:%d is not allowed by default.\n%s",

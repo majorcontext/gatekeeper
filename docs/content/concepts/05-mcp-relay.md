@@ -53,7 +53,7 @@ MCP credential injection works in two modes:
 
 **Relay mode.** Requests to `/mcp/{server-name}` are proxied directly. Gatekeeper resolves the credential by grant name from `RunContextData.Credentials` (daemon mode) or the `CredentialStore` (standalone mode) and sets the header on the outgoing request.
 
-**Stub replacement mode.** When an MCP client sends a request through the CONNECT proxy (not the relay endpoint) to an MCP server URL, gatekeeper checks if the authentication header contains a stub value (`moat-stub-{grant}`). If it matches, the stub is replaced with the real credential. Non-stub values are left unchanged — the client may already have a valid credential.
+**Stub replacement mode.** When an MCP client sends a request through the CONNECT proxy (not the relay endpoint) to an MCP server URL, gatekeeper checks if the authentication header contains a stub value (`gatekeeper-stub-{grant}` (the prefix is `Branding.MCPStubPrefix`)). If it matches, the stub is replaced with the real credential. Non-stub values are left unchanged — the client may already have a valid credential.
 
 For OAuth grants (grant names starting with `oauth:`), the credential value is automatically prefixed with `Bearer `.
 

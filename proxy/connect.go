@@ -100,7 +100,7 @@ func (p *Proxy) handleConnectTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 	targetConn, err := net.DialTimeout("tcp", dialAddr, connectTunnelDialTimeout)
 	if err != nil {
-		http.Error(w, "gatekeeper: dial upstream failed", http.StatusBadGateway)
+		http.Error(w, p.errorPrefix()+": dial upstream failed", http.StatusBadGateway)
 		return
 	}
 

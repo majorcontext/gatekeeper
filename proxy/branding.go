@@ -5,7 +5,7 @@ import "net/http"
 const (
 	defaultBrandName     = "gatekeeper"
 	defaultMCPStubPrefix = "gatekeeper-stub-"
-	policyScheme         = "Gatekeeper-Policy"
+	defaultPolicyScheme  = "Gatekeeper-Policy"
 )
 
 // Branding sets the client-visible wording of blocked responses and relay
@@ -19,6 +19,9 @@ type Branding struct {
 	// MCPStubPrefix starts the placeholder value that stands in for an MCP
 	// credential in client config. Default "gatekeeper-stub-".
 	MCPStubPrefix string
+	// PolicyScheme is the Proxy-Authenticate scheme on blocked responses.
+	// Default "Gatekeeper-Policy".
+	PolicyScheme string
 	// NetworkHint is appended to a network-policy block message.
 	NetworkHint string
 	// HostHint returns text appended to a host-service block message.
@@ -54,6 +57,13 @@ func (p *Proxy) mcpStubPrefix() string {
 	return defaultMCPStubPrefix
 }
 
+func (p *Proxy) policyScheme() string {
+	if p.branding.PolicyScheme != "" {
+		return p.branding.PolicyScheme
+	}
+	return defaultPolicyScheme
+}
+
 func (p *Proxy) grantHint(grant string) string {
 	if p.branding.GrantHint == nil {
 		return ""
@@ -79,7 +89,7 @@ func (p *Proxy) networkHint() string {
 }
 
 // setBlocked marks a response as policy-blocked. X-Moat-Blocked carries the
-// same value for clients written against the older header name.
+// same value for legacy clients.
 func setBlocked(h http.Header, reason string) {
 	h.Set("X-Gatekeeper-Blocked", reason)
 	h.Set("X-Moat-Blocked", reason)

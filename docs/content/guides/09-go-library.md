@@ -140,7 +140,7 @@ Gatekeeper has no knowledge of moat. It exposes the `ContextResolver` hook and `
 
 Blocked responses, relay errors, MCP stub values, and a newly generated CA are neutral by default: blocked bodies start with `gatekeeper:`, the MCP stub prefix is `gatekeeper-stub-`, the CA subject is `Gatekeeper CA`, and `Proxy-Authenticate` uses the `Gatekeeper-Policy` scheme. Every blocked response carries `X-Gatekeeper-Blocked` and the alias `X-Moat-Blocked` with the same value.
 
-An embedder phrases these differently with `Proxy.SetBranding(proxy.Branding{...})` (`Name`, `ErrorPrefix`, `MCPStubPrefix`, `NetworkHint`, `HostHint`, `GrantHint`) and `proxy.NewCAWithSubject(dir, organization, commonName)`. A CA loaded from disk keeps its own subject.
+An embedder phrases these differently with `Proxy.SetBranding(proxy.Branding{...})` (`Name`, `ErrorPrefix`, `PolicyScheme`, `MCPStubPrefix`, `NetworkHint`, `HostHint`, `GrantHint`) and `proxy.NewCAWithSubject(dir, organization, commonName)`. A CA loaded from disk keeps its own subject.
 
 ## OTel middleware
 
