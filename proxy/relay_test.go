@@ -700,6 +700,9 @@ func TestRelay_StripsCaptureHeadersAndSubstitutesTokens(t *testing.T) {
 	}
 	if w.body != `{"t":"real-secret"}` {
 		t.Errorf("relay body = %q, want %q", w.body, `{"t":"real-secret"}`)
+	}
+}
+
 func TestRelay_CrossHostRedirectNotFollowed(t *testing.T) {
 	var secondHits atomic.Int32
 	var leaked atomic.Value
