@@ -35,7 +35,6 @@ type contractRow struct {
 	want       map[string]string
 	wantPath   string
 	wantBody   string
-	httpBody   string // plain-HTTP body when it differs from wantBody
 	wantStatus int
 	wantCalls  int32
 }
@@ -580,7 +579,6 @@ func contractRows() []contractRow {
 			want:     map[string]string{"Authorization": "Bearer real-secret"},
 			wantPath: "/botreal-secret/getUpdates",
 			wantBody: `{"t":"real-secret"}`,
-			httpBody: `{"t":"placeholder-token"}`,
 		},
 		{
 			name: "run context token substitution replaces proxy-level substitution",
@@ -671,9 +669,6 @@ func runContractHTTP(t *testing.T, row contractRow) {
 	}
 	k := hostKeys{h: host, hp: host + ":" + port}
 
-	if row.httpBody != "" {
-		row.wantBody = row.httpBody
-	}
 	// Repeated so a map-iteration-order-dependent pick cannot pass by luck.
 	for range 25 {
 		p, calls := buildContractProxy(row, k)

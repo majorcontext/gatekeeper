@@ -1074,6 +1074,45 @@ func (p *Proxy) applyTokenSubstitution(req *http.Request, sub *tokenSubstitution
 	}
 }
 
+type outboundPrep struct {
+	creds      []credentialHeader
+	bundle     credentialInjectionResult
+	host       string
+	lookupHost string
+	path       string
+}
+
+// prepareOutbound turns a copied client request into the request sent
+// upstream. Bundles must already be applied; o.bundle is their result.
+// Substitution targets out, so logs built from in keep the placeholder.
+func (p *Proxy) prepareOutbound(in, out *http.Request, o outboundPrep) credentialInjectionResult {
+	credResult := mergeCredentialInjectionResults(o.bundle, injectCredentials(out, o.creds, o.host, out.Method, o.path, o.bundle.InjectedHeaders))
+	mergeExtraHeaders(out, o.lookupHost, p.getExtraHeadersForRequest(in, o.lookupHost))
+
+	out.Header.Del("Proxy-Connection")
+	out.Header.Del("Proxy-Authorization")
+
+	// A header the proxy just injected survives removal: "claude" registers
+	// RemoveRequestHeader("x-api-key") for OAuth, but if "anthropic" also
+	// injected x-api-key on the same host, that value must reach upstream.
+	for _, headerName := range p.getRemoveHeadersForRequest(in, o.lookupHost) {
+		if credResult.InjectedHeaders[strings.ToLower(headerName)] {
+			continue
+		}
+		out.Header.Del(headerName)
+	}
+	for _, headerName := range p.captureHeaders {
+		if credResult.InjectedHeaders[strings.ToLower(headerName)] {
+			continue
+		}
+		out.Header.Del(headerName)
+	}
+	if sub := p.getTokenSubstitutionForRequest(in, o.lookupHost); sub != nil {
+		p.applyTokenSubstitution(out, sub)
+	}
+	return credResult
+}
+
 // isValidHost checks if a host string is valid for credential injection.
 // Returns false for empty strings, paths, or other invalid values.
 func isValidHost(host string) bool {
@@ -2439,6 +2478,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	outReq.ContentLength = r.ContentLength
 
 	// Copy headers and inject credentials
 	for key, values := range r.Header {
@@ -2453,43 +2493,13 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		// configuration problem, and without this it would be invisible.
 		p.logPolicyObservation(r, "credential-bundle", "http.request", "", bundleResult.Reason)
 	}
-	credResult := mergeCredentialInjectionResults(bundleResult.credentialInjectionResult, injectCredentials(outReq, creds, host, r.Method, r.URL.Path, bundleResult.InjectedHeaders))
-
-	// Inject any additional headers configured for this host.
-	// Merges with existing values (comma-separated) to preserve client
-	// headers like anthropic-beta that support multiple flags.
-	mergeExtraHeaders(outReq, host, p.getExtraHeadersForRequest(r, lookupHost))
-
-	outReq.Header.Del("Proxy-Connection")
-	outReq.Header.Del("Proxy-Authorization")
-
-	// Remove headers that should be stripped, but never remove a
-	// credential header the proxy just injected. This prevents conflicts
-	// when multiple grants target the same host — e.g., "claude" registers
-	// RemoveRequestHeader("x-api-key") for OAuth, but if "anthropic" also
-	// injected x-api-key, the injected header must survive.
-	for _, headerName := range p.getRemoveHeadersForRequest(r, lookupHost) {
-		if credResult.InjectedHeaders[strings.ToLower(headerName)] {
-			continue
-		}
-		outReq.Header.Del(headerName)
-	}
-
-	// Strip capture headers — they're metadata for the proxy, not the destination.
-	// Skip headers that were just injected as credentials.
-	for _, headerName := range p.captureHeaders {
-		if credResult.InjectedHeaders[strings.ToLower(headerName)] {
-			continue
-		}
-		outReq.Header.Del(headerName)
-	}
-
-	// Apply token substitution if configured.
-	// Substitution targets outReq (not r), so r.URL.String() used for logging
-	// below still contains the placeholder, not the real token.
-	if sub := p.getTokenSubstitutionForRequest(r, lookupHost); sub != nil {
-		p.applyTokenSubstitution(outReq, sub)
-	}
+	credResult := p.prepareOutbound(r, outReq, outboundPrep{
+		creds:      creds,
+		bundle:     bundleResult.credentialInjectionResult,
+		host:       host,
+		lookupHost: lookupHost,
+		path:       r.URL.Path,
+	})
 
 	if outReq.Header.Get("X-Request-Id") == "" {
 		outReq.Header.Set("X-Request-Id", RequestIDFromContext(r.Context()))
@@ -2893,49 +2903,23 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			}
 
 			bundleResult, _ := pr.Out.Context().Value(interceptBundleResultKey{}).(credentialInjectionResult)
-			credResult := mergeCredentialInjectionResults(bundleResult, injectCredentials(pr.Out, creds, host, pr.Out.Method, pr.Out.URL.Path, bundleResult.InjectedHeaders))
+			// Capture URL before token substitution so logs don't contain real tokens.
+			logURL := pr.Out.URL.String()
+
+			credResult := p.prepareOutbound(r, pr.Out, outboundPrep{
+				creds:      creds,
+				bundle:     bundleResult,
+				host:       host,
+				lookupHost: r.Host,
+				path:       pr.Out.URL.Path,
+			})
 
 			// Store credential result and pre-injection headers in context.
 			ctx := pr.Out.Context()
 			ctx = context.WithValue(ctx, interceptCredResultKey{}, credResult)
 			ctx = context.WithValue(ctx, interceptPreInjHeadersKey{}, preInjectionHeaders)
+			ctx = context.WithValue(ctx, interceptLogURLKey{}, logURL)
 			*pr.Out = *pr.Out.WithContext(ctx)
-
-			// Extra headers.
-			mergeExtraHeaders(pr.Out, r.Host, p.getExtraHeadersForRequest(r, r.Host))
-
-			// Strip proxy headers.
-			pr.Out.Header.Del("Proxy-Connection")
-			pr.Out.Header.Del("Proxy-Authorization")
-
-			// Remove configured headers (but not injected credential headers).
-			// r.Host is the CONNECT target with its port, so port-pinned
-			// host keys can match; the lookup falls back to the bare host.
-			for _, headerName := range p.getRemoveHeadersForRequest(r, r.Host) {
-				if credResult.InjectedHeaders[strings.ToLower(headerName)] {
-					continue
-				}
-				pr.Out.Header.Del(headerName)
-			}
-
-			// Strip capture headers — they're metadata for the proxy, not the destination.
-			// Skip headers that were just injected as credentials.
-			for _, headerName := range p.captureHeaders {
-				if credResult.InjectedHeaders[strings.ToLower(headerName)] {
-					continue
-				}
-				pr.Out.Header.Del(headerName)
-			}
-
-			// Capture URL before token substitution so logs don't contain real tokens.
-			logURL := pr.Out.URL.String()
-			ctx = context.WithValue(pr.Out.Context(), interceptLogURLKey{}, logURL)
-			*pr.Out = *pr.Out.WithContext(ctx)
-
-			// Token substitution.
-			if sub := p.getTokenSubstitutionForRequest(r, r.Host); sub != nil {
-				p.applyTokenSubstitution(pr.Out, sub)
-			}
 
 			// Request ID.
 			if pr.Out.Header.Get("X-Request-Id") == "" {

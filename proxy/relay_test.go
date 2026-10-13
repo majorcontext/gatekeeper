@@ -663,3 +663,42 @@ func TestRelay_DefaultPortPinnedCredentialKey(t *testing.T) {
 		t.Errorf("Authorization = %q, want %q (:443-pinned key must fire for a port-less relay target)", receivedAuth, "Bearer pinned")
 	}
 }
+
+func TestRelay_StripsCaptureHeadersAndSubstitutesTokens(t *testing.T) {
+	type seen struct{ path, auth, capture, body string }
+	got := make(chan seen, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got <- seen{r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("X-Trace-Id"), string(b)}
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	if err := p.AddRelay("tg", backend.URL); err != nil {
+		t.Fatalf("AddRelay: %v", err)
+	}
+	if err := p.SetCaptureHeaders([]string{"X-Trace-Id"}); err != nil {
+		t.Fatalf("SetCaptureHeaders: %v", err)
+	}
+	p.SetTokenSubstitution(strings.TrimPrefix(backend.URL, "http://"), "placeholder-token", "real-secret")
+
+	req := httptest.NewRequest("POST", "/relay/tg/bot"+"placeholder-token"+"/getUpdates", strings.NewReader(`{"t":"placeholder-token"}`))
+	req.Header.Set("X-Trace-Id", "trace-1")
+	req.Header.Set("Authorization", "Bearer placeholder-token")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	w := <-got
+	if w.capture != "" {
+		t.Errorf("capture header reached relay target: X-Trace-Id = %q, want empty", w.capture)
+	}
+	if w.path != "/botreal-secret/getUpdates" {
+		t.Errorf("relay path = %q, want %q", w.path, "/botreal-secret/getUpdates")
+	}
+	if w.auth != "Bearer real-secret" {
+		t.Errorf("relay Authorization = %q, want %q", w.auth, "Bearer real-secret")
+	}
+	if w.body != `{"t":"real-secret"}` {
+		t.Errorf("relay body = %q, want %q", w.body, `{"t":"real-secret"}`)
+	}
+}

@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## Unreleased
+
+### Changed
+
+- **One outbound preparation for plain HTTP, CONNECT interception, and `/relay/`** (`proxy/proxy.go`, `proxy/relay.go`) — the credential, extra-header, header-removal, capture-header, and token-substitution sequence was written three times, and the relay copy had drifted. Relay requests now strip the configured capture headers and apply token substitution (URL path, `Authorization`, and request body of up to 64 KiB) like the other paths. Previously capture headers reached relay targets and placeholders were forwarded unreplaced. Plain-HTTP requests now substitute tokens in the request body too, as CONNECT interception already did; before, the body went upstream with the placeholder.
+
 ## v0.26.0 — 2026-10-13
 
 ### Added
