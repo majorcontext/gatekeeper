@@ -349,9 +349,9 @@ func TestNewTokenExchangeResolver_BotSubjectIgnoredOutsideProxyAuthMode(t *testi
 	}
 }
 
-// TestResolveTokenExchange_BotSubjectRequiresProxyAuth is the config-level
-// half of the fix for the same finding: reject bot_subject combined with
-// anything other than subject_from: proxy-auth at config-load time,
+// TestResolveTokenExchange_BotSubjectRequiresProxyAuth pins that config
+// load rejects bot_subject combined with anything other than
+// subject_from: proxy-auth,
 // mirroring the existing actor_token_from/subject_from mutual-exclusion
 // check just above resolveTokenExchange in this file. Belt (this
 // validation) and suspenders (the runtime gate proven by
