@@ -20,7 +20,7 @@ import (
 // ── multiHandler (slog fan-out) ───────────────────────────────────────────────
 
 // TestMultiHandler_WithAttrs verifies that WithAttrs propagates to all child
-// handlers, exercising the previously uncovered branch.
+// handlers.
 func TestMultiHandler_WithAttrs(t *testing.T) {
 	h1 := slog.NewTextHandler(io.Discard, nil)
 	h2 := slog.NewTextHandler(io.Discard, nil)
@@ -67,7 +67,7 @@ func (f *fakeSlogHandler) Handle(_ context.Context, r slog.Record) error {
 func (f *fakeSlogHandler) WithAttrs([]slog.Attr) slog.Handler { return f }
 func (f *fakeSlogHandler) WithGroup(string) slog.Handler      { return f }
 
-// TestOTelDiagnosticFilter_KeepsBridgeOutOfLoop encodes the fix for #48:
+// TestOTelDiagnosticFilter_KeepsBridgeOutOfLoop pins a feedback loop:
 // gatekeeper's own OTel diagnostics (logOTelError's DEBUG record on a
 // failed export) must never reach the otelslog bridge handler, or the
 // diagnostic itself gets enqueued into the same failing OTel log-export
@@ -131,6 +131,8 @@ func TestNewLogger_FileOutput(t *testing.T) {
 }
 
 func TestNewServer_ClosesLogFileWhenNewFails(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
 	path := filepath.Join(t.TempDir(), "gk.log")
 	cfg := &gatekeeper.Config{
 		Proxy:    gatekeeper.ProxyConfig{Port: 0, Host: "127.0.0.1"},
