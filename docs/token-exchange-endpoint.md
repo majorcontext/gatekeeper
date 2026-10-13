@@ -137,9 +137,9 @@ The two options are mutually exclusive — set one or the other, not both.
 
 With `subject_from: proxy-auth`, a config may also set `bot_subject` to a sentinel value (e.g. `"-"`) that never reaches this endpoint at all — gatekeeper matches it before ever building the exchange request and falls through to the next credential rule for the host instead. Your STS implementation never sees that value as a `subject_token`; see [Token Exchange: Bot/service fallback](content/guides/06-token-exchange.md#botservice-fallback) for the client-side config.
 
-## Preventing Subject Impersonation
+## Verifying the Gatekeeper Caller
 
-By default, subject identities are self-asserted — any caller can claim to be any user via the subject header or proxy auth username. This is acceptable when callers are isolated (separate containers with pre-configured `HTTP_PROXY` values), but in shared environments you may want the STS to verify the caller's identity.
+By default, subject identities are self-asserted — any caller can claim to be any user via the subject header or proxy auth username. This is acceptable when callers are isolated (separate containers with pre-configured `HTTP_PROXY` values), but in shared environments you may want the STS to verify that the request came through an authorized gatekeeper client. This does not stop an authorized client from claiming another subject.
 
 The recommended pattern uses the proxy auth **password** as a proof token. With `subject_from: proxy-auth`, gatekeeper extracts the username as the subject, and the password reaches the STS as the RFC 8693 `actor_token` parameter (requires gatekeeper configuration to forward it -- see below). Gatekeeper requires `proxy.auth_token` or `proxy.auth_token_env` in this mode and rejects any other password with `407`, so the `actor_token` is the shared proxy token.
 
@@ -225,7 +225,7 @@ By default, `actor_token_type` is `urn:ietf:params:oauth:token-type:access_token
 - [ ] Set `expires_in` to enable client-side caching (gatekeeper caps it at 60s)
 - [ ] Return non-200 with an error body for invalid/expired/unknown subjects
 - [ ] Handle concurrent requests for the same subject (idempotency or internal locking)
-- [ ] *(Optional)* Validate `actor_token` as the gatekeeper proxy token (see [Preventing Subject Impersonation](#preventing-subject-impersonation))
+- [ ] *(Optional)* Validate `actor_token` as the gatekeeper proxy token (see [Verifying the Gatekeeper Caller](#verifying-the-gatekeeper-caller))
 
 ## Testing
 

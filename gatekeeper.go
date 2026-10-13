@@ -353,7 +353,7 @@ func New(ctx context.Context, cfg *Config, opts Options) (*Server, error) {
 		p.SetAuthToken(authToken)
 	}
 
-	// When actor_token_from is configured, widen accepted passwords beyond authToken when it's empty (see SetDelegateAuth).
+	// actor_token_from requires a non-empty proxy password.
 	for _, cred := range cfg.Credentials {
 		if cred.Source.ActorTokenFrom != "" {
 			p.SetDelegateAuth(true)

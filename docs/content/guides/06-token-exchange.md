@@ -250,7 +250,7 @@ Gatekeeper treats any non-200 status as a failure and returns HTTP 502 to the cl
 - [ ] Set `expires_in` to enable caching (values above 60s are capped)
 - [ ] Return non-200 for invalid/expired/unknown subjects
 - [ ] Handle concurrent requests (idempotency or internal locking)
-- [ ] *(Optional)* Validate `actor_token` against `subject_token` to prevent impersonation
+- [ ] *(Optional)* Validate `actor_token` as the gatekeeper proxy token
 
 ## Testing
 
