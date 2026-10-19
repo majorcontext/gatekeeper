@@ -159,3 +159,19 @@ func TestTokenExchange_InvalidateEvictsDecline(t *testing.T) {
 		t.Errorf("after Invalidate: AccessToken = %q, want ya29.upgraded", tok.AccessToken)
 	}
 }
+
+// A static default that the destination keeps refusing must not turn every
+// request into an STS call: decline eviction shares Invalidate's per-key
+// cooldown.
+func TestTokenExchange_DeclineEvictionIsRateLimited(t *testing.T) {
+	var calls atomic.Int32
+	src := stsReplying(t, &calls, http.StatusBadRequest, boxDecline)
+	ctx := context.Background()
+	for range 5 {
+		_, _ = src.ResolveToken(ctx, "usr_1|box_1", "boxtoken", "")
+		src.Invalidate("usr_1|box_1", "boxtoken")
+	}
+	if n := calls.Load(); n != 2 {
+		t.Errorf("STS calls = %d, want 2 (one eviction per cooldown)", n)
+	}
+}

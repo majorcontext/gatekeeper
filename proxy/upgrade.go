@@ -11,6 +11,11 @@ import (
 // strings. The proxy removes any value the upstream sends.
 const UpgradeHintHeader = "X-Gatekeeper-Upgrade"
 
+// maxUpgradeHintHeaderLen bounds UpgradeHintHeader. A longer hint is dropped
+// whole: a header past the client's limit would break the 401 or 403
+// response it rides on.
+const maxUpgradeHintHeaderLen = 1024
+
 // UpgradeHint is what a credential resolver reports the client could request
 // beyond the credential the request got. Each key maps to one or more values.
 type UpgradeHint map[string][]string
@@ -62,7 +67,8 @@ func settleUpstreamResponse(h http.Header, status int, injected []CredentialHead
 
 // headerValue serializes h as an RFC 9651 dictionary with sorted members. A
 // member whose key is not an sf-key, or with a value that is not printable
-// ASCII, is dropped, so a hint can never inject a header.
+// ASCII, is dropped, so a hint can never inject a header. A result longer
+// than maxUpgradeHintHeaderLen is dropped.
 func (h UpgradeHint) headerValue() string {
 	keys := make([]string, 0, len(h))
 	for k := range h {
@@ -87,7 +93,11 @@ func (h UpgradeHint) headerValue() string {
 			members = append(members, k+"=("+strings.Join(items, " ")+")")
 		}
 	}
-	return strings.Join(members, ", ")
+	v := strings.Join(members, ", ")
+	if len(v) > maxUpgradeHintHeaderLen {
+		return ""
+	}
+	return v
 }
 
 func isSFKey(k string) bool {

@@ -29,6 +29,7 @@ func TestUpgradeHintHeaderValue(t *testing.T) {
 		{"control character drops the member", UpgradeHint{"route": {"gcp\r\nX-Evil: 1"}, "ok": {"y"}}, `ok=("y")`},
 		{"non-ASCII drops the member", UpgradeHint{"route": {"gcé"}}, ""},
 		{"member with no values dropped", UpgradeHint{"route": {}}, ""},
+		{"hint over the size cap dropped whole", UpgradeHint{"route": {"gcp"}, "entitlements": {strings.Repeat("e", maxUpgradeHintHeaderLen)}}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.hint.headerValue(); got != tc.want {

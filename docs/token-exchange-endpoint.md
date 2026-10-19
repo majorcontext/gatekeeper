@@ -96,7 +96,7 @@ A success or a decline may carry `gatekeeper_upgrade`: an object whose values ar
 X-Gatekeeper-Upgrade: entitlements=("gcp-deploy-dev"), route=("gcp")
 ```
 
-Gatekeeper removes any `X-Gatekeeper-Upgrade` header the destination sends, so the client can trust its origin. A member whose key is not a lowercase RFC 9651 key, or with a value that is not printable ASCII, is dropped. A `gatekeeper_upgrade` of any other shape is ignored; it never fails the exchange.
+Gatekeeper removes any `X-Gatekeeper-Upgrade` header the destination sends, so the client can trust its origin. When the host's resolver declined, the decline's hint is sent; otherwise the hint of the first injected credential that has one. A member whose key is not a lowercase RFC 9651 key, or with a value that is not printable ASCII, is dropped, and a serialized hint over 1024 bytes is dropped whole. A `gatekeeper_upgrade` of any other shape is ignored; it never fails the exchange.
 
 ### Error (any other non-200 status)
 
@@ -119,7 +119,7 @@ Gatekeeper caches tokens per `(subject_token, actor_token)` pair within each cre
 
 - If `expires_in` is provided, the token is cached until expiry, capped at 1 minute. No refresh is attempted — when the cache entry expires, the next request triggers a new exchange.
 - If `expires_in` is `0` or omitted, the cap is used.
-- A decline is cached for the cap, with its upgrade hint.
+- A decline is cached for the cap, with its upgrade hint. The destination statuses that drop a token drop a decline too, under the same per-key rate limit.
 - There is no proactive refresh or sliding window. Expired entries are replaced on the next request.
 - A `401`, `403`, or `429` from the destination drops the cache entry, so the next request exchanges afresh. A `429` may signal an exhausted backing credential even when its token remains valid. Evictions are rate-limited to one per key per 10 seconds.
 - Concurrent requests that share a cache-miss key are coalesced with `singleflight.Group` — only one exchange call reaches your endpoint per key at a time; the other callers block on the same in-flight call and share its result. You do not need your own request-level locking or idempotency handling to survive a burst of simultaneous requests for the same subject, though duplicate exchanges can still happen across separate cache keys (e.g. different actor tokens) or after a cache entry has expired and a new one hasn't populated yet.
