@@ -3,7 +3,10 @@ package credentialsource
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -31,6 +34,32 @@ type TokenExchangeResponse struct {
 	IssuedTokenType string `json:"issued_token_type"`
 	TokenType       string `json:"token_type"`
 	ExpiresIn       int    `json:"expires_in"`
+	// Upgrade is the gatekeeper_upgrade extension parameter, if any.
+	Upgrade UpgradeHint `json:"-"`
+}
+
+// UpgradeHint is the gatekeeper_upgrade extension parameter of an STS
+// response: what the caller could request beyond the credential it got. Each
+// key maps to one or more values.
+type UpgradeHint map[string][]string
+
+// TokenExchangeDeclined reports that the STS issued no token and told the
+// caller to use its configured default credential instead: a 400
+// invalid_target response that carries gatekeeper_fallback "default".
+type TokenExchangeDeclined struct {
+	Upgrade UpgradeHint
+	// Invalidate drops the cached decline. TokenExchangeResolver sets it.
+	Invalidate func()
+}
+
+func (*TokenExchangeDeclined) Error() string {
+	return "token exchange declined: use the configured default credential"
+}
+
+// ExchangedToken is a token that ResolveToken returns.
+type ExchangedToken struct {
+	AccessToken string
+	Upgrade     UpgradeHint
 }
 
 // TokenExchangeSource exchanges a subject token for an access token via
@@ -67,7 +96,16 @@ type tokenCacheKey struct {
 
 type cachedToken struct {
 	accessToken string
+	upgrade     UpgradeHint
+	declined    bool
 	expiresAt   time.Time
+}
+
+func (c cachedToken) result() (ExchangedToken, error) {
+	if c.declined {
+		return ExchangedToken{}, &TokenExchangeDeclined{Upgrade: c.upgrade}
+	}
+	return ExchangedToken{AccessToken: c.accessToken, Upgrade: c.upgrade}, nil
 }
 
 // NewTokenExchangeSource creates a new RFC 8693 token exchange source.
@@ -127,6 +165,17 @@ func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken, actorT
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusBadRequest {
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenResponseSize))
+		if err != nil {
+			return nil, fmt.Errorf("reading response: %w", err)
+		}
+		if declined := parseDecline(body); declined != nil {
+			return nil, declined
+		}
+		return nil, tokenResponseError("token exchange", resp.StatusCode, body)
+	}
+
 	body, err := readTokenResponse(resp, http.StatusOK, "token exchange")
 	if err != nil {
 		return nil, err
@@ -139,8 +188,60 @@ func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken, actorT
 	if result.AccessToken == "" {
 		return nil, fmt.Errorf("response missing access_token field")
 	}
+	var ext struct {
+		Upgrade json.RawMessage `json:"gatekeeper_upgrade"`
+	}
+	_ = json.Unmarshal(body, &ext)
+	result.Upgrade = parseUpgradeHint(ext.Upgrade)
 
 	return &result, nil
+}
+
+// parseDecline returns the decline that an RFC 6749 §5.2 error body carries,
+// or nil. A bare invalid_target is not a decline: it also reports a target
+// the STS does not know, which must fail rather than fall back.
+func parseDecline(body []byte) *TokenExchangeDeclined {
+	var e struct {
+		Error    string          `json:"error"`
+		Fallback string          `json:"gatekeeper_fallback"`
+		Upgrade  json.RawMessage `json:"gatekeeper_upgrade"`
+	}
+	if json.Unmarshal(body, &e) != nil || e.Error != "invalid_target" || e.Fallback != "default" {
+		return nil
+	}
+	return &TokenExchangeDeclined{Upgrade: parseUpgradeHint(e.Upgrade)}
+}
+
+// parseUpgradeHint decodes a gatekeeper_upgrade object whose values are
+// strings or arrays of strings. Any other shape drops the whole hint: a hint
+// only guides the client, so it must never fail the exchange.
+func parseUpgradeHint(raw json.RawMessage) UpgradeHint {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		slog.Debug("ignoring malformed gatekeeper_upgrade", "subsystem", "credentialsource", "error", err)
+		return nil
+	}
+	hint := make(UpgradeHint, len(fields))
+	for k, v := range fields {
+		var one string
+		if json.Unmarshal(v, &one) == nil {
+			hint[k] = []string{one}
+			continue
+		}
+		var many []string
+		if err := json.Unmarshal(v, &many); err != nil {
+			slog.Debug("ignoring malformed gatekeeper_upgrade", "subsystem", "credentialsource", "key", k, "error", err)
+			return nil
+		}
+		hint[k] = many
+	}
+	if len(hint) == 0 {
+		return nil
+	}
+	return hint
 }
 
 // maxTokenTTL caps how long an exchanged token is cached, regardless of the
@@ -194,22 +295,29 @@ func (s *TokenExchangeSource) Invalidate(subjectToken, actorToken string) {
 	}
 }
 
-// Resolve returns a credential for the given subject, using the cache when
-// possible. Cache entries live for the STS-advertised expires_in, capped at
-// maxTokenTTL. Concurrent requests for the same subject are coalesced into a
-// single STS call via singleflight. When actorToken is non-empty, it is
-// forwarded to the STS as the RFC 8693 actor_token parameter and included
-// in the cache key. When requestID is non-empty, it is forwarded as
-// X-Request-Id to the STS for cross-service correlation.
+// Resolve returns the access token that ResolveToken returns.
 func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorToken, requestID string) (string, error) {
+	tok, err := s.ResolveToken(ctx, subjectToken, actorToken, requestID)
+	return tok.AccessToken, err
+}
+
+// ResolveToken returns a credential for the given subject, using the cache
+// when possible. Cache entries live for the STS-advertised expires_in, capped
+// at maxTokenTTL. A decline returns *TokenExchangeDeclined and is cached for
+// maxTokenTTL, so a host whose default is a static credential does not call
+// the STS on every request. Concurrent requests for the same subject are
+// coalesced into a single STS call via singleflight. When actorToken is
+// non-empty, it is forwarded to the STS as the RFC 8693 actor_token parameter
+// and included in the cache key. When requestID is non-empty, it is forwarded
+// as X-Request-Id to the STS for cross-service correlation.
+func (s *TokenExchangeSource) ResolveToken(ctx context.Context, subjectToken, actorToken, requestID string) (ExchangedToken, error) {
 	ck := tokenCacheKey{subject: subjectToken, actor: actorToken}
 	sfKey := fmt.Sprintf("%q\x00%q", subjectToken, actorToken)
 
 	s.mu.Lock()
 	if cached, ok := s.cache[ck]; ok && time.Now().Before(cached.expiresAt) {
-		token := cached.accessToken
 		s.mu.Unlock()
-		return token, nil
+		return cached.result()
 	}
 	s.mu.Unlock()
 
@@ -217,7 +325,7 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorTo
 		s.mu.Lock()
 		if cached, ok := s.cache[ck]; ok && time.Now().Before(cached.expiresAt) {
 			s.mu.Unlock()
-			return cached.accessToken, nil
+			return cached, nil
 		}
 		gen := s.cacheGen
 		s.mu.Unlock()
@@ -230,13 +338,22 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorTo
 		// The winning goroutine's requestID is forwarded to the STS call.
 		// Callers coalesced by singleflight do not each get a correlated STS entry.
 		result, err := s.Exchange(context.WithoutCancel(ctx), subjectToken, actorToken, requestID)
-		if err != nil {
+		var entry cachedToken
+		var declined *TokenExchangeDeclined
+		switch {
+		case errors.As(err, &declined):
+			entry = cachedToken{declined: true, upgrade: declined.Upgrade}
+		case err != nil:
 			return nil, err
+		default:
+			entry = cachedToken{accessToken: result.AccessToken, upgrade: result.Upgrade}
 		}
 
-		ttl := time.Duration(result.ExpiresIn) * time.Second
-		if ttl <= 0 || ttl > maxTokenTTL {
-			ttl = maxTokenTTL
+		ttl := maxTokenTTL
+		if result != nil {
+			if advertised := time.Duration(result.ExpiresIn) * time.Second; advertised > 0 && advertised < ttl {
+				ttl = advertised
+			}
 		}
 
 		s.mu.Lock()
@@ -250,19 +367,17 @@ func (s *TokenExchangeSource) Resolve(ctx context.Context, subjectToken, actorTo
 		// Otherwise this token may predate the rotation that prompted the
 		// invalidation, and writing it would re-stale the entry that was just
 		// cleared. The caller still gets this token; only the caching is skipped.
+		entry.expiresAt = now.Add(ttl)
 		if s.cacheGen == gen {
-			s.cache[ck] = cachedToken{
-				accessToken: result.AccessToken,
-				expiresAt:   now.Add(ttl),
-			}
+			s.cache[ck] = entry
 		}
 		s.mu.Unlock()
 
-		return result.AccessToken, nil
+		return entry, nil
 	})
 	if err != nil {
-		return "", err
+		return ExchangedToken{}, err
 	}
 
-	return v.(string), nil
+	return v.(cachedToken).result()
 }

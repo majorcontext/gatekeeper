@@ -7,9 +7,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/majorcontext/gatekeeper/proxy"
 )
 
 func TestNewTokenExchangeResolver(t *testing.T) {
@@ -713,5 +716,62 @@ func TestResolveTokenExchange_ActorTokenFromValidation(t *testing.T) {
 				t.Errorf("error = %q, want to contain %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// A box with no live grant gets the host's configured static credential,
+// sees the STS hint on the destination's 403, and its retry after the grant
+// is approved gets the upgraded token without waiting out the cached
+// decline.
+func TestTokenExchangeDecline_FallsBackToConfiguredDefault(t *testing.T) {
+	var exchanges atomic.Int32
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if exchanges.Add(1) == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, `{"error":"invalid_target","gatekeeper_fallback":"default",`+
+				`"gatekeeper_upgrade":{"route":"gcp","entitlements":["gcp-ssh-staging"]}}`)
+			return
+		}
+		io.WriteString(w, `{"access_token":"ya29.upgraded","token_type":"Bearer","expires_in":3600}`)
+	}))
+	defer sts.Close()
+	var gotAuth []string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = append(gotAuth, r.Header.Get("Authorization"))
+		if r.Header.Get("Authorization") != "Bearer ya29.upgraded" {
+			w.WriteHeader(http.StatusForbidden)
+		}
+	}))
+	defer backend.Close()
+	port := mustURL(t, backend.URL).Port()
+
+	srv := newBareServer(t)
+	cfg := &Config{Credentials: []CredentialConfig{
+		{Host: "127.0.0.1", Grant: "gcp-box", AllowInsecure: true, Source: SourceConfig{
+			Type: "token-exchange", Endpoint: sts.URL, ClientID: "c", ClientSecret: "s", SubjectHeader: "X-Subject"}},
+		{Host: "127.0.0.1", Grant: "gcp-config", AllowInsecure: true, Source: SourceConfig{Type: "static", Value: "default-token"}},
+	}}
+	if err := srv.loadCredentials(context.Background(), cfg); err != nil {
+		t.Fatalf("loadCredentials: %v", err)
+	}
+
+	var hints []string
+	for range 2 {
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:"+port+"/compute/v1/projects", nil)
+		req.Header.Set("X-Subject", "usr_1|box_1")
+		rec := httptest.NewRecorder()
+		srv.proxy.ServeHTTP(rec, req)
+		hints = append(hints, rec.Header().Get(proxy.UpgradeHintHeader))
+	}
+
+	if want := []string{"Bearer default-token", "Bearer ya29.upgraded"}; !slices.Equal(gotAuth, want) {
+		t.Errorf("upstream Authorization = %q, want %q", gotAuth, want)
+	}
+	if want := []string{`entitlements=("gcp-ssh-staging"), route=("gcp")`, ""}; !slices.Equal(hints, want) {
+		t.Errorf("%s = %q, want %q", proxy.UpgradeHintHeader, hints, want)
+	}
+	if n := exchanges.Load(); n != 2 {
+		t.Errorf("STS exchanges = %d, want 2", n)
 	}
 }

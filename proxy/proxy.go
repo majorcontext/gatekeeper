@@ -187,6 +187,10 @@ type CredentialHeader struct {
 	// Nil for credentials with no cache behind them (e.g. static headers).
 	Invalidate func()
 
+	// UpgradeHint, when non-nil, is sent to the client in UpgradeHintHeader
+	// when the destination answers 401 or 403.
+	UpgradeHint UpgradeHint
+
 	// AllowInsecure permits injecting this credential into a request whose
 	// upstream scheme is http. The default refuses the request.
 	AllowInsecure bool

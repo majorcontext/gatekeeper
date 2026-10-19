@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -389,22 +390,21 @@ func getRunContext(r *http.Request) *RunContextData {
 // the client asked for by name; if the resolver returns nil (e.g., no
 // subject identity found), the proxy falls through to static credentials
 // for the same host. This enables patterns like "per-user OAuth via
-// token-exchange, with a bot identity fallback."
+// token-exchange, with a bot identity fallback." A resolver that returns
+// *ResolverDeclined falls through the same way, and the result carries the
+// decline for settleUpstreamResponse.
 //
 // ctxReq carries the RunContextData (the CONNECT request for intercepted
 // connections, or the same request for plain HTTP). innerReq is the actual
 // request the resolver may inspect and modify.
-func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host string) ([]CredentialHeader, error) {
+func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host string) (resolvedCredentials, error) {
 	if rc := getRunContext(ctxReq); rc != nil {
 		creds, _ := lookupHostKeyed(rc.Credentials, host, nonEmptySlice)
-		if len(creds) > 0 {
-			return creds, nil
-		}
-		return nil, nil
+		return resolvedCredentials{creds: creds}, nil
 	}
 	entry, resolverMatch := p.getCredentialResolverMatch(host)
 	if entry.resolve == nil {
-		return p.getCredentials(host), nil
+		return resolvedCredentials{creds: p.getCredentials(host)}, nil
 	}
 	if staticCreds, staticMatch := p.getCredentialsMatch(host); staticMatch.outranks(resolverMatch) {
 		if entry.declared {
@@ -415,7 +415,7 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 			for _, h := range entry.stripHeaders {
 				innerReq.Header.Del(h)
 			}
-			return staticCreds, nil
+			return resolvedCredentials{creds: staticCreds}, nil
 		}
 		// A legacy registration made no declaration, so the resolver may
 		// have request-mutating side effects only it can perform (e.g.
@@ -432,7 +432,7 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 		// token refresh landing while the resolver was out (e.g. a
 		// refreshing source rotating the static token mid-call) must be
 		// seen, or the request injects a credential that's already stale.
-		return p.getCredentials(host), nil
+		return resolvedCredentials{creds: p.getCredentials(host)}, nil
 	}
 	// A resolver is handed innerReq and may mutate it, so which headers the
 	// client sent is only knowable before it runs.
@@ -444,15 +444,19 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 	}
 
 	resolved, resolveErr := entry.resolve(innerReq.Context(), ctxReq, innerReq, host)
+	var declined *ResolverDeclined
+	if errors.As(resolveErr, &declined) {
+		return resolvedCredentials{creds: p.getCredentials(host), declined: declined}, nil
+	}
 	if resolveErr != nil {
-		return nil, resolveErr
+		return resolvedCredentials{}, resolveErr
 	}
 	if len(resolved) > 0 {
 		// Read static credentials after the resolver has run, not before: a
 		// token refresh landing while a slow resolver was out must be seen.
-		return withRequestedStatics(sentBefore, innerReq, resolved, p.getCredentials(host)), nil
+		return resolvedCredentials{creds: withRequestedStatics(sentBefore, innerReq, resolved, p.getCredentials(host))}, nil
 	}
-	return p.getCredentials(host), nil
+	return resolvedCredentials{creds: p.getCredentials(host)}, nil
 }
 
 // getCredentialBundlesForRequest returns the caller's credential bundles.
@@ -541,7 +545,7 @@ func withRequestedStatics(sentBefore map[string]bool, req *http.Request, resolve
 // credential. Sources rate-limit their own evictions, since these statuses also
 // cover cases where resolving again will return the same credential.
 func invalidateCredentialsOnCredentialFailure(creds []CredentialHeader, statusCode int) {
-	if statusCode != http.StatusUnauthorized && statusCode != http.StatusForbidden && statusCode != http.StatusTooManyRequests {
+	if !isCredentialFailure(statusCode) {
 		return
 	}
 	for _, cred := range creds {
@@ -549,6 +553,10 @@ func invalidateCredentialsOnCredentialFailure(creds []CredentialHeader, statusCo
 			cred.Invalidate()
 		}
 	}
+}
+
+func isCredentialFailure(statusCode int) bool {
+	return statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden || statusCode == http.StatusTooManyRequests
 }
 
 // getExtraHeadersForRequest returns extra headers for a host, checking

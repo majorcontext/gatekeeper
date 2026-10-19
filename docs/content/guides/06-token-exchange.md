@@ -222,12 +222,29 @@ grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_tok
 | `issued_token_type` | string | No       | Token type URI of the issued token                   |
 | `token_type`        | string | No       | Informational; gatekeeper uses its own prefix config |
 | `expires_in`        | int    | No       | TTL in seconds, capped at 60. Defaults to the cap if omitted |
+| `gatekeeper_upgrade` | object | No      | Upgrade hint for the client; see below |
 
 `access_token` must be non-empty. Gatekeeper treats an empty value as an error.
 
-### Error response (non-200)
+### Decline response (HTTP 400)
 
-Gatekeeper treats any non-200 status as a failure and returns HTTP 502 to the client. Use standard OAuth error format:
+To send the request out with the host's configured static credential instead, the STS declines:
+
+```json
+{
+  "error": "invalid_target",
+  "gatekeeper_fallback": "default",
+  "gatekeeper_upgrade": {"route": "gcp", "entitlements": ["gcp-deploy-dev"]}
+}
+```
+
+Gatekeeper injects the static credentials for the same host, or forwards the client's headers when there are none, and caches the decline for 1 minute. A `401`, `403`, or `429` from the destination drops it. A bare `invalid_target` still fails the request.
+
+On a `401` or `403` from the destination, gatekeeper sends `gatekeeper_upgrade` from a success or a decline to the client as `X-Gatekeeper-Upgrade: entitlements=("gcp-deploy-dev"), route=("gcp")`, and removes any value the destination sent. Values are strings or arrays of strings; a hint of any other shape is ignored.
+
+### Error response (other non-200)
+
+Gatekeeper treats any other non-200 status as a failure and returns HTTP 502 to the client. Use standard OAuth error format:
 
 ```json
 {
