@@ -67,12 +67,40 @@ A JSON response per [RFC 8693 §2.2.1](https://datatracker.ietf.org/doc/html/rfc
 | `issued_token_type` | string | No       | Token type URI of the issued token                                |
 | `token_type`        | string | No       | How the token should be used (informational; gatekeeper uses its own prefix config) |
 | `expires_in`        | int    | No       | TTL in seconds. Gatekeeper caches the token per subject until expiry, capped at 1 minute. If omitted, the cap is used. |
+| `gatekeeper_upgrade` | object | No      | An upgrade hint; see [Upgrade hints](#upgrade-hints). |
 
 **Important:** `access_token` must be non-empty. Gatekeeper treats an empty `access_token` as an error.
 
-### Error (any non-200 status)
+### Decline (HTTP 400)
 
-Gatekeeper treats any non-200 HTTP response as a failure. It reads up to 200 bytes of the response body for error logging. The request that triggered the exchange receives an HTTP 502 Bad Gateway response from the proxy.
+An STS that has no token for this subject, but wants the request to go out with the host's configured static credential, declines. The response is an [RFC 6749 §5.2](https://datatracker.ietf.org/doc/html/rfc6749#section-5.2) error with `invalid_target` ([RFC 8693 §2.2.2](https://datatracker.ietf.org/doc/html/rfc8693#section-2.2.2): unwilling to issue a token for the target) and the extension parameter `gatekeeper_fallback`:
+
+```json
+{
+  "error": "invalid_target",
+  "error_description": "no grant for this target; use the configured default",
+  "gatekeeper_fallback": "default",
+  "gatekeeper_upgrade": {"route": "gcp", "entitlements": ["gcp-deploy-dev"]}
+}
+```
+
+Gatekeeper then injects the static credentials configured for the same host, as it does for an empty or `bot_subject` subject. With no static credential for the host, the client's own headers go upstream unchanged. A decline is cached like a token, for 1 minute, so a host with a static default does not call the STS on every request. A `401`, `403`, or `429` from the destination drops the cached decline, so a credential the STS starts issuing applies to the client's retry.
+
+Only `invalid_target` with `gatekeeper_fallback: "default"` is a decline. A bare `invalid_target`, which also reports a target the STS does not know, fails the request. An STS that returns a decline to an older gatekeeper fails the request the same way.
+
+### Upgrade hints
+
+A success or a decline may carry `gatekeeper_upgrade`: an object whose values are strings or arrays of strings, saying what the subject could request beyond the credential it got. When the destination answers `401` or `403`, gatekeeper sends it to the client as the `X-Gatekeeper-Upgrade` header, an [RFC 9651](https://datatracker.ietf.org/doc/html/rfc9651) dictionary of inner lists with sorted members:
+
+```
+X-Gatekeeper-Upgrade: entitlements=("gcp-deploy-dev"), route=("gcp")
+```
+
+Gatekeeper removes any `X-Gatekeeper-Upgrade` header or trailer the destination sends, so the client can trust its origin. When the host's resolver declined, the decline's hint is sent; otherwise the hint of the first injected credential that has one. A member whose key is not a lowercase RFC 9651 key, or with a value that is not printable ASCII, is dropped, and a serialized hint over 1024 bytes is dropped whole. A `gatekeeper_upgrade` of any other shape, including a `null` value or array element, is ignored; it never fails the exchange.
+
+### Error (any other non-200 status)
+
+Gatekeeper treats any other non-200 HTTP response as a failure. It reads up to 200 bytes of the response body for error logging. The request that triggered the exchange receives an HTTP 502 Bad Gateway response from the proxy.
 
 **Important:** Do not echo request parameters (especially `actor_token`) in error response bodies. Gatekeeper includes the STS error body in log messages, so sensitive values like the caller's API key would appear in proxy logs.
 
@@ -91,6 +119,7 @@ Gatekeeper caches tokens per `(subject_token, actor_token)` pair within each cre
 
 - If `expires_in` is provided, the token is cached until expiry, capped at 1 minute. No refresh is attempted — when the cache entry expires, the next request triggers a new exchange.
 - If `expires_in` is `0` or omitted, the cap is used.
+- A decline is cached for the cap, with its upgrade hint. The destination statuses that drop a token drop a decline too, under the same per-key rate limit.
 - There is no proactive refresh or sliding window. Expired entries are replaced on the next request.
 - A `401`, `403`, or `429` from the destination drops the cache entry, so the next request exchanges afresh. A `429` may signal an exhausted backing credential even when its token remains valid. Evictions are rate-limited to one per key per 10 seconds.
 - Concurrent requests that share a cache-miss key are coalesced with `singleflight.Group` — only one exchange call reaches your endpoint per key at a time; the other callers block on the same in-flight call and share its result. You do not need your own request-level locking or idempotency handling to survive a burst of simultaneous requests for the same subject, though duplicate exchanges can still happen across separate cache keys (e.g. different actor tokens) or after a cache entry has expired and a new one hasn't populated yet.

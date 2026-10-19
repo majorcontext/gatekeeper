@@ -214,7 +214,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			pr.Out.RequestURI = ""
 
 			// Credentials were resolved in the wrapping handler and passed via context.
-			creds, _ := pr.Out.Context().Value(interceptCredsKey{}).([]CredentialHeader)
+			resolved, _ := pr.Out.Context().Value(interceptCredsKey{}).(resolvedCredentials)
 
 			// Snapshot headers before injection so logs never hold credential values.
 			preInjectionHeaders, _ := pr.Out.Context().Value(interceptPreInjHeadersKey{}).(http.Header)
@@ -227,7 +227,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			logURL := pr.Out.URL.String()
 
 			credResult := p.prepareOutbound(r, pr.Out, outboundPrep{
-				creds:      creds,
+				creds:      resolved.creds,
 				bundle:     bundleResult,
 				host:       host,
 				lookupHost: r.Host,
@@ -256,9 +256,9 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			// drop it so the next request re-resolves rather than replaying a
 			// credential the destination has already refused. Rewrite stored the
 			// injection result, so this evicts only what was actually sent.
-			if cr, ok := req.Context().Value(interceptCredResultKey{}).(credentialInjectionResult); ok {
-				invalidateCredentialsOnCredentialFailure(cr.Injected, resp.StatusCode)
-			}
+			cr, _ := req.Context().Value(interceptCredResultKey{}).(credentialInjectionResult)
+			resolved, _ := req.Context().Value(interceptCredsKey{}).(resolvedCredentials)
+			settleUpstreamResponse(resp, cr.Injected, resolved.declined)
 
 			// Track LLM policy denials for the canonical log line.
 			var llmDenied bool
@@ -505,7 +505,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		// Resolve credentials before forwarding so errors are caught early.
 		// r.Host is the CONNECT target with its port, so port-pinned host
 		// keys can match; the lookup falls back to the bare host.
-		creds, credErr := p.getCredentialsForRequest(r, req, r.Host)
+		resolved, credErr := p.getCredentialsForRequest(r, req, r.Host)
 		if credErr != nil {
 			w.Header().Set("Content-Type", "text/plain")
 			w.WriteHeader(http.StatusBadGateway)
@@ -548,7 +548,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		// Pass resolved credentials, start time, and captured body to Rewrite via context.
 		ctx := req.Context()
 		ctx = context.WithValue(ctx, interceptReqStartKey{}, reqStart)
-		ctx = context.WithValue(ctx, interceptCredsKey{}, creds)
+		ctx = context.WithValue(ctx, interceptCredsKey{}, resolved)
 		ctx = context.WithValue(ctx, interceptBundleResultKey{}, bundleResult.credentialInjectionResult)
 		ctx = context.WithValue(ctx, interceptPreInjHeadersKey{}, preBundleHeaders)
 		ctx = context.WithValue(ctx, interceptReqBodyKey{}, reqBody)

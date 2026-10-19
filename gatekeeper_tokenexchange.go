@@ -2,6 +2,7 @@ package gatekeeper
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -53,6 +54,10 @@ func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialR
 	})
 	return func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]proxy.CredentialHeader, error) {
 		headers, err := resolve(ctx, proxyReq, innerReq, host)
+		var declined *credentialsource.TokenExchangeDeclined
+		if errors.As(err, &declined) {
+			return nil, &proxy.ResolverDeclined{UpgradeHint: proxy.UpgradeHint(declined.Upgrade), Invalidate: declined.Invalidate}
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -61,7 +66,7 @@ func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialR
 		}
 		out := make([]proxy.CredentialHeader, len(headers))
 		for i, h := range headers {
-			out[i] = proxy.CredentialHeader{Name: h.Name, Value: h.Value, Grant: h.Grant, Invalidate: h.Invalidate}
+			out[i] = proxy.CredentialHeader{Name: h.Name, Value: h.Value, Grant: h.Grant, Invalidate: h.Invalidate, UpgradeHint: proxy.UpgradeHint(h.Upgrade)}
 		}
 		return out, nil
 	}

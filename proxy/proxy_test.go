@@ -1441,11 +1441,11 @@ func TestProxy_GetCredentials_WildcardKeyWithPort(t *testing.T) {
 		t.Helper()
 		req := httptest.NewRequest("GET", "https://"+host+"/", nil)
 		req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
-		creds, err := p.getCredentialsForRequest(req, req, host)
+		resolved, err := p.getCredentialsForRequest(req, req, host)
 		if err != nil {
 			t.Fatalf("getCredentialsForRequest(%q): %v", host, err)
 		}
-		return creds
+		return resolved.creds
 	}
 
 	if creds := lookup(t, "svc.internal.example.com:8443"); len(creds) != 1 || creds[0].Grant != "port-grant" {

@@ -237,7 +237,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// client must not be able to trigger through policy-denied hosts —
 	// and a denied client must see the policy denial, not a resolver
 	// error. Same order as the CONNECT interception path.
-	creds, err := p.getCredentialsForRequest(r, r, lookupHost)
+	resolved, err := p.getCredentialsForRequest(r, r, lookupHost)
 	if err != nil {
 		http.Error(w, "credential resolution failed", http.StatusBadGateway)
 		p.logRequest(r, RequestLogData{
@@ -257,7 +257,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if p.refusesCleartextInjection(r, r.URL.Scheme, lookupHost, creds) {
+	if p.refusesCleartextInjection(r, r.URL.Scheme, lookupHost, resolved.creds) {
 		p.logRequest(r, RequestLogData{
 			Method:       r.Method,
 			URL:          r.URL.String(),
@@ -311,7 +311,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		p.logPolicyObservation(r, "credential-bundle", "http.request", "", bundleResult.Reason)
 	}
 	credResult := p.prepareOutbound(r, outReq, outboundPrep{
-		creds:      creds,
+		creds:      resolved.creds,
 		bundle:     bundleResult.credentialInjectionResult,
 		host:       host,
 		lookupHost: lookupHost,
@@ -351,7 +351,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	invalidateCredentialsOnCredentialFailure(credResult.Injected, resp.StatusCode)
+	settleUpstreamResponse(resp, credResult.Injected, resolved.declined)
 
 	logData.StatusCode = resp.StatusCode
 	logData.ResponseHeaders = resp.Header.Clone()

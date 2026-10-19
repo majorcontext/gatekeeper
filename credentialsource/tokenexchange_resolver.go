@@ -2,6 +2,7 @@ package credentialsource
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 )
@@ -13,6 +14,7 @@ type ResolvedHeader struct {
 	Value      string
 	Grant      string
 	Invalidate func()
+	Upgrade    UpgradeHint
 }
 
 // HeaderResolver resolves headers for one request. Its signature matches
@@ -48,6 +50,8 @@ type TokenExchangeResolverConfig struct {
 
 // TokenExchangeResolver returns a per-request resolver that exchanges the
 // caller's subject for an access token through one shared TokenExchangeSource.
+// When the STS declines, the resolver returns *TokenExchangeDeclined with
+// Invalidate set.
 func TokenExchangeResolver(cfg TokenExchangeResolverConfig) HeaderResolver {
 	src := cfg.Source
 	if src == nil {
@@ -95,18 +99,25 @@ func TokenExchangeResolver(cfg TokenExchangeResolverConfig) HeaderResolver {
 			return nil, nil
 		}
 
-		token, err := src.Resolve(ctx, subject, actorToken, cfg.RequestID(ctx))
+		token, err := src.ResolveToken(ctx, subject, actorToken, cfg.RequestID(ctx))
+		// Destination rejection means the credential behind the exchange
+		// rotated, or a grant changed since a decline; the source rate-limits
+		// eviction.
+		invalidate := func() { src.Invalidate(subject, actorToken) }
+		var declined *TokenExchangeDeclined
+		if errors.As(err, &declined) {
+			return nil, &TokenExchangeDeclined{Upgrade: declined.Upgrade, Invalidate: invalidate}
+		}
 		if err != nil {
 			return nil, err
 		}
 
 		return []ResolvedHeader{{
-			Name:  header,
-			Value: cfg.AuthValue(token, cfg.Prefix, cfg.Format),
-			Grant: cfg.Grant,
-			// Destination rejection means the credential behind the exchange
-			// rotated; the source rate-limits eviction.
-			Invalidate: func() { src.Invalidate(subject, actorToken) },
+			Name:       header,
+			Value:      cfg.AuthValue(token.AccessToken, cfg.Prefix, cfg.Format),
+			Grant:      cfg.Grant,
+			Invalidate: invalidate,
+			Upgrade:    token.Upgrade,
 		}}, nil
 	}
 }

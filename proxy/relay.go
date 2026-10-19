@@ -139,7 +139,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve credentials before copying headers so resolver side effects
 	// (e.g., subject header stripping) are reflected in proxyReq.
-	creds, err := p.getCredentialsForRequest(r, r, host)
+	resolved, err := p.getCredentialsForRequest(r, r, host)
 	if err != nil {
 		slog.Warn("dynamic credential resolution failed",
 			"subsystem", "proxy", "host", host, "error", err)
@@ -148,7 +148,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if p.refusesCleartextInjection(r, targetURL.Scheme, host, creds) {
+	if p.refusesCleartextInjection(r, targetURL.Scheme, host, resolved.creds) {
 		p.logExit(r, logBase, start, http.StatusForbidden, func(d *RequestLogData) {
 			d.Denied = true
 			d.DenyReason = "credential injection over plain HTTP refused: " + host
@@ -171,7 +171,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 		p.logPolicyObservation(r, "credential-bundle", "http.request", "", bundleResult.Reason)
 	}
 	credResult := p.prepareOutbound(r, proxyReq, outboundPrep{
-		creds:      creds,
+		creds:      resolved.creds,
 		bundle:     bundleResult.credentialInjectionResult,
 		host:       host,
 		lookupHost: host,
@@ -201,7 +201,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	invalidateCredentialsOnCredentialFailure(credResult.Injected, resp.StatusCode)
+	settleUpstreamResponse(resp, credResult.Injected, resolved.declined)
 
 	written, streamErr := forwardStreaming(r.Context(), w, resp)
 
