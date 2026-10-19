@@ -98,6 +98,10 @@ X-Gatekeeper-Upgrade: entitlements=("gcp-deploy-dev"), route=("gcp")
 
 Gatekeeper removes any `X-Gatekeeper-Upgrade` header or trailer the destination sends, so the client can trust its origin. When the host's resolver declined, the decline's hint is sent; otherwise the hint of the first injected credential that has one. A member whose key is not a lowercase RFC 9651 key, or with a value that is not printable ASCII, is dropped, and a serialized hint over 1024 bytes is dropped whole. A `gatekeeper_upgrade` of any other shape, including a `null` value or array element, is ignored; it never fails the exchange.
 
+### No credential for the subject (HTTP 404)
+
+Answer `404` when the subject has no credential for the target, for example a user who has not connected the account the route needs. On a rule with `static_fallback: explicit`, gatekeeper refuses the request with `403` and `X-Gatekeeper-Blocked: credential-required`, and appends your `error_description` to the message the client sees. Keep the description to printable ASCII, 200 bytes or fewer, with no secrets; gatekeeper drops one with any other character and cuts a longer one. Gatekeeper does not cache a `404`, so a credential the user connects applies to the next request. On any other rule, a `404` fails the request with `502`, as before.
+
 ### Error (any other non-200 status)
 
 Gatekeeper treats any other non-200 HTTP response as a failure. It reads up to 200 bytes of the response body for error logging. The request that triggered the exchange receives an HTTP 502 Bad Gateway response from the proxy.

@@ -239,19 +239,25 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// error. Same order as the CONNECT interception path.
 	resolved, err := p.getCredentialsForRequest(r, r, lookupHost)
 	if err != nil {
-		http.Error(w, "credential resolution failed", http.StatusBadGateway)
+		status, denied := http.StatusForbidden, p.refusesMissingCredential(w, err)
+		if !denied {
+			status = http.StatusBadGateway
+			http.Error(w, "credential resolution failed", status)
+		}
 		p.logRequest(r, RequestLogData{
 			Method:         r.Method,
 			URL:            r.URL.String(),
 			Host:           host,
 			Path:           r.URL.Path,
 			RequestType:    "http",
-			StatusCode:     http.StatusBadGateway,
+			StatusCode:     status,
+			Denied:         denied,
+			DenyReason:     denyReason(denied, err),
 			Duration:       time.Since(start),
 			RequestHeaders: p.logHeadersRedacted(r.Header, lookupHost),
 			RequestSize:    r.ContentLength,
 			ResponseSize:   -1,
-			Err:            err,
+			Err:            denialErr(denied, err),
 			ClientAddr:     r.RemoteAddr,
 		})
 		return

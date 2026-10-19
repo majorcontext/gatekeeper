@@ -775,3 +775,118 @@ func TestTokenExchangeDecline_FallsBackToConfiguredDefault(t *testing.T) {
 		t.Errorf("STS exchanges = %d, want 2", n)
 	}
 }
+
+// A box with no subscription subject (the bot sentinel) sends the claude
+// CLI's OAuth request to api.anthropic.com. With static_fallback explicit,
+// gatekeeper must refuse it instead of injecting the static x-api-key, and a
+// declined exchange must be refused the same way. A request that sends its
+// own x-api-key still gets the static key.
+func TestStaticFallbackExplicit_RefusesSubscriptionFallthrough(t *testing.T) {
+	const decline = `{"error":"invalid_target","gatekeeper_fallback":"default"}`
+	const noAccount = `{"error":"invalid_grant","error_description":"no Claude subscription is connected for this box's creator"}`
+	for _, tc := range []struct {
+		name, user string
+		fallback   string
+		stsStatus  int
+		stsBody    string
+		headers    map[string]string
+		wantStatus int
+		wantAPIKey string
+		wantSTS    int32
+		wantInBody string
+	}{
+		{"bot subject, OAuth request", "-", "explicit", 400, decline, map[string]string{"Authorization": "Bearer placeholder"}, http.StatusForbidden, "", 0, "claude-code-user"},
+		{"declined exchange, OAuth request", "usr_1|box_1", "explicit", 400, decline, map[string]string{"Authorization": "Bearer placeholder"}, http.StatusForbidden, "", 1, "claude-code-user"},
+		{"bot subject, client names x-api-key", "-", "explicit", 400, decline, map[string]string{"X-Api-Key": "placeholder"}, http.StatusOK, "default-key", 0, ""},
+		{"subject with no account, OAuth request", "usr_1|box_1", "explicit", 404, noAccount, map[string]string{"Authorization": "Bearer placeholder"}, http.StatusForbidden, "", 1, "no Claude subscription is connected"},
+		{"subject with no account, auto fallback", "usr_1|box_1", "auto", 404, noAccount, map[string]string{"Authorization": "Bearer placeholder"}, http.StatusBadGateway, "", 1, ""},
+		{"STS 401 stays a failure", "usr_1|box_1", "explicit", 401, `{"error":"invalid_client"}`, map[string]string{"Authorization": "Bearer placeholder"}, http.StatusBadGateway, "", 1, ""},
+		{"STS 500 stays a failure", "usr_1|box_1", "explicit", 500, `{"error":"server_error"}`, map[string]string{"Authorization": "Bearer placeholder"}, http.StatusBadGateway, "", 1, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var exchanges atomic.Int32
+			sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				exchanges.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.stsStatus)
+				io.WriteString(w, tc.stsBody)
+			}))
+			defer sts.Close()
+			var gotAPIKey []string
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAPIKey = append(gotAPIKey, r.Header.Get("X-Api-Key"))
+			}))
+			defer backend.Close()
+			port := mustURL(t, backend.URL).Port()
+
+			srv := newBareServer(t)
+			cfg := &Config{Credentials: []CredentialConfig{
+				{Host: "127.0.0.1", Grant: "claude-code-user", AllowInsecure: true, Source: SourceConfig{
+					Type: "token-exchange", Endpoint: sts.URL, ClientID: "c", ClientSecret: "s",
+					SubjectFrom: "proxy-auth", BotSubject: "-", StaticFallback: tc.fallback}},
+				{Host: "127.0.0.1", Grant: "anthropic", Header: "x-api-key", Prefix: "", AllowInsecure: true,
+					Source: SourceConfig{Type: "static", Value: "default-key"}},
+			}}
+			if err := srv.loadCredentials(context.Background(), cfg); err != nil {
+				t.Fatalf("loadCredentials: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:"+port+"/v1/messages", nil)
+			req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(tc.user+":boxtoken")))
+			for k, v := range tc.headers {
+				req.Header.Set(k, v)
+			}
+			rec := httptest.NewRecorder()
+			srv.proxy.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			if tc.wantInBody != "" && !strings.Contains(rec.Body.String(), tc.wantInBody) {
+				t.Errorf("body = %q, want it to contain %q", rec.Body.String(), tc.wantInBody)
+			}
+			var want []string
+			if tc.wantStatus == http.StatusOK {
+				want = []string{tc.wantAPIKey}
+			}
+			if !slices.Equal(gotAPIKey, want) {
+				t.Errorf("upstream x-api-key = %q, want %q", gotAPIKey, want)
+			}
+			if n := exchanges.Load(); n != tc.wantSTS {
+				t.Errorf("STS exchanges = %d, want %d", n, tc.wantSTS)
+			}
+		})
+	}
+}
+
+func TestStaticFallback_Validation(t *testing.T) {
+	te := func(fallback string) SourceConfig {
+		return SourceConfig{Type: "token-exchange", Endpoint: "http://sts", ClientID: "c", ClientSecret: "s",
+			SubjectFrom: "proxy-auth", StaticFallback: fallback}
+	}
+	for _, tc := range []struct {
+		name    string
+		source  SourceConfig
+		wantErr bool
+	}{
+		{"token-exchange default", te(""), false},
+		{"token-exchange auto", te("auto"), false},
+		{"token-exchange explicit", te("explicit"), false},
+		{"token-exchange unknown value", te("never"), true},
+		{"static source", SourceConfig{Type: "static", Value: "v", StaticFallback: "explicit"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var err error
+			if tc.source.Type == "token-exchange" {
+				_, err = resolveTokenExchange(CredentialConfig{Host: "api.anthropic.com", Source: tc.source})
+			} else {
+				_, err = resolveSource(tc.source)
+			}
+			if gotErr := err != nil; gotErr != tc.wantErr {
+				t.Fatalf("err = %v, want error %v", err, tc.wantErr)
+			}
+			if tc.wantErr && !strings.Contains(err.Error(), "static_fallback") {
+				t.Errorf("err = %v, want it to name static_fallback", err)
+			}
+		})
+	}
+}

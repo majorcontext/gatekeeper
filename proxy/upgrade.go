@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"slices"
@@ -24,11 +25,62 @@ type UpgradeHint map[string][]string
 // ResolverDeclined is the error a CredentialResolver returns when it has no
 // credential for the request and the host's static credentials apply.
 type ResolverDeclined struct {
+	// ExplicitOnly limits the static credentials to those whose header the
+	// client sent. With none sent, the proxy refuses the request with 403,
+	// naming Grant.
+	ExplicitOnly bool
+	Grant        string
+	// Reason, when set, explains the refusal to the client. It must be
+	// printable ASCII.
+	Reason      string
 	UpgradeHint UpgradeHint
 	// Invalidate, when non-nil, drops the cached decline. The proxy calls it
 	// on the same statuses as CredentialHeader.Invalidate, so a credential
 	// granted since the decline applies to the client's retry.
 	Invalidate func()
+}
+
+// CredentialRequiredError reports a request that an explicit-only decline
+// left with no credential. The proxy answers it with 403.
+type CredentialRequiredError struct {
+	Grant  string
+	Host   string
+	Reason string
+}
+
+func (e *CredentialRequiredError) Error() string {
+	msg := "no " + e.Grant + " credential for " + e.Host + ", and the request names no static credential"
+	if e.Reason != "" {
+		msg += ": " + e.Reason
+	}
+	return msg
+}
+
+// refusesMissingCredential writes a 403 when err is a CredentialRequiredError.
+func (p *Proxy) refusesMissingCredential(w http.ResponseWriter, err error) bool {
+	var required *CredentialRequiredError
+	if !errors.As(err, &required) {
+		return false
+	}
+	setBlocked(w.Header(), "credential-required")
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = w.Write([]byte(p.brandName() + ": " + required.Error() + ".\n"))
+	return true
+}
+
+func denyReason(denied bool, err error) string {
+	if denied {
+		return err.Error()
+	}
+	return ""
+}
+
+func denialErr(denied bool, err error) error {
+	if denied {
+		return nil
+	}
+	return err
 }
 
 func (*ResolverDeclined) Error() string {
