@@ -460,6 +460,32 @@ A sentinel subject value that skips the STS exchange and falls through to the ne
 
 Requires `subject_from: proxy-auth` -- enforced, not just documented: setting `bot_subject` alongside `subject_header` is a config-load error. `subject_header` mode reads a caller-controlled, self-asserted header with nothing authenticating it, so allowing `bot_subject` there would let any caller send the sentinel value in that header to skip the STS and fall through to the credential below, bypassing per-subject authentication for the host. Pick a value that cannot collide with a real subject your deployment could see — `"-"` is a safe default.
 
+### static_fallback
+
+What a request gets when the exchange yields no token: an empty or `bot_subject` subject, or an STS decline. `auto` injects the host's static credentials, as before. `explicit` injects only the static credentials whose header the client sent, and otherwise refuses the request with `403` and `X-Gatekeeper-Blocked: credential-required`. Use `explicit` on a per-user subscription rule, so that a request with no subscription token never falls back silently to a static API key on the same host.
+
+- **Type:** `string`
+- **Required:** No
+- **Default:** `"auto"`
+
+```yaml
+credentials:
+  - host: api.anthropic.com
+    grant: claude-code-user
+    source:
+      type: token-exchange
+      subject_from: proxy-auth
+      static_fallback: explicit
+      # ...
+  - host: api.anthropic.com
+    grant: anthropic
+    header: x-api-key
+    prefix: ""
+    source: {type: env, var: ANTHROPIC_API_KEY}
+```
+
+With this config, a request that sends `x-api-key` gets the static key. An OAuth request with no subscription token is refused instead of billing the API key.
+
 Exchanged tokens are cached per subject (and actor, if present) using the TTL from the STS `expires_in` response field, but the cached TTL is always capped at 1 minute regardless of what the STS advertises — a longer `expires_in` only means the token may remain valid that long, not that it stays valid, since the upstream credential behind the exchange can be revoked or rotated without gatekeeper's knowledge. If the STS does not return `expires_in` (or returns a non-positive value), the same 1-minute cap is used as the TTL. Concurrent requests for the same subject are coalesced into a single STS call via singleflight, so the 1-minute cap does not translate into an STS call per request.
 
 See [Credential invalidation](#credential-invalidation) below for how gatekeeper evicts a cached token before its TTL expires.

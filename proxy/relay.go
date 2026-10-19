@@ -141,6 +141,10 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// (e.g., subject header stripping) are reflected in proxyReq.
 	resolved, err := p.getCredentialsForRequest(r, r, host)
 	if err != nil {
+		if p.refusesMissingCredential(w, err) {
+			p.logExit(r, logBase, start, http.StatusForbidden, func(d *RequestLogData) { d.Denied, d.DenyReason = true, err.Error() })
+			return
+		}
 		slog.Warn("dynamic credential resolution failed",
 			"subsystem", "proxy", "host", host, "error", err)
 		p.logExit(r, logBase, start, http.StatusBadGateway, func(d *RequestLogData) { d.Err = err })

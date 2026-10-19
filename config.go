@@ -165,6 +165,11 @@ type SourceConfig struct {
 	// non-empty identity that still reaches the bot fallback -- see
 	// docs/content/guides/06-token-exchange.md.
 	BotSubject string `yaml:"bot_subject,omitempty"`
+	// StaticFallback sets what a request gets when the exchange yields no
+	// token: an empty or bot_subject subject, or a decline. "auto" (the
+	// default) injects the host's static credentials. "explicit" injects only
+	// those whose header the client sent, and refuses the request otherwise.
+	StaticFallback string `yaml:"static_fallback,omitempty"`
 }
 
 // NetworkConfig configures network policy.

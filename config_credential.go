@@ -12,6 +12,9 @@ import (
 // resolveSource creates a CredentialSource from a SourceConfig.
 // Returns an error if the config contains fields not relevant to the selected type.
 func resolveSource(cfg SourceConfig) (credentialsource.CredentialSource, error) {
+	if cfg.StaticFallback != "" && cfg.Type != "token-exchange" {
+		return nil, fmt.Errorf("%s source: static_fallback applies only to token-exchange sources", cfg.Type)
+	}
 	switch cfg.Type {
 	case "env":
 		if cfg.Var == "" {

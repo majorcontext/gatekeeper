@@ -94,6 +94,7 @@ curl --cacert ca.crt https://api.github.com/user
 | `actor_token_from`   | No             | --                                                     | Set to `proxy-auth-password` to forward the proxy auth password as actor token |
 | `actor_token_type`   | No             | `urn:ietf:params:oauth:token-type:access_token`        | Token type URI for the actor token                       |
 | `bot_subject`        | No             | `""` (disabled)                                        | A sentinel subject value that falls through to the next credential rule instead of an STS exchange -- see [Bot/service fallback](#botservice-fallback) below |
+| `static_fallback`    | No             | `auto`                                                 | `explicit` limits the fallthrough to static credentials the client names by header, and refuses the request with `403` otherwise -- see below |
 
 ## Bot/service fallback
 
@@ -138,6 +139,8 @@ HTTP_PROXY="http://-:proxy-token@127.0.0.1:9080"
 `bot_subject` is unset by default, so this is opt-in and fully backward compatible: a config written before this field existed keeps exchanging every non-empty subject exactly as before. When set, pick a value that can never collide with a real subject your deployment could see -- `"-"` is a safe default because no CF-Access email, GitHub username, or similar identity string is ever a bare hyphen.
 
 **`bot_subject` requires `subject_from: proxy-auth` and gatekeeper enforces that, not merely documents it.** Setting `bot_subject` on a `subject_header`-mode source is a config-load error (`"bot_subject requires subject_from 'proxy-auth'"`). This is not incidental: `subject_header` mode reads a caller-controlled, self-asserted request header with nothing authenticating it, unlike `subject_from: proxy-auth`. Without this restriction, any caller could simply send the configured sentinel value in that header to skip the STS and fall through to the credential below -- typically broader, e.g. a `github-app` bot rule -- bypassing per-subject authentication for the host entirely. The check is enforced twice: once at config load (rejecting the combination outright) and once again at request time (the fallthrough only ever fires when the resolver is actually in `proxy-auth` mode), so the property holds even for a resolver constructed outside the normal config-loading path.
+
+Set `static_fallback: explicit` when the static rule on the host is not a valid stand-in for the per-user credential, for example a per-user subscription rule beside a static API key. With no token from the exchange, gatekeeper then injects only a static credential whose header the client sent itself. With none, it answers `403` with `X-Gatekeeper-Blocked: credential-required` and a message naming the grant and host, and logs the denial with the request's `user_id`.
 
 The sentinel subject is exactly what shows up as `user_id` on the [canonical log line](../concepts/06-observability.md#canonical-log-lines), since `user_id` is populated from the same proxy-auth username the resolver reads. That's a strict readability improvement over the empty-subject case: `user_id="-"` reads unambiguously as "bot/service traffic," where an absent `user_id` field (the empty-subject case) gives no positive signal at all.
 

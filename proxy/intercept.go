@@ -507,9 +507,13 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		// keys can match; the lookup falls back to the bare host.
 		resolved, credErr := p.getCredentialsForRequest(r, req, r.Host)
 		if credErr != nil {
-			w.Header().Set("Content-Type", "text/plain")
-			w.WriteHeader(http.StatusBadGateway)
-			fmt.Fprint(w, "credential resolution failed\n")
+			status, denied := http.StatusForbidden, p.refusesMissingCredential(w, credErr)
+			if !denied {
+				status = http.StatusBadGateway
+				w.Header().Set("Content-Type", "text/plain")
+				w.WriteHeader(status)
+				fmt.Fprint(w, "credential resolution failed\n")
+			}
 			p.logRequest(r, RequestLogData{
 				RequestID:      innerReqID,
 				Method:         req.Method,
@@ -517,13 +521,15 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				Host:           host,
 				Path:           req.URL.Path,
 				RequestType:    "connect",
-				StatusCode:     http.StatusBadGateway,
+				StatusCode:     status,
+				Denied:         denied,
+				DenyReason:     denyReason(denied, credErr),
 				Duration:       time.Since(reqStart),
 				RequestHeaders: p.logHeadersRedacted(req.Header, r.Host),
 				RequestSize:    req.ContentLength,
 				ResponseSize:   -1,
 				ClientAddr:     r.RemoteAddr,
-				Err:            credErr,
+				Err:            denialErr(denied, credErr),
 			})
 			return
 		}

@@ -27,6 +27,7 @@ type tokenExchangeResolverConfig struct {
 	Header           string
 	Prefix           string
 	Format           string
+	StaticFallback   string
 }
 
 func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialResolver {
@@ -54,14 +55,18 @@ func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialR
 	})
 	return func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]proxy.CredentialHeader, error) {
 		headers, err := resolve(ctx, proxyReq, innerReq, host)
+		explicit := cfg.StaticFallback == "explicit"
 		var declined *credentialsource.TokenExchangeDeclined
 		if errors.As(err, &declined) {
-			return nil, &proxy.ResolverDeclined{UpgradeHint: proxy.UpgradeHint(declined.Upgrade), Invalidate: declined.Invalidate}
+			return nil, &proxy.ResolverDeclined{ExplicitOnly: explicit, Grant: cfg.Grant, UpgradeHint: proxy.UpgradeHint(declined.Upgrade), Invalidate: declined.Invalidate}
 		}
 		if err != nil {
 			return nil, err
 		}
 		if headers == nil {
+			if explicit {
+				return nil, &proxy.ResolverDeclined{ExplicitOnly: true, Grant: cfg.Grant}
+			}
 			return nil, nil
 		}
 		out := make([]proxy.CredentialHeader, len(headers))
@@ -118,6 +123,9 @@ func resolveSharedTokenExchange(cred CredentialConfig, shared map[SourceConfig]*
 		// function.
 		return nil, fmt.Errorf("token-exchange source: bot_subject requires subject_from 'proxy-auth'")
 	}
+	if cfg.StaticFallback != "" && cfg.StaticFallback != "auto" && cfg.StaticFallback != "explicit" {
+		return nil, fmt.Errorf("token-exchange source: unsupported static_fallback value %q (supported: auto, explicit)", cfg.StaticFallback)
+	}
 	if cfg.ClientSecret == "" && cfg.ClientSecretEnv == "" {
 		return nil, fmt.Errorf("token-exchange source requires 'client_secret' or 'client_secret_env' field")
 	}
@@ -126,7 +134,7 @@ func resolveSharedTokenExchange(cred CredentialConfig, shared map[SourceConfig]*
 	}
 	// Reject extraneous fields from other source types
 	if cfg.Var != "" || cfg.Value != "" || cfg.Command != "" || cfg.TTL != "" || cfg.Secret != "" || cfg.Region != "" || cfg.Project != "" || cfg.Version != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Scopes != "" {
-		return nil, fmt.Errorf("token-exchange source only uses 'endpoint', 'client_id', 'client_secret'/'client_secret_env', 'subject_header'/'subject_from', 'bot_subject', 'actor_token_from', 'actor_token_type', 'subject_token_type', and 'resource'; found extraneous fields")
+		return nil, fmt.Errorf("token-exchange source only uses 'endpoint', 'client_id', 'client_secret'/'client_secret_env', 'subject_header'/'subject_from', 'bot_subject', 'static_fallback', 'actor_token_from', 'actor_token_type', 'subject_token_type', and 'resource'; found extraneous fields")
 	}
 
 	clientSecret := cfg.ClientSecret
@@ -174,6 +182,7 @@ func resolveSharedTokenExchange(cred CredentialConfig, shared map[SourceConfig]*
 		Header:           header,
 		Prefix:           cred.Prefix,
 		Format:           cred.Format,
+		StaticFallback:   cfg.StaticFallback,
 	}), nil
 }
 

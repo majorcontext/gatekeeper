@@ -76,6 +76,15 @@ func TestBlockedResponses_AllKindsCarryBothHeaders(t *testing.T) {
 			p.handleMCPRelay(rec, httptest.NewRequest("POST", "/mcp/svc", nil))
 			return rec.Header()
 		}, "cleartext-credential"},
+		{"credential required", func(t *testing.T) http.Header {
+			p := NewProxy()
+			p.SetCredentialResolver(host, func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
+				return nil, &ResolverDeclined{ExplicitOnly: true, Grant: "claude-code-user"}
+			})
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, httptest.NewRequest("GET", backend.URL, nil))
+			return rec.Header()
+		}, "credential-required"},
 		{"host service", func(t *testing.T) http.Header {
 			p := NewProxy()
 			p.SetContextResolver(func(token string) (*RunContextData, bool) {

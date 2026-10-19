@@ -6,6 +6,10 @@ Gatekeeper is pre-1.0. The configuration schema and credential source interface 
 
 ## Unreleased
 
+### Added
+
+- **`static_fallback: explicit` on a token-exchange rule refuses instead of falling back** (`config.go`, `gatekeeper_tokenexchange.go`, `proxy/inject.go`, `proxy/upgrade.go`) — when a token-exchange rule yields no token (an empty or `bot_subject` subject, or an STS decline), gatekeeper injects every static credential configured for the host. On a host that also has a static API key, such as a subscription rule on `api.anthropic.com` beside an `x-api-key` rule, a request without a subscription token was billed to the API key without any sign. With `static_fallback: explicit`, gatekeeper injects only the static credentials whose header the client sent itself, and otherwise answers `403` with `X-Gatekeeper-Blocked: credential-required` and a message naming the grant and host. The canonical log line records the denial with its `user_id`. The default, `auto`, is unchanged. A `static_fallback` on a source other than `token-exchange`, or with another value, fails config load. Library users get `ResolverDeclined.ExplicitOnly`, `ResolverDeclined.Grant`, and `CredentialRequiredError`.
+
 ## v0.29.0 — 2026-10-19
 
 ### Added
