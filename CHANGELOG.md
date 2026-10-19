@@ -6,9 +6,13 @@ Gatekeeper is pre-1.0. The configuration schema and credential source interface 
 
 ## Unreleased
 
+## v0.29.0 — 2026-10-19
+
 ### Added
 
 - **A token-exchange STS can decline, and send an upgrade hint** (`credentialsource/tokenexchange.go`, `proxy/upgrade.go`, `gatekeeper_tokenexchange.go`) — any non-200 STS response failed the request, so an STS could not say "no token for this subject; use the configured default". A `400` with `error: "invalid_target"` and `gatekeeper_fallback: "default"` now falls through to the static credentials for the same host, as an empty or `bot_subject` subject does. The decline is cached for 1 minute, and a `401`, `403`, or `429` from the destination drops it. A bare `invalid_target` still fails the request. A success or a decline may carry `gatekeeper_upgrade`, an object of string or string-array values; on a `401` or `403` from the destination, gatekeeper sends it to the client as `X-Gatekeeper-Upgrade`, an RFC 9651 dictionary, and removes any value the destination sent as a header or trailer; a hint over 1024 bytes is dropped. Library users get `proxy.ResolverDeclined`, `proxy.UpgradeHint`, `CredentialHeader.UpgradeHint`, `credentialsource.TokenExchangeDeclined`, and `TokenExchangeSource.ResolveToken`. See `docs/token-exchange-endpoint.md`.
+
+## v0.28.0 — 2026-10-13
 
 ### Changed
 
