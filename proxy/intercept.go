@@ -258,7 +258,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			// injection result, so this evicts only what was actually sent.
 			cr, _ := req.Context().Value(interceptCredResultKey{}).(credentialInjectionResult)
 			resolved, _ := req.Context().Value(interceptCredsKey{}).(resolvedCredentials)
-			settleUpstreamResponse(resp.Header, resp.StatusCode, cr.Injected, resolved.declined)
+			settleUpstreamResponse(resp, cr.Injected, resolved.declined)
 
 			// Track LLM policy denials for the canonical log line.
 			var llmDenied bool

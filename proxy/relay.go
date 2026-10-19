@@ -201,7 +201,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	settleUpstreamResponse(resp.Header, resp.StatusCode, credResult.Injected, resolved.declined)
+	settleUpstreamResponse(resp, credResult.Injected, resolved.declined)
 
 	written, streamErr := forwardStreaming(r.Context(), w, resp)
 

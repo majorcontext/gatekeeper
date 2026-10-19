@@ -181,18 +181,18 @@ func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken, actorT
 		return nil, err
 	}
 
-	var result TokenExchangeResponse
-	if err := json.Unmarshal(body, &result); err != nil {
+	var wire struct {
+		TokenExchangeResponse
+		Upgrade json.RawMessage `json:"gatekeeper_upgrade"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
+	result := wire.TokenExchangeResponse
 	if result.AccessToken == "" {
 		return nil, fmt.Errorf("response missing access_token field")
 	}
-	var ext struct {
-		Upgrade json.RawMessage `json:"gatekeeper_upgrade"`
-	}
-	_ = json.Unmarshal(body, &ext)
-	result.Upgrade = parseUpgradeHint(ext.Upgrade)
+	result.Upgrade = parseUpgradeHint(wire.Upgrade)
 
 	return &result, nil
 }
@@ -213,35 +213,49 @@ func parseDecline(body []byte) *TokenExchangeDeclined {
 }
 
 // parseUpgradeHint decodes a gatekeeper_upgrade object whose values are
-// strings or arrays of strings. Any other shape drops the whole hint: a hint
-// only guides the client, so it must never fail the exchange.
+// strings or arrays of strings. Any other shape, null included, drops the
+// whole hint: a hint only guides the client, so it must never fail the
+// exchange.
 func parseUpgradeHint(raw json.RawMessage) UpgradeHint {
-	if len(raw) == 0 || string(raw) == "null" {
+	if len(raw) == 0 {
 		return nil
 	}
-	var fields map[string]json.RawMessage
+	var fields map[string]any
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		slog.Debug("ignoring malformed gatekeeper_upgrade", "subsystem", "credentialsource", "error", err)
 		return nil
 	}
 	hint := make(UpgradeHint, len(fields))
 	for k, v := range fields {
-		var one string
-		if json.Unmarshal(v, &one) == nil {
-			hint[k] = []string{one}
-			continue
-		}
-		var many []string
-		if err := json.Unmarshal(v, &many); err != nil {
-			slog.Debug("ignoring malformed gatekeeper_upgrade", "subsystem", "credentialsource", "key", k, "error", err)
+		values, ok := hintValues(v)
+		if !ok {
+			slog.Debug("ignoring malformed gatekeeper_upgrade", "subsystem", "credentialsource", "key", k)
 			return nil
 		}
-		hint[k] = many
+		hint[k] = values
 	}
 	if len(hint) == 0 {
 		return nil
 	}
 	return hint
+}
+
+func hintValues(v any) ([]string, bool) {
+	switch v := v.(type) {
+	case string:
+		return []string{v}, true
+	case []any:
+		values := make([]string, 0, len(v))
+		for _, e := range v {
+			s, ok := e.(string)
+			if !ok {
+				return nil, false
+			}
+			values = append(values, s)
+		}
+		return values, true
+	}
+	return nil, false
 }
 
 // maxTokenTTL caps how long an exchanged token is cached, regardless of the

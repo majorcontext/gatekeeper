@@ -220,3 +220,58 @@ func assertUpgrade(t *testing.T, row upgradeRow, status int, h http.Header, gotA
 		t.Errorf("Invalidate calls = %d, want %d", n, row.wantInvalidates)
 	}
 }
+
+// A hint that serializes to nothing must not hide a usable one.
+func TestSettleUpstreamResponse_SkipsEmptyHint(t *testing.T) {
+	resp := &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{}}
+	injected := []CredentialHeader{{Name: "Authorization", UpgradeHint: sshHint}}
+	settleUpstreamResponse(resp, injected, &ResolverDeclined{UpgradeHint: UpgradeHint{"Route": {"gcp"}}})
+	if got := resp.Header.Get(UpgradeHintHeader); got != sshHintHeader {
+		t.Errorf("%s = %q, want %q", UpgradeHintHeader, got, sshHintHeader)
+	}
+}
+
+// An upstream behind CONNECT interception must not forge the hint as a
+// trailer, announced or not. Other trailers still reach the client.
+func TestConnectIntercept_ForgedHintTrailerRemoved(t *testing.T) {
+	up := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Trailer", "X-Gatekeeper-Upgrade, X-Checksum")
+		io.WriteString(w, "body")
+		w.Header().Set("X-Gatekeeper-Upgrade", `route=("announced")`)
+		w.Header().Set("X-Checksum", "abc")
+		w.Header().Set(http.TrailerPrefix+"X-Gatekeeper-Upgrade", `route=("unannounced")`)
+	}))
+	t.Cleanup(up.Close)
+	ca := contractCA(t)
+	upstreamCAs := x509.NewCertPool()
+	upstreamCAs.AddCert(up.Certificate())
+	p := NewProxy()
+	p.SetCA(ca)
+	p.SetUpstreamCAs(upstreamCAs)
+	proxySrv := httptest.NewServer(p)
+	t.Cleanup(proxySrv.Close)
+	clientCAs := x509.NewCertPool()
+	clientCAs.AppendCertsFromPEM(ca.certPEM)
+	proxyURL, _ := url.Parse(proxySrv.URL)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL), TLSClientConfig: &tls.Config{RootCAs: clientCAs}}}
+	t.Cleanup(client.CloseIdleConnections)
+
+	resp, err := client.Get(up.URL + "/")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if _, announced := resp.Trailer[UpgradeHintHeader]; announced {
+		t.Errorf("Trailer announces %s, want it removed", UpgradeHintHeader)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "body" {
+		t.Errorf("body = %q, want %q", body, "body")
+	}
+	if got := resp.Trailer.Values(UpgradeHintHeader); len(got) != 0 {
+		t.Errorf("trailer %s = %q, want none", UpgradeHintHeader, got)
+	}
+	if got := resp.Trailer.Get("X-Checksum"); got != "abc" {
+		t.Errorf("trailer X-Checksum = %q, want abc", got)
+	}
+}

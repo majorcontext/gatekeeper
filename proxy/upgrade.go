@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"io"
 	"net/http"
 	"slices"
 	"strings"
@@ -42,10 +43,12 @@ type resolvedCredentials struct {
 }
 
 // settleUpstreamResponse evicts the cached state behind a request the
-// destination rejected, and sets the upgrade hint on h for a 401 or 403.
+// destination rejected, and sets the upgrade hint on resp for a 401 or 403.
 // injected holds the credentials actually sent.
-func settleUpstreamResponse(h http.Header, status int, injected []CredentialHeader, declined *ResolverDeclined) {
+func settleUpstreamResponse(resp *http.Response, injected []CredentialHeader, declined *ResolverDeclined) {
+	h, status := resp.Header, resp.StatusCode
 	h.Del(UpgradeHintHeader)
+	scrubHintTrailer(resp)
 	invalidateCredentialsOnCredentialFailure(injected, status)
 	if declined != nil && declined.Invalidate != nil && isCredentialFailure(status) {
 		declined.Invalidate()
@@ -53,16 +56,40 @@ func settleUpstreamResponse(h http.Header, status int, injected []CredentialHead
 	if status != http.StatusUnauthorized && status != http.StatusForbidden {
 		return
 	}
-	var hint UpgradeHint
+	var v string
 	if declined != nil {
-		hint = declined.UpgradeHint
+		v = declined.UpgradeHint.headerValue()
 	}
-	for i := 0; hint == nil && i < len(injected); i++ {
-		hint = injected[i].UpgradeHint
+	for i := 0; v == "" && i < len(injected); i++ {
+		v = injected[i].UpgradeHint.headerValue()
 	}
-	if v := hint.headerValue(); v != "" {
+	if v != "" {
 		h.Set(UpgradeHintHeader, v)
 	}
+}
+
+// scrubHintTrailer removes UpgradeHintHeader from resp's trailers, both the
+// announced ones and those the transport merges in at EOF, announced or not.
+// A 101 body is left alone: it must stay an io.ReadWriteCloser.
+func scrubHintTrailer(resp *http.Response) {
+	resp.Trailer.Del(UpgradeHintHeader)
+	if resp.Body == nil || resp.StatusCode == http.StatusSwitchingProtocols {
+		return
+	}
+	resp.Body = &hintTrailerScrubber{ReadCloser: resp.Body, resp: resp}
+}
+
+type hintTrailerScrubber struct {
+	io.ReadCloser
+	resp *http.Response
+}
+
+func (s *hintTrailerScrubber) Read(p []byte) (int, error) {
+	n, err := s.ReadCloser.Read(p)
+	if err == io.EOF {
+		s.resp.Trailer.Del(UpgradeHintHeader)
+	}
+	return n, err
 }
 
 // headerValue serializes h as an RFC 9651 dictionary with sorted members. A

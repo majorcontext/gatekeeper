@@ -351,7 +351,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	settleUpstreamResponse(resp.Header, resp.StatusCode, credResult.Injected, resolved.declined)
+	settleUpstreamResponse(resp, credResult.Injected, resolved.declined)
 
 	logData.StatusCode = resp.StatusCode
 	logData.ResponseHeaders = resp.Header.Clone()

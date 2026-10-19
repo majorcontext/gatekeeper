@@ -111,7 +111,7 @@ func TestTokenExchange_UpgradeHintOnSuccessIsCached(t *testing.T) {
 // A hint only guides the client. A malformed one must never cost the
 // request its credential.
 func TestTokenExchange_MalformedUpgradeHintIsDropped(t *testing.T) {
-	for _, hint := range []string{`"gcp"`, `{"route":5}`, `{"route":["gcp",5]}`, `{"route":"gcp","entitlements":5}`, `[]`} {
+	for _, hint := range []string{`"gcp"`, `{"route":5}`, `{"route":["gcp",5]}`, `{"route":"gcp","entitlements":5}`, `{"route":null}`, `{"route":["gcp",null]}`, `[]`} {
 		t.Run(hint, func(t *testing.T) {
 			var calls atomic.Int32
 			src := stsReplying(t, &calls, http.StatusOK,

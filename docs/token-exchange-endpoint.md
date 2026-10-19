@@ -96,7 +96,7 @@ A success or a decline may carry `gatekeeper_upgrade`: an object whose values ar
 X-Gatekeeper-Upgrade: entitlements=("gcp-deploy-dev"), route=("gcp")
 ```
 
-Gatekeeper removes any `X-Gatekeeper-Upgrade` header the destination sends, so the client can trust its origin. When the host's resolver declined, the decline's hint is sent; otherwise the hint of the first injected credential that has one. A member whose key is not a lowercase RFC 9651 key, or with a value that is not printable ASCII, is dropped, and a serialized hint over 1024 bytes is dropped whole. A `gatekeeper_upgrade` of any other shape is ignored; it never fails the exchange.
+Gatekeeper removes any `X-Gatekeeper-Upgrade` header or trailer the destination sends, so the client can trust its origin. When the host's resolver declined, the decline's hint is sent; otherwise the hint of the first injected credential that has one. A member whose key is not a lowercase RFC 9651 key, or with a value that is not printable ASCII, is dropped, and a serialized hint over 1024 bytes is dropped whole. A `gatekeeper_upgrade` of any other shape, including a `null` value or array element, is ignored; it never fails the exchange.
 
 ### Error (any other non-200 status)
 
