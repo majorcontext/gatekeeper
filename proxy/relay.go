@@ -69,6 +69,9 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	if rejected, _ := p.rejectMismatchedAuth(w, r); rejected {
 		return
 	}
+	if uid, _, _ := ProxyAuth(r); uid != "" {
+		r = r.WithContext(withUserID(r.Context(), uid))
+	}
 
 	start := time.Now()
 

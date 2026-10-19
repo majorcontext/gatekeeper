@@ -177,3 +177,24 @@ func TestResolverDeclined_ExplicitOnlyIgnoresConsumedHeader(t *testing.T) {
 		t.Errorf("status = %d, reached upstream = %v; want 403 and not forwarded", rec.Code, seen.Load() != nil)
 	}
 }
+
+// A /relay/ refusal must carry the caller's proxy-auth user, like the
+// CONNECT and plain-HTTP paths, so the denial is attributable.
+func TestRelay_CredentialRequiredLogsUserID(t *testing.T) {
+	up, _ := requiredUpstream(t, false)
+	p := requiredProxy(requiredRow{explicit: true}, mustParseURL(up.URL).Hostname())
+	if err := p.AddRelay("anthropic", up.URL); err != nil {
+		t.Fatal(err)
+	}
+	var logged []RequestLogData
+	p.SetLogger(func(d RequestLogData) { logged = append(logged, d) })
+	req := httptest.NewRequest("POST", "/relay/anthropic/v1/messages", nil)
+	req.SetBasicAuth("usr_1|box_1", "boxtoken")
+	req.Header.Set("Proxy-Authorization", req.Header.Get("Authorization"))
+	req.Header.Del("Authorization")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || len(logged) != 1 || logged[0].UserID != "usr_1|box_1" || !logged[0].Denied {
+		t.Fatalf("status = %d, logs = %+v; want 403 and one denied line with UserID usr_1|box_1", rec.Code, logged)
+	}
+}
