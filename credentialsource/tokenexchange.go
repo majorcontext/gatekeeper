@@ -56,6 +56,20 @@ func (*TokenExchangeDeclined) Error() string {
 	return "token exchange declined: use the configured default credential"
 }
 
+// TokenExchangeNotFound reports an STS 404: the subject has no credential
+// for the target. Description is the STS error_description when it is at
+// most 200 printable ASCII characters, truncated past that, or "" otherwise.
+type TokenExchangeNotFound struct {
+	Description string
+}
+
+func (e *TokenExchangeNotFound) Error() string {
+	if e.Description == "" {
+		return "token exchange returned 404"
+	}
+	return "token exchange returned 404: " + e.Description
+}
+
 // ExchangedToken is a token that ResolveToken returns.
 type ExchangedToken struct {
 	AccessToken string
@@ -165,6 +179,13 @@ func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken, actorT
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenResponseSize))
+		if err != nil {
+			return nil, fmt.Errorf("reading response: %w", err)
+		}
+		return nil, &TokenExchangeNotFound{Description: clientSafeDescription(body)}
+	}
 	if resp.StatusCode == http.StatusBadRequest {
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenResponseSize))
 		if err != nil {
@@ -210,6 +231,27 @@ func parseDecline(body []byte) *TokenExchangeDeclined {
 		return nil
 	}
 	return &TokenExchangeDeclined{Upgrade: parseUpgradeHint(e.Upgrade)}
+}
+
+// clientSafeDescription returns the error_description of an RFC 6749 §5.2
+// body, truncated to 200 bytes, or "" when it holds anything but printable
+// ASCII: the proxy shows it to the client.
+func clientSafeDescription(body []byte) string {
+	var e struct {
+		Description string `json:"error_description"`
+	}
+	if json.Unmarshal(body, &e) != nil {
+		return ""
+	}
+	for i := 0; i < len(e.Description); i++ {
+		if c := e.Description[i]; c < 0x20 || c > 0x7e {
+			return ""
+		}
+	}
+	if len(e.Description) > 200 {
+		return e.Description[:200]
+	}
+	return e.Description
 }
 
 // parseUpgradeHint decodes a gatekeeper_upgrade object whose values are

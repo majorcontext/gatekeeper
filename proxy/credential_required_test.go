@@ -156,3 +156,24 @@ func assertRequired(t *testing.T, row requiredRow, status int, h http.Header, bo
 		t.Errorf("upstream x-api-key, Authorization = %q, %q; want %q, %q", seen.apiKey, seen.auth, row.wantAPIKey, row.wantAuth)
 	}
 }
+
+// A resolver that consumed the client's header (subject_header:
+// Authorization) left nothing the client chose: the static Authorization
+// credential must not ride in on the subject token.
+func TestResolverDeclined_ExplicitOnlyIgnoresConsumedHeader(t *testing.T) {
+	up, seen := requiredUpstream(t, false)
+	redirectHTTPTransport(t, up.Listener.Addr().String())
+	p := NewProxy()
+	p.SetInsecureCredentialWithGrant("api.example.com", "Authorization", "Bearer static", "bot")
+	p.SetCredentialResolver("api.example.com", func(_ context.Context, _, inner *http.Request, _ string) ([]CredentialHeader, error) {
+		inner.Header.Del("Authorization")
+		return nil, &ResolverDeclined{ExplicitOnly: true, Grant: "user"}
+	})
+	req := httptest.NewRequest("GET", "http://api.example.com:8080/", nil)
+	req.Header.Set("Authorization", "usr_1")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || seen.Load() != nil {
+		t.Errorf("status = %d, reached upstream = %v; want 403 and not forwarded", rec.Code, seen.Load() != nil)
+	}
+}

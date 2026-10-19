@@ -464,6 +464,8 @@ Requires `subject_from: proxy-auth` -- enforced, not just documented: setting `b
 
 What a request gets when the exchange yields no token: an empty or `bot_subject` subject, or an STS decline. `auto` injects the host's static credentials, as before. `explicit` injects only the static credentials whose header the client sent, and otherwise refuses the request with `403` and `X-Gatekeeper-Blocked: credential-required`. Use `explicit` on a per-user subscription rule, so that a request with no subscription token never falls back silently to a static API key on the same host.
 
+With `explicit`, a `404` from the STS also counts as "no token for this subject". The `403` body then ends with the STS's `error_description`, when it is printable ASCII, cut at 200 bytes, so the STS can tell the user what to do (for example, connect an account). A header that the resolver consumed, such as a `subject_header`, does not count as naming a static credential. Any other STS error still fails the request with `502`.
+
 - **Type:** `string`
 - **Required:** No
 - **Default:** `"auto"`

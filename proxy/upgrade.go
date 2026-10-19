@@ -30,7 +30,10 @@ type ResolverDeclined struct {
 	// naming Grant.
 	ExplicitOnly bool
 	Grant        string
-	UpgradeHint  UpgradeHint
+	// Reason, when set, explains the refusal to the client. It must be
+	// printable ASCII.
+	Reason      string
+	UpgradeHint UpgradeHint
 	// Invalidate, when non-nil, drops the cached decline. The proxy calls it
 	// on the same statuses as CredentialHeader.Invalidate, so a credential
 	// granted since the decline applies to the client's retry.
@@ -40,12 +43,17 @@ type ResolverDeclined struct {
 // CredentialRequiredError reports a request that an explicit-only decline
 // left with no credential. The proxy answers it with 403.
 type CredentialRequiredError struct {
-	Grant string
-	Host  string
+	Grant  string
+	Host   string
+	Reason string
 }
 
 func (e *CredentialRequiredError) Error() string {
-	return "no " + e.Grant + " credential for " + e.Host + ", and the request names no static credential"
+	msg := "no " + e.Grant + " credential for " + e.Host + ", and the request names no static credential"
+	if e.Reason != "" {
+		msg += ": " + e.Reason
+	}
+	return msg
 }
 
 // refusesMissingCredential writes a 403 when err is a CredentialRequiredError.

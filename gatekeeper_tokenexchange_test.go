@@ -782,24 +782,34 @@ func TestTokenExchangeDecline_FallsBackToConfiguredDefault(t *testing.T) {
 // declined exchange must be refused the same way. A request that sends its
 // own x-api-key still gets the static key.
 func TestStaticFallbackExplicit_RefusesSubscriptionFallthrough(t *testing.T) {
+	const decline = `{"error":"invalid_target","gatekeeper_fallback":"default"}`
+	const noAccount = `{"error":"invalid_grant","error_description":"no Claude subscription is connected for this box's creator"}`
 	for _, tc := range []struct {
 		name, user string
+		fallback   string
+		stsStatus  int
+		stsBody    string
 		headers    map[string]string
 		wantStatus int
 		wantAPIKey string
 		wantSTS    int32
+		wantInBody string
 	}{
-		{"bot subject, OAuth request", "-", map[string]string{"Authorization": "Bearer placeholder"}, http.StatusForbidden, "", 0},
-		{"declined exchange, OAuth request", "usr_1|box_1", map[string]string{"Authorization": "Bearer placeholder"}, http.StatusForbidden, "", 1},
-		{"bot subject, client names x-api-key", "-", map[string]string{"X-Api-Key": "placeholder"}, http.StatusOK, "default-key", 0},
+		{"bot subject, OAuth request", "-", "explicit", 400, decline, map[string]string{"Authorization": "Bearer placeholder"}, http.StatusForbidden, "", 0, "claude-code-user"},
+		{"declined exchange, OAuth request", "usr_1|box_1", "explicit", 400, decline, map[string]string{"Authorization": "Bearer placeholder"}, http.StatusForbidden, "", 1, "claude-code-user"},
+		{"bot subject, client names x-api-key", "-", "explicit", 400, decline, map[string]string{"X-Api-Key": "placeholder"}, http.StatusOK, "default-key", 0, ""},
+		{"subject with no account, OAuth request", "usr_1|box_1", "explicit", 404, noAccount, map[string]string{"Authorization": "Bearer placeholder"}, http.StatusForbidden, "", 1, "no Claude subscription is connected"},
+		{"subject with no account, auto fallback", "usr_1|box_1", "auto", 404, noAccount, map[string]string{"Authorization": "Bearer placeholder"}, http.StatusBadGateway, "", 1, ""},
+		{"STS 401 stays a failure", "usr_1|box_1", "explicit", 401, `{"error":"invalid_client"}`, map[string]string{"Authorization": "Bearer placeholder"}, http.StatusBadGateway, "", 1, ""},
+		{"STS 500 stays a failure", "usr_1|box_1", "explicit", 500, `{"error":"server_error"}`, map[string]string{"Authorization": "Bearer placeholder"}, http.StatusBadGateway, "", 1, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var exchanges atomic.Int32
 			sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				exchanges.Add(1)
 				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				io.WriteString(w, `{"error":"invalid_target","gatekeeper_fallback":"default"}`)
+				w.WriteHeader(tc.stsStatus)
+				io.WriteString(w, tc.stsBody)
 			}))
 			defer sts.Close()
 			var gotAPIKey []string
@@ -813,7 +823,7 @@ func TestStaticFallbackExplicit_RefusesSubscriptionFallthrough(t *testing.T) {
 			cfg := &Config{Credentials: []CredentialConfig{
 				{Host: "127.0.0.1", Grant: "claude-code-user", AllowInsecure: true, Source: SourceConfig{
 					Type: "token-exchange", Endpoint: sts.URL, ClientID: "c", ClientSecret: "s",
-					SubjectFrom: "proxy-auth", BotSubject: "-", StaticFallback: "explicit"}},
+					SubjectFrom: "proxy-auth", BotSubject: "-", StaticFallback: tc.fallback}},
 				{Host: "127.0.0.1", Grant: "anthropic", Header: "x-api-key", Prefix: "", AllowInsecure: true,
 					Source: SourceConfig{Type: "static", Value: "default-key"}},
 			}}
@@ -830,6 +840,9 @@ func TestStaticFallbackExplicit_RefusesSubscriptionFallthrough(t *testing.T) {
 
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			if tc.wantInBody != "" && !strings.Contains(rec.Body.String(), tc.wantInBody) {
+				t.Errorf("body = %q, want it to contain %q", rec.Body.String(), tc.wantInBody)
 			}
 			var want []string
 			if tc.wantStatus == http.StatusOK {

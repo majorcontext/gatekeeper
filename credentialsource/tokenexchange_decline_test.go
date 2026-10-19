@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -173,5 +174,33 @@ func TestTokenExchange_DeclineEvictionIsRateLimited(t *testing.T) {
 	}
 	if n := calls.Load(); n != 2 {
 		t.Errorf("STS calls = %d, want 2 (one eviction per cooldown)", n)
+	}
+}
+
+// A subject with no credential is the STS's 404. It must be typed, carry a
+// description safe to show the client, and never be cached: the user can
+// connect an account and retry at once.
+func TestTokenExchange_NotFoundIsTypedAndUncached(t *testing.T) {
+	for _, tc := range []struct{ body, want string }{
+		{`{"error":"invalid_grant","error_description":"no Claude subscription is connected"}`, "no Claude subscription is connected"},
+		{`{"error":"invalid_grant","error_description":"line\r\nX-Evil: 1"}`, ""},
+		{`{"error":"invalid_grant","error_description":"` + strings.Repeat("a", 300) + `"}`, strings.Repeat("a", 200)},
+		{`not json`, ""},
+	} {
+		var calls atomic.Int32
+		src := stsReplying(t, &calls, http.StatusNotFound, tc.body)
+		for range 2 {
+			_, err := src.ResolveToken(context.Background(), "usr_1|box_1", "boxtoken", "")
+			var notFound *TokenExchangeNotFound
+			if !errors.As(err, &notFound) {
+				t.Fatalf("body %q: err = %v, want *TokenExchangeNotFound", tc.body, err)
+			}
+			if notFound.Description != tc.want {
+				t.Errorf("body %q: Description = %q, want %q", tc.body, notFound.Description, tc.want)
+			}
+		}
+		if n := calls.Load(); n != 2 {
+			t.Errorf("body %q: STS calls = %d, want 2 (never cached)", tc.body, n)
+		}
 	}
 }

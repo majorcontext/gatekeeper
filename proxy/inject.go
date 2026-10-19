@@ -448,9 +448,9 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 	if errors.As(resolveErr, &declined) {
 		statics := p.getCredentials(host)
 		if declined.ExplicitOnly {
-			statics = namedByClient(sentBefore, statics)
+			statics = namedByClient(sentBefore, innerReq, statics)
 			if len(statics) == 0 {
-				return resolvedCredentials{}, &CredentialRequiredError{Grant: declined.Grant, Host: host}
+				return resolvedCredentials{}, &CredentialRequiredError{Grant: declined.Grant, Host: host, Reason: declined.Reason}
 			}
 		}
 		return resolvedCredentials{creds: statics, declined: declined}, nil
@@ -562,11 +562,12 @@ func invalidateCredentialsOnCredentialFailure(creds []CredentialHeader, statusCo
 	}
 }
 
-// namedByClient returns the credentials whose header the client sent.
-func namedByClient(sentBefore map[string]bool, creds []CredentialHeader) []CredentialHeader {
+// namedByClient returns the credentials whose header the client sent and the
+// resolver left in place: a header the resolver consumed named nothing.
+func namedByClient(sentBefore map[string]bool, req *http.Request, creds []CredentialHeader) []CredentialHeader {
 	var out []CredentialHeader
 	for _, c := range creds {
-		if sentBefore[strings.ToLower(c.Name)] {
+		if sentBefore[strings.ToLower(c.Name)] && req.Header.Get(c.Name) != "" {
 			out = append(out, c)
 		}
 	}

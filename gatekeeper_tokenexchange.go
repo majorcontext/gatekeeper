@@ -60,6 +60,10 @@ func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialR
 		if errors.As(err, &declined) {
 			return nil, &proxy.ResolverDeclined{ExplicitOnly: explicit, Grant: cfg.Grant, UpgradeHint: proxy.UpgradeHint(declined.Upgrade), Invalidate: declined.Invalidate}
 		}
+		var notFound *credentialsource.TokenExchangeNotFound
+		if explicit && errors.As(err, &notFound) {
+			return nil, &proxy.ResolverDeclined{ExplicitOnly: true, Grant: cfg.Grant, Reason: notFound.Description}
+		}
 		if err != nil {
 			return nil, err
 		}
