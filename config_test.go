@@ -531,3 +531,59 @@ func TestActorTokenFromRequiresSharedProxyToken(t *testing.T) {
 		})
 	}
 }
+
+// Two token-exchange rules on one host left only the second: the proxy keeps
+// one resolver per host key, so subscription traffic on api.anthropic.com
+// would silently get the other rule's credential.
+func TestConfig_RejectsTwoTokenExchangeRulesOnOneHost(t *testing.T) {
+	te := func(host, grant string) CredentialConfig {
+		return CredentialConfig{Host: host, Grant: grant, Source: SourceConfig{
+			Type: "token-exchange", Endpoint: "https://sts.example.com/token", ClientID: "gk", ClientSecret: "s", SubjectHeader: "X-Subject",
+		}}
+	}
+	static := CredentialConfig{Host: "api.anthropic.com", Grant: "anthropic", Header: "x-api-key", Source: SourceConfig{Type: "static", Value: "k"}}
+	tests := []struct {
+		name    string
+		creds   []CredentialConfig
+		wantErr bool
+	}{
+		{"two token-exchange rules on one host", []CredentialConfig{te("api.anthropic.com", "claude-code-user"), te("api.anthropic.com", "claude-api")}, true},
+		{"token-exchange beside a static rule", []CredentialConfig{te("api.anthropic.com", "claude-code-user"), static}, false},
+		{"token-exchange rules on two hosts", []CredentialConfig{te("api.anthropic.com", "a"), te("chatgpt.com", "b")}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, proxyCfg := range []ProxyConfig{{}, {AuthToken: "shared"}} {
+				err := (&Config{Proxy: proxyCfg, Credentials: tt.creds}).validate()
+				if !tt.wantErr {
+					if err != nil {
+						t.Errorf("validate (auth token %q): %v", proxyCfg.AuthToken, err)
+					}
+					continue
+				}
+				if err == nil {
+					t.Fatalf("validate (auth token %q) accepted two token-exchange rules on one host", proxyCfg.AuthToken)
+				}
+				for _, want := range []string{"api.anthropic.com", "claude-code-user", "claude-api"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q does not name %q", err, want)
+					}
+				}
+			}
+		})
+	}
+	t.Run("rejected by ParseConfig", func(t *testing.T) {
+		rule := "  - host: api.anthropic.com\n    grant: %s\n    source:\n      type: token-exchange\n      endpoint: https://sts.example.com/token\n      client_id: gk\n      client_secret: s\n      subject_header: X-Subject\n"
+		y := "credentials:\n" + fmt.Sprintf(rule, "claude-code-user") + fmt.Sprintf(rule, "claude-api")
+		if _, err := ParseConfig([]byte(y)); err == nil || !strings.Contains(err.Error(), "api.anthropic.com") {
+			t.Errorf("ParseConfig error = %v, want one naming api.anthropic.com", err)
+		}
+	})
+	t.Run("rejected by New", func(t *testing.T) {
+		srv, err := New(context.Background(), &Config{Credentials: []CredentialConfig{te("api.anthropic.com", "claude-code-user"), te("api.anthropic.com", "claude-api")}}, Options{})
+		if err == nil {
+			_ = srv.Stop(context.Background())
+			t.Fatal("New accepted two token-exchange rules on one host")
+		}
+	})
+}

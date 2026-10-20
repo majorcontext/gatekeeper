@@ -194,7 +194,7 @@ func (p *Proxy) setCredentialResolver(host string, entry credentialResolverEntry
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if _, exists := p.credentialResolvers[host]; exists {
-		slog.Debug("replacing existing credential resolver",
+		slog.Warn("replacing existing credential resolver",
 			"subsystem", "proxy",
 			"host", host)
 	}

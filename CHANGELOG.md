@@ -6,6 +6,10 @@ Gatekeeper is pre-1.0. The configuration schema and credential source interface 
 
 ## Unreleased
 
+### Fixed
+
+- **A config with two `token-exchange` rules on one host fails to load** (`config.go`, `proxy/options.go`) — the proxy keeps one resolver per host, so the second rule replaced the first without any sign: on `api.anthropic.com`, a subscription rule beside another token-exchange rule sent subscription traffic to the wrong credential. `ParseConfig` and `New` now fail with an error naming the host and both grants. This is a behavior change for such a config, but it never used its first rule. Static rules on one host are unaffected, and hosts that differ only in case are distinct. A replaced resolver is now logged at WARN, not DEBUG.
+
 ## v0.30.0 — 2026-10-19
 
 ### Added

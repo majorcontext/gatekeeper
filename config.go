@@ -232,6 +232,9 @@ func (c *Config) validate() error {
 	if err := c.Network.validate(); err != nil {
 		return err
 	}
+	if err := c.validateTokenExchangeHosts(); err != nil {
+		return err
+	}
 	if c.Proxy.AuthToken != "" || c.Proxy.AuthTokenEnv != "" {
 		return nil
 	}
@@ -239,6 +242,23 @@ func (c *Config) validate() error {
 		if cred.Source.ActorTokenFrom != "" {
 			return fmt.Errorf("credential for host %q sets actor_token_from, which requires proxy.auth_token or proxy.auth_token_env", cred.Host)
 		}
+	}
+	return nil
+}
+
+// validateTokenExchangeHosts rejects a second token-exchange rule on a host
+// key: the proxy keeps one resolver per host key, so the second rule would
+// silently replace the first.
+func (c *Config) validateTokenExchangeHosts() error {
+	grants := map[string]string{}
+	for _, cred := range c.Credentials {
+		if cred.Source.Type != "token-exchange" {
+			continue
+		}
+		if first, ok := grants[cred.Host]; ok {
+			return fmt.Errorf("credentials: host %q has two token-exchange rules (grants %q and %q); only one resolver applies per host", cred.Host, first, cred.Grant)
+		}
+		grants[cred.Host] = cred.Grant
 	}
 	return nil
 }
