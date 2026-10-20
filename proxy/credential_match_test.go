@@ -70,6 +70,11 @@ func matchRows() []matchRow {
 			wantAuth: "Bearer api",
 		},
 		{
+			name: "relay_root_path_matches_slash", only: "relay", apiPaths: []string{"/"}, method: "POST", path: "",
+			headers:  map[string]string{"x-api-key": "p"},
+			wantAuth: "Bearer api",
+		},
+		{
 			name: "selecting_header_does_not_request_same_name_static", static: true, method: "POST", path: "/v1/messages",
 			headers:  map[string]string{"x-api-key": "placeholder"},
 			wantAuth: "Bearer api",

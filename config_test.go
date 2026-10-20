@@ -610,6 +610,7 @@ func TestConfig_MatchValidation(t *testing.T) {
 		{"path without a leading slash", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key", Paths: []string{"v1/"}})}, "path"},
 		{"lower-case method", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key", Methods: []string{"get"}})}, "method"},
 		{"unmatched rule beside a matched one", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key"}), te("g2", nil)}, "add match to every rule"},
+		{"selector equals another rule's subject header", []CredentialConfig{te("g1", &MatchConfig{Header: "x-subject"}), te("g2", &MatchConfig{Header: "x-api-key"})}, "subject header"},
 		{"identical match blocks", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key", Methods: []string{"GET"}}), te("g2", &MatchConfig{Header: "x-api-key", Methods: []string{"GET"}})}, "identical"},
 		{"three distinct rules", []CredentialConfig{
 			te("admin", &MatchConfig{Header: "x-api-key", Paths: []string{"/v1/organizations/"}, Methods: []string{"GET"}}),

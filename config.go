@@ -281,6 +281,12 @@ func (c *Config) validateTokenExchangeHosts() error {
 			if prev.Match.equal(*cred.Match) {
 				return fmt.Errorf("credentials: host %q grants %q and %q have identical match blocks", cred.Host, prev.Grant, cred.Grant)
 			}
+			for _, pair := range [][2]CredentialConfig{{prev, cred}, {cred, prev}} {
+				sel, other := pair[0], pair[1]
+				if slices.ContainsFunc(tokenExchangeStripHeaders(other), func(h string) bool { return strings.EqualFold(h, sel.Match.Header) }) {
+					return fmt.Errorf("credentials: host %q grant %q: match.header %q is the subject header of grant %q", cred.Host, sel.Grant, sel.Match.Header, other.Grant)
+				}
+			}
 		}
 		rules[cred.Host] = append(rules[cred.Host], cred)
 	}
