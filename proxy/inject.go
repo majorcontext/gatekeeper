@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -432,13 +433,15 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 	if entry.resolve == nil {
 		// No rule applies, so no resolver runs; the headers every declared
 		// rule consumes must still not reach upstream.
-		stripDeclared(innerReq, entries)
+		stripDeclared(innerReq, entries, nil)
 		return resolvedCredentials{creds: p.getCredentials(host)}, nil
 	}
 	// Whichever rule is chosen, the subject headers of every rule on the host
 	// are removed once the chosen resolver has had its chance to read its own.
+	// The chosen entry's own headers are left to its resolver: it may set one
+	// itself, and the proxy removes only what the client sent.
 	finish := func(res resolvedCredentials) resolvedCredentials {
-		stripDeclared(innerReq, entries)
+		stripDeclared(innerReq, entries, entry.stripHeaders)
 		return entry.stripSelector(innerReq, res)
 	}
 	if staticCreds, staticMatch := p.getCredentialsMatch(host); staticMatch.outranks(resolverMatch) {
@@ -447,7 +450,8 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 			// the resolver's external round trip must not stall it. The
 			// resolver is skipped; the request headers declared at
 			// registration are removed here so they never leak upstream.
-			return finish(resolvedCredentials{creds: staticCreds}), nil
+			stripDeclared(innerReq, entries, nil)
+			return entry.stripSelector(innerReq, resolvedCredentials{creds: staticCreds}), nil
 		}
 		// A legacy registration made no declaration, so the resolver may
 		// have request-mutating side effects only it can perform (e.g.
@@ -503,11 +507,14 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 	return finish(resolvedCredentials{creds: p.getCredentials(host)}), nil
 }
 
-// stripDeclared removes the request headers every entry declared for removal.
-func stripDeclared(req *http.Request, entries []credentialResolverEntry) {
+// stripDeclared removes the request headers every entry declared for removal,
+// except those named in keep.
+func stripDeclared(req *http.Request, entries []credentialResolverEntry, keep []string) {
 	for _, e := range entries {
 		for _, h := range e.stripHeaders {
-			req.Header.Del(h)
+			if !slices.ContainsFunc(keep, func(k string) bool { return strings.EqualFold(k, h) }) {
+				req.Header.Del(h)
+			}
 		}
 	}
 }
