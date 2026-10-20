@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/majorcontext/gatekeeper/proxy"
+	"golang.org/x/net/http/httpguts"
 	"gopkg.in/yaml.v3"
 )
 
@@ -296,6 +297,9 @@ func (c CredentialConfig) validateMatch() error {
 	}
 	if m.Header == "" {
 		return fmt.Errorf("credentials: host %q grant %q: match.header is required", c.Host, c.Grant)
+	}
+	if !httpguts.ValidHeaderFieldName(m.Header) {
+		return fmt.Errorf("credentials: host %q grant %q: match.header %q is not a valid HTTP header name", c.Host, c.Grant, m.Header)
 	}
 	for _, p := range m.Paths {
 		if !strings.HasPrefix(p, "/") {

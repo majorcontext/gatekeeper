@@ -605,6 +605,8 @@ func TestConfig_MatchValidation(t *testing.T) {
 	}{
 		{"match on a static source", []CredentialConfig{staticMatched}, "match"},
 		{"empty match header", []CredentialConfig{te("g1", &MatchConfig{Paths: []string{"/v1/"}})}, "header"},
+		{"header with a space", []CredentialConfig{te("g1", &MatchConfig{Header: "X Tenant"})}, "header"},
+		{"header with a colon", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api:key"})}, "header"},
 		{"path without a leading slash", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key", Paths: []string{"v1/"}})}, "path"},
 		{"lower-case method", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key", Methods: []string{"get"}})}, "method"},
 		{"unmatched rule beside a matched one", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key"}), te("g2", nil)}, "add match to every rule"},

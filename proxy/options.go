@@ -346,8 +346,15 @@ func (rc *RunContextData) permissive() bool {
 // to requests matching m. Entries on one host are tried in registration
 // order; the first match wins. SetCredentialResolver and
 // SetCredentialResolverWithStripHeaders replace every entry on the host,
-// including matched ones.
+// including matched ones. A nil resolver or an empty match (no header, paths,
+// or methods) is ignored.
 func (p *Proxy) SetMatchedCredentialResolver(host string, m RequestMatch, resolver CredentialResolver, stripHeaders ...string) {
+	if resolver == nil || (m.Header == "" && len(m.Paths) == 0 && len(m.Methods) == 0) {
+		slog.Debug("ignoring nil resolver or empty match for matched credential resolver",
+			"subsystem", "proxy",
+			"host", host)
+		return
+	}
 	if !isValidHost(host) {
 		slog.Debug("ignoring invalid host for credential resolver",
 			"subsystem", "proxy",

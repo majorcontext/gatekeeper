@@ -223,3 +223,25 @@ func TestMatchedResolvers_OutrankedStripsSelectingHeader(t *testing.T) {
 		t.Errorf("x-api-key = %q, want it stripped", got)
 	}
 }
+
+// A nil resolver or an empty match registered ahead of a real rule must not
+// shadow it.
+func TestSetMatchedCredentialResolver_IgnoresDegenerateEntries(t *testing.T) {
+	p := NewProxy()
+	p.SetMatchedCredentialResolver("api.example.com", RequestMatch{Header: "x-api-key"}, nil)
+	p.SetMatchedCredentialResolver("api.example.com", RequestMatch{}, func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
+		return []CredentialHeader{{Name: "Authorization", Value: "Bearer shadow"}}, nil
+	})
+	p.SetMatchedCredentialResolver("api.example.com", RequestMatch{Header: "x-api-key"}, func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
+		return []CredentialHeader{{Name: "Authorization", Value: "Bearer real"}}, nil
+	})
+	req := httptest.NewRequest("POST", "http://api.example.com/v1/messages", nil)
+	req.Header.Set("x-api-key", "placeholder")
+	got, err := p.getCredentialsForRequest(req, req, "api.example.com", "/v1/messages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.creds) != 1 || got.creds[0].Value != "Bearer real" {
+		t.Errorf("creds = %+v, want the real rule's Bearer real", got.creds)
+	}
+}
