@@ -10,7 +10,7 @@ Import gatekeeper as a Go module to embed the proxy in a custom application. Thi
 
 ## Prerequisites
 
-- Go 1.25+
+- Go 1.27.3+
 
 ## Install
 

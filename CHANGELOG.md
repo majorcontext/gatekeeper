@@ -6,6 +6,11 @@ Gatekeeper is pre-1.0. The configuration schema and credential source interface 
 
 ## Unreleased
 
+### Security
+
+- **Build with Go 1.27.3** (`go.mod`, `cmd/gatekeeper/Dockerfile`) — Go 1.27.3 makes `crypto/x509` reject chains through eight compromised eMudhra intermediates (CVE-2026-111943, go.dev/issue/82345). Gatekeeper verifies upstream TLS chains, so a gatekeeper built with Go 1.25 still trusted them; Go 1.25 is out of support and gets no fix. The builder image is pinned by digest.
+- **Patched dependencies** (`go.mod`) — `golang.org/x/net` v0.60.0 (HTTP/2 fixes GO-2026-6603, -6610, -6611, -6612, -6617), `google.golang.org/grpc` v1.83.1 (GO-2026-6061, -6348), OpenTelemetry v1.45.0 / log v0.21.0 (GO-2026-6505, -6615), and `github.com/ulikunitz/xz` v0.5.15 (GO-2025-3922). `govulncheck ./...` reports no reachable vulnerabilities.
+
 ## v0.32.0 — 2026-10-20
 
 ### Added
