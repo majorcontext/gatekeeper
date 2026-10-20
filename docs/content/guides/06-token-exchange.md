@@ -144,6 +144,56 @@ Set `static_fallback: explicit` when the static rule on the host is not a valid 
 
 The sentinel subject is exactly what shows up as `user_id` on the [canonical log line](../concepts/06-observability.md#canonical-log-lines), since `user_id` is populated from the same proxy-auth username the resolver reads. That's a strict readability improvement over the empty-subject case: `user_id="-"` reads unambiguously as "bot/service traffic," where an absent `user_id` field (the empty-subject case) gives no positive signal at all.
 
+## Several rules on one host
+
+A host can have several `token-exchange` rules when each rule has a `match` block. The proxy picks the rule from the request, so one host such as `api.anthropic.com` can serve an admin key, a workload key, and a per-user subscription, each from its own grant:
+
+```yaml
+credentials:
+  - host: api.anthropic.com
+    grant: admin
+    header: Authorization
+    match: {header: x-api-key, paths: [/v1/organizations/], methods: [GET]}
+    source:
+      type: token-exchange
+      endpoint: https://sts.example.com/token
+      client_id: gatekeeper
+      client_secret_env: STS_SECRET
+      subject_header: X-Subject
+      resource: https://api.anthropic.com/admin
+  - host: api.anthropic.com
+    grant: api
+    header: Authorization
+    match: {header: x-api-key, paths: [/v1/messages]}
+    source:
+      type: token-exchange
+      endpoint: https://sts.example.com/token
+      client_id: gatekeeper
+      client_secret_env: STS_SECRET
+      subject_header: X-Subject
+      resource: https://api.anthropic.com/workload
+  - host: api.anthropic.com
+    grant: sub
+    match: {header: Authorization}
+    source:
+      type: token-exchange
+      endpoint: https://sts.example.com/token
+      client_id: gatekeeper
+      client_secret_env: STS_SECRET
+      subject_header: X-Subject
+```
+
+How gatekeeper chooses:
+
+- **First match wins, in config order.** A request to `/v1/organizations/` with `x-api-key` uses `admin`; a `GET` is required. Put the narrower rule first.
+- **No match means static credentials.** A request that matches no rule gets the host's static credentials, as it does when no resolver exists.
+- **The selecting header is removed.** The `admin` and `api` rules inject `Authorization`, so gatekeeper removes the `x-api-key` header the client used to select them. The `sub` rule injects `Authorization` too, which replaces the client's value.
+- **Token-exchange only.** `match` on any other source type fails config load, as does a second `token-exchange` rule on a host when either rule has no `match`, or when two `match` blocks are identical.
+
+Give each rule its own `resource` so the STS issues a different token for each. Gatekeeper caches the tokens of each rule separately.
+
+See the [`match` reference](../reference/03-credential-sources.md#match) for the fields.
+
 ## Actor token forwarding
 
 By default, subject identities are self-asserted -- any caller can claim any identity. In shared environments, use **actor token forwarding** to let the STS verify that the caller is an authorized gatekeeper client.

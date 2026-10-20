@@ -460,6 +460,41 @@ A sentinel subject value that skips the STS exchange and falls through to the ne
 
 Requires `subject_from: proxy-auth` -- enforced, not just documented: setting `bot_subject` alongside `subject_header` is a config-load error. `subject_header` mode reads a caller-controlled, self-asserted header with nothing authenticating it, so allowing `bot_subject` there would let any caller send the sentinel value in that header to skip the STS and fall through to the credential below, bypassing per-subject authentication for the host. Pick a value that cannot collide with a real subject your deployment could see — `"-"` is a safe default.
 
+### match
+
+Selects this rule for a request, so several `token-exchange` rules can share one host. `match` is a key of the credential entry, beside `source`, and applies to `token-exchange` credentials only: any other source type fails config load.
+
+| Field | Meaning |
+|---|---|
+| `header` | Required. The rule applies only to a request that carries this header. |
+| `paths` | Optional. The rule applies only when the request path starts with one of these prefixes. Each must start with `/`. |
+| `methods` | Optional. The rule applies only to one of these methods. Each must be upper-case, for example `GET`. |
+
+A field you leave out matches anything. Gatekeeper tries the rules on a host in config order, and the first rule that matches wins. A request that matches no rule gets the host's static credentials. When the chosen rule injects a different header than `match.header`, gatekeeper removes `match.header` from the request, so the placeholder the client sent does not reach the destination.
+
+Config load fails when two `token-exchange` rules share a host and either has no `match`, or when two rules have identical `match` blocks. Give each rule its own `resource` so that the rules exchange for different tokens.
+
+- **Type:** `object`
+- **Required:** No (required on every `token-exchange` rule when several share a host)
+
+```yaml
+credentials:
+  - host: api.anthropic.com
+    grant: admin
+    header: Authorization
+    match: {header: x-api-key, paths: [/v1/organizations/], methods: [GET]}
+    source: {type: token-exchange, resource: "https://api.anthropic.com/admin", subject_header: X-Subject, endpoint: "https://sts.example.com/token", client_id: gk, client_secret_env: STS_SECRET}
+  - host: api.anthropic.com
+    grant: api
+    header: Authorization
+    match: {header: x-api-key, paths: [/v1/messages]}
+    source: {type: token-exchange, resource: "https://api.anthropic.com/workload", subject_header: X-Subject, endpoint: "https://sts.example.com/token", client_id: gk, client_secret_env: STS_SECRET}
+  - host: api.anthropic.com
+    grant: sub
+    match: {header: Authorization}
+    source: {type: token-exchange, subject_header: X-Subject, endpoint: "https://sts.example.com/token", client_id: gk, client_secret_env: STS_SECRET}
+```
+
 ### static_fallback
 
 What a request gets when the exchange yields no token: an empty or `bot_subject` subject, or an STS decline. `auto` injects the host's static credentials, as before. `explicit` injects only the static credentials whose header the client sent, and otherwise refuses the request with `403` and `X-Gatekeeper-Blocked: credential-required`. Use `explicit` on a per-user subscription rule, so that a request with no subscription token never falls back silently to a static API key on the same host.

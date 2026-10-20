@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/majorcontext/gatekeeper/proxy"
+	"gopkg.in/yaml.v3"
 )
 
 func TestParseConfig_Full(t *testing.T) {
@@ -586,4 +587,60 @@ func TestConfig_RejectsTwoTokenExchangeRulesOnOneHost(t *testing.T) {
 			t.Fatal("New accepted two token-exchange rules on one host")
 		}
 	})
+}
+
+func TestConfig_MatchValidation(t *testing.T) {
+	te := func(grant string, m *MatchConfig) CredentialConfig {
+		return CredentialConfig{Host: "api.anthropic.com", Grant: grant, Match: m, Source: SourceConfig{
+			Type: "token-exchange", Endpoint: "https://sts.example.com/token", ClientID: "gk", ClientSecret: "s", SubjectHeader: "X-Subject",
+		}}
+	}
+	static := CredentialConfig{Host: "api.anthropic.com", Grant: "anthropic", Header: "x-api-key", Source: SourceConfig{Type: "static", Value: "k"}}
+	staticMatched := static
+	staticMatched.Match = &MatchConfig{Header: "x-api-key"}
+	tests := []struct {
+		name    string
+		creds   []CredentialConfig
+		wantErr string
+	}{
+		{"match on a static source", []CredentialConfig{staticMatched}, "match"},
+		{"empty match header", []CredentialConfig{te("g1", &MatchConfig{Paths: []string{"/v1/"}})}, "header"},
+		{"path without a leading slash", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key", Paths: []string{"v1/"}})}, "path"},
+		{"lower-case method", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key", Methods: []string{"get"}})}, "method"},
+		{"unmatched rule beside a matched one", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key"}), te("g2", nil)}, "add match to every rule"},
+		{"identical match blocks", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key", Methods: []string{"GET"}}), te("g2", &MatchConfig{Header: "x-api-key", Methods: []string{"GET"}})}, "identical"},
+		{"three distinct rules", []CredentialConfig{
+			te("admin", &MatchConfig{Header: "x-api-key", Paths: []string{"/v1/organizations/"}, Methods: []string{"GET"}}),
+			te("api", &MatchConfig{Header: "x-api-key", Paths: []string{"/v1/messages"}}),
+			te("sub", &MatchConfig{Header: "Authorization"}),
+		}, ""},
+		{"matched rule beside a static rule", []CredentialConfig{te("sub", &MatchConfig{Header: "Authorization"}), static}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			check := func(via string, err error) {
+				if tt.wantErr == "" {
+					if err != nil {
+						t.Errorf("%s: %v", via, err)
+					}
+					return
+				}
+				if err == nil {
+					t.Fatalf("%s accepted the config", via)
+				}
+				for _, want := range []string{"api.anthropic.com", tt.creds[0].Grant, tt.wantErr} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("%s: error %q does not contain %q", via, err, want)
+					}
+				}
+			}
+			check("validate", (&Config{Credentials: tt.creds}).validate())
+			y, err := yaml.Marshal(&Config{Credentials: tt.creds})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = ParseConfig(y)
+			check("ParseConfig", err)
+		})
+	}
 }

@@ -890,3 +890,59 @@ func TestStaticFallback_Validation(t *testing.T) {
 		})
 	}
 }
+
+func TestMatchedTokenExchangeRules_EndToEnd(t *testing.T) {
+	newSTS := func(token string, calls *atomic.Int32) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"access_token":"`+token+`","token_type":"Bearer","expires_in":3600}`)
+		}))
+	}
+	var subCalls, apiCalls atomic.Int32
+	subSTS := newSTS("sub-token", &subCalls)
+	defer subSTS.Close()
+	apiSTS := newSTS("api-token", &apiCalls)
+	defer apiSTS.Close()
+	var gotAuth, gotAPIKey []string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = append(gotAuth, r.Header.Get("Authorization"))
+		gotAPIKey = append(gotAPIKey, r.Header.Get("X-Api-Key"))
+	}))
+	defer backend.Close()
+	port := mustURL(t, backend.URL).Port()
+
+	srv := newBareServer(t)
+	cfg := &Config{Credentials: []CredentialConfig{
+		{Host: "127.0.0.1", Grant: "claude-code-user", AllowInsecure: true, Match: &MatchConfig{Header: "Authorization"},
+			Source: SourceConfig{Type: "token-exchange", Endpoint: subSTS.URL, ClientID: "c", ClientSecret: "s", SubjectHeader: "X-Subject"}},
+		{Host: "127.0.0.1", Grant: "claude-api", Header: "Authorization", AllowInsecure: true, Match: &MatchConfig{Header: "x-api-key"},
+			Source: SourceConfig{Type: "token-exchange", Endpoint: apiSTS.URL, ClientID: "c", ClientSecret: "s", SubjectHeader: "X-Subject",
+				Resource: "https://api.anthropic.com/workload"}},
+	}}
+	if err := srv.loadCredentials(context.Background(), cfg); err != nil {
+		t.Fatalf("loadCredentials: %v", err)
+	}
+	do := func(h, v string) {
+		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:"+port+"/v1/messages", nil)
+		req.Header.Set("X-Subject", "usr_1")
+		req.Header.Set(h, v)
+		rec := httptest.NewRecorder()
+		srv.proxy.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s request: status %d: %s", h, rec.Code, rec.Body)
+		}
+	}
+	do("Authorization", "Bearer placeholder")
+	do("X-Api-Key", "placeholder")
+
+	if want := []string{"Bearer sub-token", "Bearer api-token"}; !slices.Equal(gotAuth, want) {
+		t.Errorf("upstream Authorization = %q, want %q", gotAuth, want)
+	}
+	if want := []string{"", ""}; !slices.Equal(gotAPIKey, want) {
+		t.Errorf("upstream X-Api-Key = %q, want %q", gotAPIKey, want)
+	}
+	if subCalls.Load() != 1 || apiCalls.Load() != 1 {
+		t.Errorf("STS calls = %d and %d, want 1 and 1", subCalls.Load(), apiCalls.Load())
+	}
+}
