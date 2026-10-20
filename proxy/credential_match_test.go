@@ -245,3 +245,41 @@ func TestSetMatchedCredentialResolver_IgnoresDegenerateEntries(t *testing.T) {
 		t.Errorf("creds = %+v, want the real rule's Bearer real", got.creds)
 	}
 }
+
+// A request that carries the subject headers of two rules and selects one
+// must not forward the other rule's subject header.
+func TestMatchedResolvers_StripsEveryRulesSubjectHeader(t *testing.T) {
+	for _, outranked := range []bool{false, true} {
+		name := "resolved"
+		if outranked {
+			name = "outranked"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := NewProxy()
+			host := "api.example.com"
+			if outranked {
+				p.SetInsecureCredentialWithGrant(host, "Authorization", "Bearer static", "bot")
+				host = "*.example.com"
+			}
+			consume := func(h string) CredentialResolver {
+				return func(_ context.Context, _, inner *http.Request, _ string) ([]CredentialHeader, error) {
+					inner.Header.Del(h)
+					return []CredentialHeader{{Name: "Authorization", Value: "Bearer " + h}}, nil
+				}
+			}
+			p.SetMatchedCredentialResolver(host, RequestMatch{Header: "X-Subject-A"}, consume("X-Subject-A"), "X-Subject-A")
+			p.SetMatchedCredentialResolver(host, RequestMatch{Header: "X-Subject-B"}, consume("X-Subject-B"), "X-Subject-B")
+			req := httptest.NewRequest("POST", "http://api.example.com/v1/messages", nil)
+			req.Header.Set("X-Subject-A", "a")
+			req.Header.Set("X-Subject-B", "b")
+			if _, err := p.getCredentialsForRequest(req, req, "api.example.com", "/v1/messages"); err != nil {
+				t.Fatal(err)
+			}
+			for _, h := range []string{"X-Subject-A", "X-Subject-B"} {
+				if got := req.Header.Get(h); got != "" {
+					t.Errorf("%s = %q, want it stripped", h, got)
+				}
+			}
+		})
+	}
+}

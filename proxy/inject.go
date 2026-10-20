@@ -432,23 +432,22 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 	if entry.resolve == nil {
 		// No rule applies, so no resolver runs; the headers every declared
 		// rule consumes must still not reach upstream.
-		for _, e := range entries {
-			for _, h := range e.stripHeaders {
-				innerReq.Header.Del(h)
-			}
-		}
+		stripDeclared(innerReq, entries)
 		return resolvedCredentials{creds: p.getCredentials(host)}, nil
+	}
+	// Whichever rule is chosen, the subject headers of every rule on the host
+	// are removed once the chosen resolver has had its chance to read its own.
+	finish := func(res resolvedCredentials) resolvedCredentials {
+		stripDeclared(innerReq, entries)
+		return entry.stripSelector(innerReq, res)
 	}
 	if staticCreds, staticMatch := p.getCredentialsMatch(host); staticMatch.outranks(resolverMatch) {
 		if entry.declared {
 			// A better-matched static credential decides this request, so
 			// the resolver's external round trip must not stall it. The
-			// resolver is skipped; the request headers it declared at
+			// resolver is skipped; the request headers declared at
 			// registration are removed here so they never leak upstream.
-			for _, h := range entry.stripHeaders {
-				innerReq.Header.Del(h)
-			}
-			return entry.stripSelector(innerReq, resolvedCredentials{creds: staticCreds}), nil
+			return finish(resolvedCredentials{creds: staticCreds}), nil
 		}
 		// A legacy registration made no declaration, so the resolver may
 		// have request-mutating side effects only it can perform (e.g.
@@ -465,7 +464,7 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 		// token refresh landing while the resolver was out (e.g. a
 		// refreshing source rotating the static token mid-call) must be
 		// seen, or the request injects a credential that's already stale.
-		return entry.stripSelector(innerReq, resolvedCredentials{creds: p.getCredentials(host)}), nil
+		return finish(resolvedCredentials{creds: p.getCredentials(host)}), nil
 	}
 	// A resolver is handed innerReq and may mutate it, so which headers the
 	// client sent is only knowable before it runs.
@@ -486,7 +485,7 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 				return resolvedCredentials{}, &CredentialRequiredError{Grant: declined.Grant, Host: host, Reason: declined.Reason}
 			}
 		}
-		return entry.stripSelector(innerReq, resolvedCredentials{creds: statics, declined: declined}), nil
+		return finish(resolvedCredentials{creds: statics, declined: declined}), nil
 	}
 	if resolveErr != nil {
 		return resolvedCredentials{}, resolveErr
@@ -499,9 +498,18 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 		}
 		// Read static credentials after the resolver has run, not before: a
 		// token refresh landing while a slow resolver was out must be seen.
-		return entry.stripSelector(innerReq, resolvedCredentials{creds: withRequestedStatics(sentBefore, innerReq, resolved, p.getCredentials(host))}), nil
+		return finish(resolvedCredentials{creds: withRequestedStatics(sentBefore, innerReq, resolved, p.getCredentials(host))}), nil
 	}
-	return entry.stripSelector(innerReq, resolvedCredentials{creds: p.getCredentials(host)}), nil
+	return finish(resolvedCredentials{creds: p.getCredentials(host)}), nil
+}
+
+// stripDeclared removes the request headers every entry declared for removal.
+func stripDeclared(req *http.Request, entries []credentialResolverEntry) {
+	for _, e := range entries {
+		for _, h := range e.stripHeaders {
+			req.Header.Del(h)
+		}
+	}
 }
 
 // stripSelector removes the header the entry's match selected the request by,
