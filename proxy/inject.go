@@ -430,6 +430,13 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 	entries, resolverMatch := p.getCredentialResolverMatch(host)
 	entry := chooseResolverEntry(entries, innerReq, path)
 	if entry.resolve == nil {
+		// No rule applies, so no resolver runs; the headers every declared
+		// rule consumes must still not reach upstream.
+		for _, e := range entries {
+			for _, h := range e.stripHeaders {
+				innerReq.Header.Del(h)
+			}
+		}
 		return resolvedCredentials{creds: p.getCredentials(host)}, nil
 	}
 	if staticCreds, staticMatch := p.getCredentialsMatch(host); staticMatch.outranks(resolverMatch) {

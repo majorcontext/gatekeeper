@@ -904,8 +904,9 @@ func TestMatchedTokenExchangeRules_EndToEnd(t *testing.T) {
 	defer subSTS.Close()
 	apiSTS := newSTS("api-token", &apiCalls)
 	defer apiSTS.Close()
-	var gotAuth, gotAPIKey []string
+	var gotAuth, gotAPIKey, gotSubject []string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSubject = append(gotSubject, r.Header.Get("X-Subject"))
 		gotAuth = append(gotAuth, r.Header.Get("Authorization"))
 		gotAPIKey = append(gotAPIKey, r.Header.Get("X-Api-Key"))
 	}))
@@ -926,7 +927,9 @@ func TestMatchedTokenExchangeRules_EndToEnd(t *testing.T) {
 	do := func(h, v string) {
 		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:"+port+"/v1/messages", nil)
 		req.Header.Set("X-Subject", "usr_1")
-		req.Header.Set(h, v)
+		if h != "" {
+			req.Header.Set(h, v)
+		}
 		rec := httptest.NewRecorder()
 		srv.proxy.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
@@ -935,11 +938,15 @@ func TestMatchedTokenExchangeRules_EndToEnd(t *testing.T) {
 	}
 	do("Authorization", "Bearer placeholder")
 	do("X-Api-Key", "placeholder")
+	do("", "")
 
-	if want := []string{"Bearer sub-token", "Bearer api-token"}; !slices.Equal(gotAuth, want) {
+	if want := []string{"Bearer sub-token", "Bearer api-token", ""}; !slices.Equal(gotAuth, want) {
 		t.Errorf("upstream Authorization = %q, want %q", gotAuth, want)
 	}
-	if want := []string{"", ""}; !slices.Equal(gotAPIKey, want) {
+	if want := []string{"", "", ""}; !slices.Equal(gotSubject, want) {
+		t.Errorf("upstream X-Subject = %q, want %q", gotSubject, want)
+	}
+	if want := []string{"", "", ""}; !slices.Equal(gotAPIKey, want) {
 		t.Errorf("upstream X-Api-Key = %q, want %q", gotAPIKey, want)
 	}
 	if subCalls.Load() != 1 || apiCalls.Load() != 1 {
