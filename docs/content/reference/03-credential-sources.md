@@ -467,10 +467,10 @@ Selects this rule for a request, so several `token-exchange` rules can share one
 | Field | Meaning |
 |---|---|
 | `header` | Required. The rule applies only to a request that carries this header. |
-| `paths` | Optional. The rule applies only when the request path starts with one of these prefixes. Each must start with `/`. |
+| `paths` | Optional. The rule applies only when the request path starts with one of these prefixes. The comparison is a raw string prefix, so `/v1/messages` also matches `/v1/messages-batch`. Each must start with `/`. |
 | `methods` | Optional. The rule applies only to one of these methods. Each must be upper-case, for example `GET`. |
 
-A field you leave out matches anything. Gatekeeper tries the rules on a host in config order, and the first rule that matches wins. A request that matches no rule gets the host's static credentials. When the chosen rule injects a different header than `match.header`, gatekeeper removes `match.header` from the request, so the placeholder the client sent does not reach the destination.
+A field you leave out matches anything. Gatekeeper tries the rules on a host in config order, and the first rule that matches wins. A request that matches no rule gets the host's static credentials, and its headers pass through unchanged when no static credential uses them. When the chosen rule injects a different header than `match.header`, gatekeeper removes `match.header` from the request, so the placeholder the client sent does not reach the destination.
 
 Config load fails when two `token-exchange` rules share a host and either has no `match`, or when two rules have identical `match` blocks. Give each rule its own `resource` so that the rules exchange for different tokens.
 

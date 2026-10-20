@@ -186,11 +186,11 @@ credentials:
 How gatekeeper chooses:
 
 - **First match wins, in config order.** A request to `/v1/organizations/` with `x-api-key` uses `admin`; a `GET` is required. Put the narrower rule first.
-- **No match means static credentials.** A request that matches no rule gets the host's static credentials, as it does when no resolver exists.
+- **No match means static credentials.** A request that matches no rule gets the host's static credentials, as it does when no resolver exists. The client's headers pass through unchanged when no static credential uses them.
 - **The selecting header is removed.** The `admin` and `api` rules inject `Authorization`, so gatekeeper removes the `x-api-key` header the client used to select them. The `sub` rule injects `Authorization` too, which replaces the client's value.
 - **Token-exchange only.** `match` on any other source type fails config load, as does a second `token-exchange` rule on a host when either rule has no `match`, or when two `match` blocks are identical.
 
-Give each rule its own `resource` so the STS issues a different token for each. Gatekeeper caches the tokens of each rule separately.
+Give each rule its own `resource` so the STS issues a different token for each. Rules with identical `source` settings share one exchange and its cache; rules that differ in `resource` or any other setting cache their tokens separately.
 
 See the [`match` reference](../reference/03-credential-sources.md#match) for the fields.
 

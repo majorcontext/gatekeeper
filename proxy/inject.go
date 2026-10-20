@@ -492,6 +492,11 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 		return resolvedCredentials{}, resolveErr
 	}
 	if len(resolved) > 0 {
+		if entry.match != nil {
+			// The selecting header chose the rule; it must not also request a
+			// same-name static credential.
+			delete(sentBefore, strings.ToLower(entry.match.Header))
+		}
 		// Read static credentials after the resolver has run, not before: a
 		// token refresh landing while a slow resolver was out must be seen.
 		return entry.stripSelector(innerReq, resolvedCredentials{creds: withRequestedStatics(sentBefore, innerReq, resolved, p.getCredentials(host))}), nil

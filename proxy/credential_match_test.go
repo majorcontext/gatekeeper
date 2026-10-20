@@ -17,7 +17,7 @@ type matchRow struct {
 	apiLead    bool   // register the api resolver first, with no path restriction
 	static     bool   // static x-api-key credential on the host
 	staticAuth bool   // static Authorization credential on the host
-	apiMode    string // api resolver behavior: "" credential, "nil" returns nil, "decline"
+	apiMode    string // api resolver behavior: "" credential, "nil" returns nil, "decline", "explicit"
 	method     string
 	path       string
 	headers    map[string]string
@@ -63,6 +63,21 @@ func matchRows() []matchRow {
 			headers: map[string]string{"x-api-key": "placeholder"},
 		},
 		{
+			name: "selecting_header_does_not_request_same_name_static", static: true, method: "POST", path: "/v1/messages",
+			headers:  map[string]string{"x-api-key": "placeholder"},
+			wantAuth: "Bearer api",
+		},
+		{
+			name: "decline_falls_back_to_same_name_static", apiMode: "decline", static: true, method: "POST", path: "/v1/messages",
+			headers:    map[string]string{"x-api-key": "placeholder"},
+			wantAPIKey: "static-key",
+		},
+		{
+			name: "explicit_only_decline_falls_back_to_same_name_static", apiMode: "explicit", static: true, method: "POST", path: "/v1/messages",
+			headers:    map[string]string{"x-api-key": "placeholder"},
+			wantAPIKey: "static-key",
+		},
+		{
 			name: "decline_strips_selecting_header", apiMode: "decline", staticAuth: true, method: "POST", path: "/v1/messages",
 			headers:  map[string]string{"x-api-key": "placeholder"},
 			wantAuth: "Bearer static",
@@ -82,6 +97,9 @@ func matchProxy(row matchRow, host string) *Proxy {
 		return func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
 			if tag == "api" && row.apiMode == "nil" {
 				return nil, nil
+			}
+			if tag == "api" && row.apiMode == "explicit" {
+				return nil, &ResolverDeclined{ExplicitOnly: true}
 			}
 			if tag == "api" && row.apiMode == "decline" {
 				return nil, &ResolverDeclined{}
