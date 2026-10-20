@@ -344,7 +344,9 @@ func (rc *RunContextData) permissive() bool {
 
 // SetMatchedCredentialResolver appends a resolver for host that applies only
 // to requests matching m. Entries on one host are tried in registration
-// order; the first match wins.
+// order; the first match wins. SetCredentialResolver and
+// SetCredentialResolverWithStripHeaders replace every entry on the host,
+// including matched ones.
 func (p *Proxy) SetMatchedCredentialResolver(host string, m RequestMatch, resolver CredentialResolver, stripHeaders ...string) {
 	if !isValidHost(host) {
 		slog.Debug("ignoring invalid host for credential resolver",

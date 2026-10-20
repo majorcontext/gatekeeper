@@ -13,11 +13,13 @@ import (
 
 type matchRow struct {
 	name       string
-	only       string // restrict to one path: "relay"
-	apiLead    bool   // register the api resolver first, with no path restriction
-	static     bool   // static x-api-key credential on the host
-	staticAuth bool   // static Authorization credential on the host
-	apiMode    string // api resolver behavior: "" credential, "nil" returns nil, "decline", "explicit"
+	only       string   // restrict to one path: "relay"
+	apiLead    bool     // register the api resolver first, with no path restriction
+	static     bool     // static x-api-key credential on the host
+	staticAuth bool     // static Authorization credential on the host
+	apiMode    string   // api resolver behavior: "" credential, "nil" returns nil, "decline", "explicit"
+	relayBase  string   // base path on the relay target URL
+	apiPaths   []string // overrides the api rule's paths
 	method     string
 	path       string
 	headers    map[string]string
@@ -61,6 +63,11 @@ func matchRows() []matchRow {
 		{
 			name: "resolver_returns_nothing_strips_selecting_header", apiMode: "nil", method: "POST", path: "/v1/messages",
 			headers: map[string]string{"x-api-key": "placeholder"},
+		},
+		{
+			name: "relay_matches_full_upstream_path", only: "relay", relayBase: "/api", apiPaths: []string{"/api/v1/messages"}, method: "POST", path: "/v1/messages",
+			headers:  map[string]string{"x-api-key": "p"},
+			wantAuth: "Bearer api",
 		},
 		{
 			name: "selecting_header_does_not_request_same_name_static", static: true, method: "POST", path: "/v1/messages",
@@ -109,6 +116,9 @@ func matchProxy(row matchRow, host string) *Proxy {
 	}
 	admin := RequestMatch{Header: "x-api-key", Paths: []string{"/v1/organizations/"}, Methods: []string{"GET"}}
 	api := RequestMatch{Header: "x-api-key", Paths: []string{"/v1/messages"}}
+	if row.apiPaths != nil {
+		api.Paths = row.apiPaths
+	}
 	if row.apiLead {
 		api.Paths = nil
 		p.SetMatchedCredentialResolver(host, api, tagged("api"))
@@ -180,7 +190,7 @@ func TestMatchedResolvers(t *testing.T) {
 			t.Run("relay/"+row.name, func(t *testing.T) {
 				up, seen := requiredUpstream(t, false)
 				p := matchProxy(row, mustParseURL(up.URL).Hostname())
-				if err := p.AddRelay("anthropic", up.URL); err != nil {
+				if err := p.AddRelay("anthropic", up.URL+row.relayBase); err != nil {
 					t.Fatal(err)
 				}
 				req := httptest.NewRequest(row.method, "/relay/anthropic"+row.path, nil)
