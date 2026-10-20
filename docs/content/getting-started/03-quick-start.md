@@ -10,7 +10,7 @@ Start a credential-injecting proxy in under five minutes.
 
 ## Prerequisites
 
-- Go 1.25+ installed
+- Go 1.27.3+ installed
 - `gatekeeper` binary on `$PATH` (see [Installation](./02-installation.md))
 - `openssl` available (for CA generation)
 

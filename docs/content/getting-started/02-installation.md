@@ -8,7 +8,7 @@ keywords: ["gatekeeper", "installation", "go install", "docker"]
 
 ## Requirements
 
-- Go 1.25 or later
+- Go 1.27.3 or later
 
 ## go install
 
