@@ -198,7 +198,7 @@ func (p *Proxy) setCredentialResolver(host string, entry credentialResolverEntry
 			"subsystem", "proxy",
 			"host", host)
 	}
-	p.credentialResolvers[host] = entry
+	p.credentialResolvers[host] = []credentialResolverEntry{entry}
 }
 
 // AddExtraHeader adds an additional header to inject for a host.
@@ -340,4 +340,36 @@ func (p *Proxy) SetNetworkPolicyWithRules(policy string, allows []string, grants
 // value other than "" or "permissive" is strict.
 func (rc *RunContextData) permissive() bool {
 	return rc.Policy == "" || rc.Policy == "permissive"
+}
+
+// SetMatchedCredentialResolver appends a resolver for host that applies only
+// to requests matching m. Entries on one host are tried in registration
+// order; the first match wins. SetCredentialResolver and
+// SetCredentialResolverWithStripHeaders replace every entry on the host,
+// including matched ones. A nil resolver or an empty match (no header, paths,
+// or methods) is ignored.
+func (p *Proxy) SetMatchedCredentialResolver(host string, m RequestMatch, resolver CredentialResolver, stripHeaders ...string) {
+	if resolver == nil || (m.Header == "" && len(m.Paths) == 0 && len(m.Methods) == 0) {
+		slog.Debug("ignoring nil resolver or empty match for matched credential resolver",
+			"subsystem", "proxy",
+			"host", host)
+		return
+	}
+	if !isValidHost(host) {
+		slog.Debug("ignoring invalid host for credential resolver",
+			"subsystem", "proxy",
+			"host", host)
+		return
+	}
+	entry := credentialResolverEntry{resolve: resolver, stripHeaders: stripHeaders, declared: true, match: &m}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	entries := p.credentialResolvers[host]
+	if n := len(entries); n > 0 && entries[n-1].match == nil {
+		// The unmatched entry stays last as the catch-all.
+		entries = append(entries[:n-1:n-1], entry, entries[n-1])
+	} else {
+		entries = append(entries[:len(entries):len(entries)], entry)
+	}
+	p.credentialResolvers[host] = entries
 }

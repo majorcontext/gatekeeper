@@ -1441,7 +1441,7 @@ func TestProxy_GetCredentials_WildcardKeyWithPort(t *testing.T) {
 		t.Helper()
 		req := httptest.NewRequest("GET", "https://"+host+"/", nil)
 		req = req.WithContext(context.WithValue(req.Context(), runContextKey, rc))
-		resolved, err := p.getCredentialsForRequest(req, req, host)
+		resolved, err := p.getCredentialsForRequest(req, req, host, req.URL.Path)
 		if err != nil {
 			t.Fatalf("getCredentialsForRequest(%q): %v", host, err)
 		}

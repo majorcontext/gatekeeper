@@ -505,7 +505,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		// Resolve credentials before forwarding so errors are caught early.
 		// r.Host is the CONNECT target with its port, so port-pinned host
 		// keys can match; the lookup falls back to the bare host.
-		resolved, credErr := p.getCredentialsForRequest(r, req, r.Host)
+		resolved, credErr := p.getCredentialsForRequest(r, req, r.Host, req.URL.Path)
 		if credErr != nil {
 			status, denied := http.StatusForbidden, p.refusesMissingCredential(w, credErr)
 			if !denied {

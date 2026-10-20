@@ -328,6 +328,10 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 			header = "Authorization"
 		}
 
+		if err := cred.validateMatch(); err != nil {
+			return err
+		}
+
 		if cred.Format != "" && !strings.EqualFold(header, "Authorization") {
 			return fmt.Errorf("credential for %s: format %q is only supported with the Authorization header", cred.Host, cred.Format)
 		}
@@ -340,7 +344,12 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 			// Declare the subject header so the proxy still strips it
 			// when a better-matched static credential outranks (and
 			// therefore skips) this resolver.
-			s.proxy.SetCredentialResolverWithStripHeaders(cred.Host, allowInsecureResolver(resolver, cred.AllowInsecure), tokenExchangeStripHeaders(cred)...)
+			resolver = allowInsecureResolver(resolver, cred.AllowInsecure)
+			if cred.Match != nil {
+				s.proxy.SetMatchedCredentialResolver(cred.Host, proxy.RequestMatch(*cred.Match), resolver, tokenExchangeStripHeaders(cred)...)
+				continue
+			}
+			s.proxy.SetCredentialResolverWithStripHeaders(cred.Host, resolver, tokenExchangeStripHeaders(cred)...)
 			continue
 		}
 

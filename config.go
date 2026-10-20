@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"slices"
+	"strings"
 
 	"github.com/majorcontext/gatekeeper/proxy"
+	"golang.org/x/net/http/httpguts"
 	"gopkg.in/yaml.v3"
 )
 
@@ -104,8 +108,19 @@ type CredentialConfig struct {
 	Source   SourceConfig              `yaml:"source"`
 	Grant    string                    `yaml:"grant,omitempty"` // Optional label for logging
 	Postgres *PostgresCredentialConfig `yaml:"postgres,omitempty"`
+	// Match selects this token-exchange rule per request. It is valid only
+	// on token-exchange sources; see MatchConfig.
+	Match *MatchConfig `yaml:"match,omitempty"`
 
 	AllowInsecure bool `yaml:"allow_insecure,omitempty"` // Permit injection into plain-HTTP requests (default: refused)
+}
+
+// MatchConfig selects a token-exchange rule by request. Its fields mirror
+// proxy.RequestMatch; a zero field matches anything.
+type MatchConfig struct {
+	Header  string   `yaml:"header"`
+	Paths   []string `yaml:"paths,omitempty"`
+	Methods []string `yaml:"methods,omitempty"`
 }
 
 // PostgresCredentialConfig marks a credential as a Postgres credential and
@@ -246,21 +261,69 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// validateTokenExchangeHosts rejects a second token-exchange rule on a host
-// key: the proxy keeps one resolver per host key, so the second rule would
-// silently replace the first.
+// validateTokenExchangeHosts validates every match block and rejects rules
+// on one host that the proxy could not tell apart: a second token-exchange
+// rule is allowed only when every token-exchange rule on the host has a
+// distinct match.
 func (c *Config) validateTokenExchangeHosts() error {
-	grants := map[string]string{}
+	rules := map[string][]CredentialConfig{}
 	for _, cred := range c.Credentials {
+		if err := cred.validateMatch(); err != nil {
+			return err
+		}
 		if cred.Source.Type != "token-exchange" {
 			continue
 		}
-		if first, ok := grants[cred.Host]; ok {
-			return fmt.Errorf("credentials: host %q has two token-exchange rules (grants %q and %q); only one resolver applies per host", cred.Host, first, cred.Grant)
+		for _, prev := range rules[cred.Host] {
+			if prev.Match == nil || cred.Match == nil {
+				return fmt.Errorf("credentials: host %q has two token-exchange rules (grants %q and %q); only one resolver applies per host: add match to every rule", cred.Host, prev.Grant, cred.Grant)
+			}
+			if prev.Match.equal(*cred.Match) {
+				return fmt.Errorf("credentials: host %q grants %q and %q have identical match blocks", cred.Host, prev.Grant, cred.Grant)
+			}
+			for _, pair := range [][2]CredentialConfig{{prev, cred}, {cred, prev}} {
+				sel, other := pair[0], pair[1]
+				if slices.ContainsFunc(tokenExchangeStripHeaders(other), func(h string) bool { return strings.EqualFold(h, sel.Match.Header) }) {
+					return fmt.Errorf("credentials: host %q grant %q: match.header %q is the subject header of grant %q", cred.Host, sel.Grant, sel.Match.Header, other.Grant)
+				}
+			}
 		}
-		grants[cred.Host] = cred.Grant
+		rules[cred.Host] = append(rules[cred.Host], cred)
 	}
 	return nil
+}
+
+func (c CredentialConfig) validateMatch() error {
+	m := c.Match
+	if m == nil {
+		return nil
+	}
+	if c.Source.Type != "token-exchange" {
+		return fmt.Errorf("credentials: host %q grant %q: match applies only to token-exchange sources", c.Host, c.Grant)
+	}
+	if m.Header == "" {
+		return fmt.Errorf("credentials: host %q grant %q: match.header is required", c.Host, c.Grant)
+	}
+	if !httpguts.ValidHeaderFieldName(m.Header) {
+		return fmt.Errorf("credentials: host %q grant %q: match.header %q is not a valid HTTP header name", c.Host, c.Grant, m.Header)
+	}
+	for _, p := range m.Paths {
+		if !strings.HasPrefix(p, "/") {
+			return fmt.Errorf("credentials: host %q grant %q: match.paths entry %q must start with \"/\"", c.Host, c.Grant, p)
+		}
+	}
+	for _, method := range m.Methods {
+		if !upperMethod.MatchString(method) {
+			return fmt.Errorf("credentials: host %q grant %q: match.methods entry %q must be upper-case letters", c.Host, c.Grant, method)
+		}
+	}
+	return nil
+}
+
+var upperMethod = regexp.MustCompile(`^[A-Z]+$`)
+
+func (m MatchConfig) equal(o MatchConfig) bool {
+	return strings.EqualFold(m.Header, o.Header) && slices.Equal(m.Paths, o.Paths) && slices.Equal(m.Methods, o.Methods)
 }
 
 func (n NetworkConfig) validate() error {

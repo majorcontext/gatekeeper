@@ -237,7 +237,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// client must not be able to trigger through policy-denied hosts —
 	// and a denied client must see the policy denial, not a resolver
 	// error. Same order as the CONNECT interception path.
-	resolved, err := p.getCredentialsForRequest(r, r, lookupHost)
+	resolved, err := p.getCredentialsForRequest(r, r, lookupHost, r.URL.Path)
 	if err != nil {
 		status, denied := http.StatusForbidden, p.refusesMissingCredential(w, err)
 		if !denied {

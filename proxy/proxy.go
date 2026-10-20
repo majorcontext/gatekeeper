@@ -289,11 +289,11 @@ type CredentialResolver func(ctx context.Context, proxyReq, innerReq *http.Reque
 // authentication is not required. For Apple containers, the proxy binds
 // to all interfaces with a cryptographically secure token for authentication.
 type Proxy struct {
-	credentials          map[string][]CredentialHeader      // host -> credential headers
-	credentialResolvers  map[string]credentialResolverEntry // host -> dynamic resolver + declared strip headers
-	postgresResolvers    []postgresResolverEntry            // host pattern -> Postgres password resolver
-	extraHeaders         map[string][]ExtraHeader           // host -> additional headers to inject
-	responseTransformers map[string][]ResponseTransformer   // host -> response transformers
+	credentials          map[string][]CredentialHeader        // host -> credential headers
+	credentialResolvers  map[string][]credentialResolverEntry // host -> dynamic resolvers in selection order + declared strip headers
+	postgresResolvers    []postgresResolverEntry              // host pattern -> Postgres password resolver
+	extraHeaders         map[string][]ExtraHeader             // host -> additional headers to inject
+	responseTransformers map[string][]ResponseTransformer     // host -> response transformers
 	mu                   sync.RWMutex
 	ca                   *CA                                                   // Optional CA for TLS interception
 	logger               func(data RequestLogData)                             // Optional request logger
@@ -327,7 +327,7 @@ type Proxy struct {
 func NewProxy() *Proxy {
 	return &Proxy{
 		credentials:          make(map[string][]CredentialHeader),
-		credentialResolvers:  make(map[string]credentialResolverEntry),
+		credentialResolvers:  make(map[string][]credentialResolverEntry),
 		extraHeaders:         make(map[string][]ExtraHeader),
 		responseTransformers: make(map[string][]ResponseTransformer),
 		removeHeaders:        make(map[string][]string),

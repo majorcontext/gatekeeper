@@ -142,7 +142,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve credentials before copying headers so resolver side effects
 	// (e.g., subject header stripping) are reflected in proxyReq.
-	resolved, err := p.getCredentialsForRequest(r, r, host)
+	resolved, err := p.getCredentialsForRequest(r, r, host, targetURL.Path)
 	if err != nil {
 		if p.refusesMissingCredential(w, err) {
 			p.logExit(r, logBase, start, http.StatusForbidden, func(d *RequestLogData) { d.Denied, d.DenyReason = true, err.Error() })
