@@ -171,24 +171,42 @@ type credentialResolverEntry struct {
 	// request-mutating side effects the proxy cannot reproduce, so they
 	// always run.
 	declared bool
+	// match restricts the entry to requests it matches; nil matches every
+	// request. An unmatched entry is always the last of its host's entries.
+	match *RequestMatch
 }
 
-// getCredentialResolver returns the dynamic resolver for a host; see
+// getCredentialResolver returns the first dynamic resolver for a host; see
 // lookupHostKeyed for the matching rules.
 func (p *Proxy) getCredentialResolver(host string) CredentialResolver {
-	entry, _ := p.getCredentialResolverMatch(host)
-	return entry.resolve
+	entries, _ := p.getCredentialResolverMatch(host)
+	if len(entries) == 0 {
+		return nil
+	}
+	return entries[0].resolve
 }
 
-// getCredentialResolverMatch returns the resolver entry for a host plus the
-// match rank. The lookup is presence-based: SetCredentialResolver(host, nil)
-// plants a nil entry that matches and terminates the lookup, disabling
-// resolution for that host even when a broader (bare-host or wildcard)
-// resolver exists — the same opt-out semantics as the companion maps.
-func (p *Proxy) getCredentialResolverMatch(host string) (credentialResolverEntry, hostMatch) {
+// getCredentialResolverMatch returns the resolver entries for a host, in
+// selection order, plus the match rank. The lookup is presence-based:
+// SetCredentialResolver(host, nil) plants a nil entry that matches and
+// terminates the lookup, disabling resolution for that host even when a
+// broader (bare-host or wildcard) resolver exists — the same opt-out
+// semantics as the companion maps.
+func (p *Proxy) getCredentialResolverMatch(host string) ([]credentialResolverEntry, hostMatch) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return lookupHostKeyed(p.credentialResolvers, host, presenceUsable)
+}
+
+// chooseResolverEntry returns the first entry that applies to req, or the
+// zero entry when none does.
+func chooseResolverEntry(entries []credentialResolverEntry, req *http.Request, path string) credentialResolverEntry {
+	for _, e := range entries {
+		if e.match == nil || e.match.matches(req, path) {
+			return e
+		}
+	}
+	return credentialResolverEntry{}
 }
 
 // credentialInjectionResult holds the outcome of credential injection.
@@ -396,13 +414,21 @@ func getRunContext(r *http.Request) *RunContextData {
 //
 // ctxReq carries the RunContextData (the CONNECT request for intercepted
 // connections, or the same request for plain HTTP). innerReq is the actual
-// request the resolver may inspect and modify.
-func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host string) (resolvedCredentials, error) {
+// request the resolver may inspect and modify. path is what resolver entry
+// matches are tested against.
+//
+// A host may carry several resolver entries; the first whose match accepts
+// the request is used, and a request that none accepts is handled as if the
+// host had no resolver. A chosen entry that selected the request by a client
+// header and whose credentials do not answer that header has the header
+// removed, so the selecting placeholder never reaches upstream.
+func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, path string) (resolvedCredentials, error) {
 	if rc := getRunContext(ctxReq); rc != nil {
 		creds, _ := lookupHostKeyed(rc.Credentials, host, nonEmptySlice)
 		return resolvedCredentials{creds: creds}, nil
 	}
-	entry, resolverMatch := p.getCredentialResolverMatch(host)
+	entries, resolverMatch := p.getCredentialResolverMatch(host)
+	entry := chooseResolverEntry(entries, innerReq, path)
 	if entry.resolve == nil {
 		return resolvedCredentials{creds: p.getCredentials(host)}, nil
 	}
@@ -461,9 +487,23 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host st
 	if len(resolved) > 0 {
 		// Read static credentials after the resolver has run, not before: a
 		// token refresh landing while a slow resolver was out must be seen.
-		return resolvedCredentials{creds: withRequestedStatics(sentBefore, innerReq, resolved, p.getCredentials(host))}, nil
+		creds := withRequestedStatics(sentBefore, innerReq, resolved, p.getCredentials(host))
+		if entry.match != nil && entry.match.Header != "" && !answersHeader(creds, entry.match.Header) {
+			innerReq.Header.Del(entry.match.Header)
+		}
+		return resolvedCredentials{creds: creds}, nil
 	}
 	return resolvedCredentials{creds: p.getCredentials(host)}, nil
+}
+
+// answersHeader reports whether any credential targets the named header.
+func answersHeader(creds []CredentialHeader, name string) bool {
+	for _, c := range creds {
+		if strings.EqualFold(c.Name, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // getCredentialBundlesForRequest returns the caller's credential bundles.

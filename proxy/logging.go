@@ -300,9 +300,11 @@ func (p *Proxy) logPolicyObservation(ctxReq *http.Request, scope, operation, rul
 // registrations should migrate to SetCredentialResolverWithStripHeaders.
 func (p *Proxy) logHeadersRedacted(h http.Header, host string) http.Header {
 	out := h.Clone()
-	entry, _ := p.getCredentialResolverMatch(host)
-	for _, name := range entry.stripHeaders {
-		out.Del(name)
+	entries, _ := p.getCredentialResolverMatch(host)
+	for _, entry := range entries {
+		for _, name := range entry.stripHeaders {
+			out.Del(name)
+		}
 	}
 	return out
 }

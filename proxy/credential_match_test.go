@@ -1,0 +1,158 @@
+package proxy
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"testing"
+)
+
+type matchRow struct {
+	name    string
+	only    string // restrict to one path: "relay"
+	apiLead bool   // register the api resolver first, with no path restriction
+	static  bool   // static x-api-key credential on the host
+	method  string
+	path    string
+	headers map[string]string
+
+	wantAuth   string
+	wantAPIKey string
+}
+
+func matchRows() []matchRow {
+	return []matchRow{
+		{
+			name: "subscription_by_authorization", method: "POST", path: "/v1/messages",
+			headers:  map[string]string{"Authorization": "Bearer placeholder"},
+			wantAuth: "Bearer sub",
+		},
+		{
+			name: "api_by_x_api_key_selecting_header_stripped", method: "POST", path: "/v1/messages",
+			headers:  map[string]string{"x-api-key": "placeholder"},
+			wantAuth: "Bearer api",
+		},
+		{
+			name: "admin_get_on_organizations", method: "GET", path: "/v1/organizations/usage_report/messages",
+			headers:  map[string]string{"x-api-key": "p"},
+			wantAuth: "Bearer admin",
+		},
+		{
+			name: "admin_post_matches_nothing", static: true, method: "POST", path: "/v1/organizations/x",
+			headers:    map[string]string{"x-api-key": "p"},
+			wantAPIKey: "static-key",
+		},
+		{
+			name: "first_match_wins_in_registration_order", apiLead: true, method: "GET", path: "/v1/organizations/usage_report/messages",
+			headers:  map[string]string{"x-api-key": "p"},
+			wantAuth: "Bearer api",
+		},
+		{
+			name: "relay_matches_target_path", only: "relay", method: "POST", path: "/v1/messages",
+			headers:  map[string]string{"x-api-key": "p"},
+			wantAuth: "Bearer api",
+		},
+	}
+}
+
+func matchProxy(row matchRow, host string) *Proxy {
+	p := NewProxy()
+	if row.static {
+		p.SetInsecureCredentialWithGrant(host, "x-api-key", "static-key", "anthropic")
+	}
+	tagged := func(tag string) CredentialResolver {
+		return func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
+			return []CredentialHeader{{Name: "Authorization", Value: "Bearer " + tag, AllowInsecure: true}}, nil
+		}
+	}
+	admin := RequestMatch{Header: "x-api-key", Paths: []string{"/v1/organizations/"}, Methods: []string{"GET"}}
+	api := RequestMatch{Header: "x-api-key", Paths: []string{"/v1/messages"}}
+	if row.apiLead {
+		api.Paths = nil
+		p.SetMatchedCredentialResolver(host, api, tagged("api"))
+		p.SetMatchedCredentialResolver(host, admin, tagged("admin"))
+	} else {
+		p.SetMatchedCredentialResolver(host, admin, tagged("admin"))
+		p.SetMatchedCredentialResolver(host, api, tagged("api"))
+	}
+	p.SetMatchedCredentialResolver(host, RequestMatch{Header: "Authorization"}, tagged("sub"))
+	return p
+}
+
+func TestMatchedResolvers(t *testing.T) {
+	for _, row := range matchRows() {
+		check := func(t *testing.T, status int, seen *seenRequest) {
+			t.Helper()
+			if status != http.StatusOK {
+				t.Fatalf("status = %d, want 200", status)
+			}
+			if seen == nil {
+				t.Fatal("request never reached upstream")
+			}
+			if seen.auth != row.wantAuth || seen.apiKey != row.wantAPIKey {
+				t.Errorf("upstream Authorization, X-Api-Key = %q, %q; want %q, %q", seen.auth, seen.apiKey, row.wantAuth, row.wantAPIKey)
+			}
+		}
+		if row.only == "" {
+			t.Run("http-cleartext/"+row.name, func(t *testing.T) {
+				up, seen := requiredUpstream(t, false)
+				redirectHTTPTransport(t, up.Listener.Addr().String())
+				p := matchProxy(row, "api.anthropic.com")
+				req := httptest.NewRequest(row.method, "http://api.anthropic.com:8080"+row.path, nil)
+				for k, v := range row.headers {
+					req.Header.Set(k, v)
+				}
+				rec := httptest.NewRecorder()
+				p.ServeHTTP(rec, req)
+				check(t, rec.Code, seen.Load())
+			})
+			t.Run("connect-intercept/"+row.name, func(t *testing.T) {
+				up, seen := requiredUpstream(t, true)
+				p := matchProxy(row, mustParseURL(up.URL).Hostname())
+				ca := contractCA(t)
+				upstreamCAs := x509.NewCertPool()
+				upstreamCAs.AddCert(up.Certificate())
+				p.SetCA(ca)
+				p.SetUpstreamCAs(upstreamCAs)
+				proxySrv := httptest.NewServer(p)
+				t.Cleanup(proxySrv.Close)
+				clientCAs := x509.NewCertPool()
+				clientCAs.AppendCertsFromPEM(ca.certPEM)
+				proxyURL, _ := url.Parse(proxySrv.URL)
+				client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL), TLSClientConfig: &tls.Config{RootCAs: clientCAs}}}
+				t.Cleanup(client.CloseIdleConnections)
+				req, _ := http.NewRequest(row.method, up.URL+row.path, nil)
+				for k, v := range row.headers {
+					req.Header.Set(k, v)
+				}
+				resp, err := client.Do(req)
+				if err != nil {
+					t.Fatalf("request: %v", err)
+				}
+				_, _ = io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				check(t, resp.StatusCode, seen.Load())
+			})
+		}
+		if row.only == "" || row.only == "relay" {
+			t.Run("relay/"+row.name, func(t *testing.T) {
+				up, seen := requiredUpstream(t, false)
+				p := matchProxy(row, mustParseURL(up.URL).Hostname())
+				if err := p.AddRelay("anthropic", up.URL); err != nil {
+					t.Fatal(err)
+				}
+				req := httptest.NewRequest(row.method, "/relay/anthropic"+row.path, nil)
+				for k, v := range row.headers {
+					req.Header.Set(k, v)
+				}
+				rec := httptest.NewRecorder()
+				p.handleRelay(rec, req)
+				check(t, rec.Code, seen.Load())
+			})
+		}
+	}
+}
