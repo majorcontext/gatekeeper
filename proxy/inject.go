@@ -441,7 +441,7 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 			for _, h := range entry.stripHeaders {
 				innerReq.Header.Del(h)
 			}
-			return resolvedCredentials{creds: staticCreds}, nil
+			return entry.stripSelector(innerReq, resolvedCredentials{creds: staticCreds}), nil
 		}
 		// A legacy registration made no declaration, so the resolver may
 		// have request-mutating side effects only it can perform (e.g.
@@ -458,7 +458,7 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 		// token refresh landing while the resolver was out (e.g. a
 		// refreshing source rotating the static token mid-call) must be
 		// seen, or the request injects a credential that's already stale.
-		return resolvedCredentials{creds: p.getCredentials(host)}, nil
+		return entry.stripSelector(innerReq, resolvedCredentials{creds: p.getCredentials(host)}), nil
 	}
 	// A resolver is handed innerReq and may mutate it, so which headers the
 	// client sent is only knowable before it runs.
@@ -479,7 +479,7 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 				return resolvedCredentials{}, &CredentialRequiredError{Grant: declined.Grant, Host: host, Reason: declined.Reason}
 			}
 		}
-		return resolvedCredentials{creds: statics, declined: declined}, nil
+		return entry.stripSelector(innerReq, resolvedCredentials{creds: statics, declined: declined}), nil
 	}
 	if resolveErr != nil {
 		return resolvedCredentials{}, resolveErr
@@ -487,13 +487,19 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 	if len(resolved) > 0 {
 		// Read static credentials after the resolver has run, not before: a
 		// token refresh landing while a slow resolver was out must be seen.
-		creds := withRequestedStatics(sentBefore, innerReq, resolved, p.getCredentials(host))
-		if entry.match != nil && entry.match.Header != "" && !answersHeader(creds, entry.match.Header) {
-			innerReq.Header.Del(entry.match.Header)
-		}
-		return resolvedCredentials{creds: creds}, nil
+		return entry.stripSelector(innerReq, resolvedCredentials{creds: withRequestedStatics(sentBefore, innerReq, resolved, p.getCredentials(host))}), nil
 	}
-	return resolvedCredentials{creds: p.getCredentials(host)}, nil
+	return entry.stripSelector(innerReq, resolvedCredentials{creds: p.getCredentials(host)}), nil
+}
+
+// stripSelector removes the header the entry's match selected the request by,
+// unless a final credential answers that header, so the client's placeholder
+// never reaches upstream. It returns res unchanged.
+func (e credentialResolverEntry) stripSelector(req *http.Request, res resolvedCredentials) resolvedCredentials {
+	if e.match != nil && e.match.Header != "" && !answersHeader(res.creds, e.match.Header) {
+		req.Header.Del(e.match.Header)
+	}
+	return res
 }
 
 // answersHeader reports whether any credential targets the named header.

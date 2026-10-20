@@ -12,13 +12,15 @@ import (
 )
 
 type matchRow struct {
-	name    string
-	only    string // restrict to one path: "relay"
-	apiLead bool   // register the api resolver first, with no path restriction
-	static  bool   // static x-api-key credential on the host
-	method  string
-	path    string
-	headers map[string]string
+	name       string
+	only       string // restrict to one path: "relay"
+	apiLead    bool   // register the api resolver first, with no path restriction
+	static     bool   // static x-api-key credential on the host
+	staticAuth bool   // static Authorization credential on the host
+	apiMode    string // api resolver behavior: "" credential, "nil" returns nil, "decline"
+	method     string
+	path       string
+	headers    map[string]string
 
 	wantAuth   string
 	wantAPIKey string
@@ -56,6 +58,15 @@ func matchRows() []matchRow {
 			headers:  map[string]string{"x-api-key": "p"},
 			wantAuth: "Bearer api",
 		},
+		{
+			name: "resolver_returns_nothing_strips_selecting_header", apiMode: "nil", method: "POST", path: "/v1/messages",
+			headers: map[string]string{"x-api-key": "placeholder"},
+		},
+		{
+			name: "decline_strips_selecting_header", apiMode: "decline", staticAuth: true, method: "POST", path: "/v1/messages",
+			headers:  map[string]string{"x-api-key": "placeholder"},
+			wantAuth: "Bearer static",
+		},
 	}
 }
 
@@ -64,8 +75,17 @@ func matchProxy(row matchRow, host string) *Proxy {
 	if row.static {
 		p.SetInsecureCredentialWithGrant(host, "x-api-key", "static-key", "anthropic")
 	}
+	if row.staticAuth {
+		p.SetInsecureCredentialWithGrant(host, "Authorization", "Bearer static", "bot")
+	}
 	tagged := func(tag string) CredentialResolver {
 		return func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
+			if tag == "api" && row.apiMode == "nil" {
+				return nil, nil
+			}
+			if tag == "api" && row.apiMode == "decline" {
+				return nil, &ResolverDeclined{}
+			}
 			return []CredentialHeader{{Name: "Authorization", Value: "Bearer " + tag, AllowInsecure: true}}, nil
 		}
 	}
@@ -154,5 +174,24 @@ func TestMatchedResolvers(t *testing.T) {
 				check(t, rec.Code, seen.Load())
 			})
 		}
+	}
+}
+
+// A declared resolver outranked by an exact-host static credential is skipped;
+// the client's selecting header must still be removed.
+func TestMatchedResolvers_OutrankedStripsSelectingHeader(t *testing.T) {
+	p := NewProxy()
+	p.SetInsecureCredentialWithGrant("api.example.com", "Authorization", "Bearer static", "bot")
+	p.SetMatchedCredentialResolver("*.example.com", RequestMatch{Header: "x-api-key"}, func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
+		t.Error("outranked resolver ran")
+		return nil, nil
+	})
+	req := httptest.NewRequest("POST", "http://api.example.com/v1/messages", nil)
+	req.Header.Set("x-api-key", "placeholder")
+	if _, err := p.getCredentialsForRequest(req, req, "api.example.com", "/v1/messages"); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("x-api-key"); got != "" {
+		t.Errorf("x-api-key = %q, want it stripped", got)
 	}
 }
