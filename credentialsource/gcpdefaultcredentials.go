@@ -18,6 +18,11 @@ import (
 const (
 	gcpIAMCredentialsURL = "https://iamcredentials.googleapis.com"
 
+	// gcpImpersonationLifetime is the lifetime requested from
+	// generateAccessToken: one hour, the IAM default and maximum without
+	// an org policy exception.
+	gcpImpersonationLifetime = "3600s"
+
 	// gcpStartupRetryWindow bounds how long a caller retries the first
 	// Fetch. The GKE metadata server can refuse requests for the first
 	// seconds of a new Pod.
@@ -121,7 +126,10 @@ func (s *GCPDefaultCredentialsSource) StartupRetryWindow() time.Duration {
 // the calling goroutine (DisableAsyncRefresh) so a refresh failure reaches
 // the caller's retry. The token it returns still carries its real expiry, so
 // a refresh loop that fetches at a fraction of TTL never holds an expired
-// token.
+// token. For a one-hour token, a loop at 75% of TTL makes a few fetches that
+// return the cached token with a shorter TTL (about 45m, 56m, 59m) before
+// the cache lapses and a new token comes back. DetectDefault takes no
+// context; its metadata probe is bounded by the library's own timeouts.
 func (s *GCPDefaultCredentialsSource) loadProvider() (auth.TokenProvider, error) {
 	s.detectMu.Lock()
 	defer s.detectMu.Unlock()
@@ -150,7 +158,7 @@ func (s *GCPDefaultCredentialsSource) loadProvider() (auth.TokenProvider, error)
 func (s *GCPDefaultCredentialsSource) impersonate(ctx context.Context, adcToken string) (string, time.Time, error) {
 	body, err := json.Marshal(map[string]any{
 		"scope":    s.scopes,
-		"lifetime": "3600s",
+		"lifetime": gcpImpersonationLifetime,
 	})
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("encoding generateAccessToken request: %w", err)

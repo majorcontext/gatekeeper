@@ -459,7 +459,9 @@ type startupRetrier interface {
 
 // fetchAtStartup fetches src once. When src is a startupRetrier, a failed
 // fetch is retried with the refresh loop's backoff until the source's window
-// ends, and no attempt runs past the window. It returns the last error.
+// ends, and no Fetch context outlives the window. Work inside Fetch that
+// takes no context, such as ADC detection, can still run past it by its own
+// timeouts. It returns the last error.
 func (s *Server) fetchAtStartup(ctx context.Context, src credentialsource.CredentialSource) (string, error) {
 	r, ok := src.(startupRetrier)
 	if !ok || r.StartupRetryWindow() <= 0 {
