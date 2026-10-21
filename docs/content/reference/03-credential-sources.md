@@ -23,6 +23,14 @@ Each credential entry in gatekeeper.yaml includes a `source` block that determin
 
 Sources marked **Refresh: Yes** have credentials that expire. `process`, `github-app`, and `gcp-service-account` implement background credential refresh — gatekeeper re-fetches at 75% of TTL (minimum 30 seconds) and hot-swaps without downtime. `token-exchange` uses per-request lazy caching: on cache miss, gatekeeper calls the STS and caches the result for the token's TTL.
 
+## Startup retry
+
+Gatekeeper fetches each credential at startup, with a 10-second timeout for each attempt. Usually, a failed first fetch stops startup.
+
+Sources that authenticate with ambient cloud credentials retry a failed first fetch. These sources are `aws-secretsmanager`, `gcp-secretmanager`, and `gcp-service-account` with `secret` or `adc`. The GKE metadata server can refuse requests for the first seconds of a new Pod. Gatekeeper retries with backoff (1s, then doubled, with up to 25% jitter) for up to 30 seconds. Each retry logs `credential fetch failed at startup, retrying` at WARN. If the window ends, startup fails with the last error.
+
+Sources with a configured key do not retry: `gcp-service-account` with `private_key_path` or `private_key_env`, and `github-app`. `env`, `static`, and `process` sources do not retry.
+
 ---
 
 ## env
@@ -142,7 +150,7 @@ rate limits) and serve values that rarely change.
 
 ## aws-secretsmanager
 
-Fetch the credential from AWS Secrets Manager at startup. Uses the AWS SDK default credential chain (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, IAM roles, etc.).
+Fetch the credential from AWS Secrets Manager at startup. Uses the AWS SDK default credential chain (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, IAM roles, etc.). A failed first fetch is retried at startup; see [Startup retry](#startup-retry).
 
 ```yaml
 credentials:
@@ -173,7 +181,9 @@ AWS region for the Secrets Manager client.
 
 ## gcp-secretmanager
 
-Fetch the credential from GCP Secret Manager at startup. Uses Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS`, metadata server, etc.).
+Fetch the credential from GCP Secret Manager at startup. Uses Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS`, metadata server, etc.). A failed first fetch is retried at startup; see [Startup retry](#startup-retry).
+
+> **Note:** Gatekeeper creates the Secret Manager client at config load, and the Google client library then probes for the metadata server once per process. On GKE, set `GCE_METADATA_HOST=169.254.169.254` in the gatekeeper container so the library skips the probe. A probe that fails in the first seconds of a Pod makes config load fail, and the startup retry cannot recover.
 
 ```yaml
 credentials:
@@ -232,7 +242,7 @@ The service account key JSON can come from one of three locations: GCP Secret Ma
 
 ### secret
 
-GCP Secret Manager secret holding the service account key JSON. Reading the secret uses Application Default Credentials, same as the `gcp-secretmanager` source. If the token endpoint rejects an assertion (e.g., after the key is rotated and the old key revoked), gatekeeper drops the cached key and re-reads it from Secret Manager on the next refresh, so key rotation is picked up without a restart.
+GCP Secret Manager secret holding the service account key JSON. Reading the secret uses Application Default Credentials, same as the `gcp-secretmanager` source, so a failed first fetch is retried at startup (see [Startup retry](#startup-retry)). If the token endpoint rejects an assertion (e.g., after the key is rotated and the old key revoked), gatekeeper drops the cached key and re-reads it from Secret Manager on the next refresh, so key rotation is picked up without a restart.
 
 - **Type:** `string`
 - **Required:** One of `secret`, `private_key_path`, `private_key_env`, or `adc` is required
@@ -292,7 +302,7 @@ credentials:
 
 The token has the rule's `scopes`. Gatekeeper refreshes it at 75% of the remaining lifetime that the token reports, the same loop as the key modes. Each refresh asks ADC again and keeps no token cache of its own. The metadata server can return a token it has cached, with less than an hour left; the next refresh then comes at 75% of what is left.
 
-Gatekeeper finds ADC on the first fetch, not at config load. At startup, a failed first fetch in `adc` mode is retried with backoff (1s, then doubled, with up to 25% jitter) for up to 30 seconds. Each retry logs `credential fetch failed at startup, retrying` at WARN. The GKE metadata server can refuse requests for the first seconds of a new Pod. The key modes are not retried: their first fetch error stops startup.
+Gatekeeper finds ADC on the first fetch, not at config load. A failed first fetch in `adc` mode is retried at startup; see [Startup retry](#startup-retry). The `private_key_path` and `private_key_env` modes are not retried: their first fetch error stops startup.
 
 > **Note:** On GKE, set `GCE_METADATA_HOST=169.254.169.254` in the gatekeeper container. Without it, the Google client library probes for the metadata server once per process and keeps the result. A probe that fails in the first seconds of a Pod makes every later ADC lookup fail, and the startup retry cannot recover. With the variable set, the library skips the probe.
 

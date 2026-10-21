@@ -3,6 +3,7 @@ package credentialsource
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -37,6 +38,11 @@ func (s *awsSMSource) Fetch(ctx context.Context) (string, error) {
 }
 
 func (s *awsSMSource) Type() string { return "aws-secretsmanager" }
+
+// StartupRetryWindow returns how long a caller should keep retrying a failed
+// first Fetch. The client authenticates with the AWS default credential
+// chain, which can read an instance or container metadata endpoint.
+func (s *awsSMSource) StartupRetryWindow() time.Duration { return startupRetryWindow }
 
 // realSMClient wraps the AWS SDK Secrets Manager client.
 type realSMClient struct {

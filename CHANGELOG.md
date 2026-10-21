@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.33.1 — 2026-10-21
+
+### Fixed
+
+- **Every source with ambient cloud credentials retries its first fetch at startup** (`credentialsource/source.go`, `credentialsource/gcpsecretmanager.go`, `credentialsource/awssecretsmanager.go`, `credentialsource/gcpserviceaccount.go`) — v0.33.0 retried only `gcp-service-account` with `adc: true`. A `gcp-secretmanager` source, a `gcp-service-account` source with `secret`, and an `aws-secretsmanager` source also authenticate with ambient credentials, but got one 10s attempt, and their failure stopped startup. On GKE, a config that paired `adc` rules with `gcp-secretmanager` rules could still crash a new Pod while the metadata server started. These sources now share the `adc` source's 30-second startup retry window. Sources with a configured key (`private_key_path`, `private_key_env`, `github-app`) still fail startup on their first fetch error.
+
 ## v0.33.0 — 2026-10-21
 
 ### Added

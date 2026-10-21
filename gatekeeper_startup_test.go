@@ -3,8 +3,11 @@ package gatekeeper
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -128,4 +131,64 @@ func TestLoadCredentials_NoStartupRetryWithoutWindow(t *testing.T) {
 			t.Errorf("fetches = %d, want 1 (no retry)", n)
 		}
 	})
+}
+
+// ambientFlakySource fails its first fetch like flakySource and reports the
+// startup retry window of the source that a config resolves to.
+type ambientFlakySource struct {
+	*flakySource
+	resolved credentialsource.CredentialSource
+}
+
+func (s ambientFlakySource) StartupRetryWindow() time.Duration {
+	if r, ok := s.resolved.(startupRetrier); ok {
+		return r.StartupRetryWindow()
+	}
+	return 0
+}
+
+// TestLoadCredentials_AmbientCredentialSourcesRetryAtStartup pins which
+// sources survive a metadata server that refuses the first fetch of a new
+// Pod: a source that authenticates with ambient cloud credentials retries,
+// and a source with a configured key does not.
+func TestLoadCredentials_AmbientCredentialSourcesRetryAtStartup(t *testing.T) {
+	keyJSON := testGCPSAKeyJSON(t)
+	adcFile := filepath.Join(t.TempDir(), "adc.json")
+	if err := os.WriteFile(adcFile, keyJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", adcFile)
+	t.Setenv("TEST_GCP_SA_KEY", string(keyJSON))
+
+	tests := []struct {
+		name      string
+		cfg       SourceConfig
+		wantRetry bool
+	}{
+		{"gcp-secretmanager", SourceConfig{Type: "gcp-secretmanager", Project: "my-project", Secret: "api-key"}, true},
+		{"gcp-service-account with secret", SourceConfig{Type: "gcp-service-account", Project: "my-project", Secret: "sa-key"}, true},
+		{"gcp-service-account with adc", SourceConfig{Type: "gcp-service-account", ADC: true}, true},
+		{"aws-secretsmanager", SourceConfig{Type: "aws-secretsmanager", Secret: "api-key", Region: "us-east-1"}, true},
+		{"gcp-service-account with private_key_env", SourceConfig{Type: "gcp-service-account", PrivateKeyEnv: "TEST_GCP_SA_KEY"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resolved, err := resolveSource(tt.cfg)
+			if err != nil {
+				t.Fatalf("resolveSource(%+v): %v", tt.cfg, err)
+			}
+			if c, ok := resolved.(io.Closer); ok {
+				t.Cleanup(func() { c.Close() })
+			}
+			synctest.Test(t, func(t *testing.T) {
+				_, err := loadFlakyCredential(t, ambientFlakySource{&flakySource{failures: 1}, resolved})
+				if tt.wantRetry && err != nil {
+					t.Errorf("loadCredentials after one failed %s fetch: %v, want a retry that succeeds", tt.name, err)
+				}
+				if !tt.wantRetry && err == nil {
+					t.Errorf("loadCredentials after one failed %s fetch = nil error, want startup to fail with no retry", tt.name)
+				}
+			})
+		})
+	}
 }

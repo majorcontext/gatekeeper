@@ -25,11 +25,6 @@ const (
 	// generateAccessToken: one hour, the IAM default and maximum without
 	// an org policy exception.
 	gcpImpersonationLifetime = "3600s"
-
-	// gcpStartupRetryWindow bounds how long a caller retries the first
-	// Fetch. The GKE metadata server can refuse requests for the first
-	// seconds of a new Pod.
-	gcpStartupRetryWindow = 30 * time.Second
 )
 
 // GCPDefaultCredentialsSource mints OAuth2 access tokens from Google
@@ -115,7 +110,7 @@ func (s *GCPDefaultCredentialsSource) TTL() time.Duration {
 // StartupRetryWindow returns how long a caller should keep retrying a failed
 // first Fetch before it gives up.
 func (s *GCPDefaultCredentialsSource) StartupRetryWindow() time.Duration {
-	return gcpStartupRetryWindow
+	return startupRetryWindow
 }
 
 // newProvider detects ADC and returns a token provider for it. Fetch calls

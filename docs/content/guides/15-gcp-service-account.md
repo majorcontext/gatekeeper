@@ -90,7 +90,7 @@ env:
 
 Without it, the Google client library probes for the metadata server once and keeps the result for the life of the process. If that probe fails in the first seconds of a new Pod, every later lookup fails.
 
-The GKE metadata server can refuse requests for the first seconds of a Pod. In `adc` mode, gatekeeper retries a failed first fetch at startup for up to 30 seconds, with backoff (1s, then doubled, plus up to 25% jitter). Each retry logs `credential fetch failed at startup, retrying` at WARN. If the window ends, gatekeeper exits with the last error. The key modes do not retry at startup.
+The GKE metadata server can refuse requests for the first seconds of a Pod. In `adc` and `secret` modes, gatekeeper retries a failed first fetch at startup for up to 30 seconds, with backoff (1s, then doubled, plus up to 25% jitter). Each retry logs `credential fetch failed at startup, retrying` at WARN. If the window ends, gatekeeper exits with the last error. The `private_key_path` and `private_key_env` modes do not retry at startup.
 
 To act as a different service account, add `target_service_account`. Gatekeeper then uses the ADC token to call the IAM Credentials `generateAccessToken` method, and injects the target account's token:
 
