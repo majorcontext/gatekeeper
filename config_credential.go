@@ -3,6 +3,7 @@ package gatekeeper
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/majorcontext/gatekeeper/credentialsource"
@@ -20,7 +21,7 @@ func resolveSource(cfg SourceConfig) (credentialsource.CredentialSource, error) 
 		if cfg.Var == "" {
 			return nil, fmt.Errorf("env source requires 'var' field")
 		}
-		if cfg.Command != "" || cfg.TTL != "" || cfg.Value != "" || cfg.Secret != "" || cfg.Region != "" || cfg.Project != "" || cfg.Version != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Scopes != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" || cfg.ActorTokenFrom != "" || cfg.ActorTokenType != "" || cfg.BotSubject != "" {
+		if cfg.Command != "" || cfg.TTL != "" || cfg.Value != "" || cfg.Secret != "" || cfg.Region != "" || cfg.Project != "" || cfg.Version != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Scopes != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" || cfg.ActorTokenFrom != "" || cfg.ActorTokenType != "" || cfg.BotSubject != "" || cfg.ADC || cfg.TargetServiceAccount != "" {
 			return nil, fmt.Errorf("env source only uses 'var'; found extraneous fields")
 		}
 		return credentialsource.NewEnvSource(cfg.Var), nil
@@ -28,7 +29,7 @@ func resolveSource(cfg SourceConfig) (credentialsource.CredentialSource, error) 
 		if cfg.Command == "" {
 			return nil, fmt.Errorf("process source requires 'command' field")
 		}
-		if cfg.Var != "" || cfg.Value != "" || cfg.Secret != "" || cfg.Region != "" || cfg.Project != "" || cfg.Version != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Scopes != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" || cfg.ActorTokenFrom != "" || cfg.ActorTokenType != "" || cfg.BotSubject != "" {
+		if cfg.Var != "" || cfg.Value != "" || cfg.Secret != "" || cfg.Region != "" || cfg.Project != "" || cfg.Version != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Scopes != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" || cfg.ActorTokenFrom != "" || cfg.ActorTokenType != "" || cfg.BotSubject != "" || cfg.ADC || cfg.TargetServiceAccount != "" {
 			return nil, fmt.Errorf("process source only uses 'command' and 'ttl'; found extraneous fields")
 		}
 		var ttl time.Duration
@@ -47,7 +48,7 @@ func resolveSource(cfg SourceConfig) (credentialsource.CredentialSource, error) 
 		if cfg.Value == "" {
 			return nil, fmt.Errorf("static source requires 'value' field")
 		}
-		if cfg.Var != "" || cfg.Command != "" || cfg.TTL != "" || cfg.Secret != "" || cfg.Region != "" || cfg.Project != "" || cfg.Version != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Scopes != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" || cfg.ActorTokenFrom != "" || cfg.ActorTokenType != "" || cfg.BotSubject != "" {
+		if cfg.Var != "" || cfg.Command != "" || cfg.TTL != "" || cfg.Secret != "" || cfg.Region != "" || cfg.Project != "" || cfg.Version != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Scopes != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" || cfg.ActorTokenFrom != "" || cfg.ActorTokenType != "" || cfg.BotSubject != "" || cfg.ADC || cfg.TargetServiceAccount != "" {
 			return nil, fmt.Errorf("static source only uses 'value'; found extraneous fields")
 		}
 		return credentialsource.NewStaticSource(cfg.Value), nil
@@ -55,7 +56,7 @@ func resolveSource(cfg SourceConfig) (credentialsource.CredentialSource, error) 
 		if cfg.Secret == "" {
 			return nil, fmt.Errorf("aws-secretsmanager source requires 'secret' field")
 		}
-		if cfg.Var != "" || cfg.Value != "" || cfg.Command != "" || cfg.TTL != "" || cfg.Project != "" || cfg.Version != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Scopes != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" || cfg.ActorTokenFrom != "" || cfg.ActorTokenType != "" || cfg.BotSubject != "" {
+		if cfg.Var != "" || cfg.Value != "" || cfg.Command != "" || cfg.TTL != "" || cfg.Project != "" || cfg.Version != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Scopes != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" || cfg.ActorTokenFrom != "" || cfg.ActorTokenType != "" || cfg.BotSubject != "" || cfg.ADC || cfg.TargetServiceAccount != "" {
 			return nil, fmt.Errorf("aws-secretsmanager source only uses 'secret' and 'region'; found extraneous fields")
 		}
 		return credentialsource.NewAWSSecretsManagerSource(cfg.Secret, cfg.Region)
@@ -66,7 +67,7 @@ func resolveSource(cfg SourceConfig) (credentialsource.CredentialSource, error) 
 		if cfg.Project == "" {
 			return nil, fmt.Errorf("gcp-secretmanager source requires 'project' field")
 		}
-		if cfg.Var != "" || cfg.Value != "" || cfg.Command != "" || cfg.TTL != "" || cfg.Region != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Scopes != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" || cfg.ActorTokenFrom != "" || cfg.ActorTokenType != "" || cfg.BotSubject != "" {
+		if cfg.Var != "" || cfg.Value != "" || cfg.Command != "" || cfg.TTL != "" || cfg.Region != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Scopes != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" || cfg.ActorTokenFrom != "" || cfg.ActorTokenType != "" || cfg.BotSubject != "" || cfg.ADC || cfg.TargetServiceAccount != "" {
 			return nil, fmt.Errorf("gcp-secretmanager source only uses 'secret', 'project', and 'version'; found extraneous fields")
 		}
 		return credentialsource.NewGCPSecretManagerSource(cfg.Project, cfg.Secret, cfg.Version)
@@ -83,7 +84,7 @@ func resolveSource(cfg SourceConfig) (credentialsource.CredentialSource, error) 
 		if cfg.PrivateKeyPath != "" && cfg.PrivateKeyEnv != "" {
 			return nil, fmt.Errorf("github-app source: set 'private_key_path' or 'private_key_env', not both")
 		}
-		if cfg.Var != "" || cfg.Value != "" || cfg.Command != "" || cfg.TTL != "" || cfg.Secret != "" || cfg.Region != "" || cfg.Project != "" || cfg.Version != "" || cfg.Scopes != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" || cfg.ActorTokenFrom != "" || cfg.ActorTokenType != "" || cfg.BotSubject != "" {
+		if cfg.Var != "" || cfg.Value != "" || cfg.Command != "" || cfg.TTL != "" || cfg.Secret != "" || cfg.Region != "" || cfg.Project != "" || cfg.Version != "" || cfg.Scopes != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" || cfg.ActorTokenFrom != "" || cfg.ActorTokenType != "" || cfg.BotSubject != "" || cfg.ADC || cfg.TargetServiceAccount != "" {
 			return nil, fmt.Errorf("github-app source only uses 'app_id', 'installation_id', and one of 'private_key_path'/'private_key_env'; found extraneous fields")
 		}
 		keyPEM, err := readKeyMaterial(cfg.PrivateKeyPath, cfg.PrivateKeyEnv)
@@ -93,16 +94,16 @@ func resolveSource(cfg SourceConfig) (credentialsource.CredentialSource, error) 
 		return credentialsource.NewGitHubAppSource(cfg.AppID, cfg.InstallationID, keyPEM)
 	case "gcp-service-account":
 		keyLocations := 0
-		for _, set := range []bool{cfg.PrivateKeyPath != "", cfg.PrivateKeyEnv != "", cfg.Secret != ""} {
+		for _, set := range []bool{cfg.PrivateKeyPath != "", cfg.PrivateKeyEnv != "", cfg.Secret != "", cfg.ADC} {
 			if set {
 				keyLocations++
 			}
 		}
 		if keyLocations == 0 {
-			return nil, fmt.Errorf("gcp-service-account source requires a key location: 'private_key_path', 'private_key_env', or 'secret' (with 'project')")
+			return nil, fmt.Errorf("gcp-service-account source requires a key location: 'private_key_path', 'private_key_env', 'secret' (with 'project'), or 'adc'")
 		}
 		if keyLocations > 1 {
-			return nil, fmt.Errorf("gcp-service-account source: set only one of 'private_key_path', 'private_key_env', or 'secret'")
+			return nil, fmt.Errorf("gcp-service-account source: set only one of 'private_key_path', 'private_key_env', 'secret', or 'adc'")
 		}
 		if cfg.Secret != "" && cfg.Project == "" {
 			return nil, fmt.Errorf("gcp-service-account source requires 'project' when reading the key from Secret Manager via 'secret'")
@@ -110,8 +111,17 @@ func resolveSource(cfg SourceConfig) (credentialsource.CredentialSource, error) 
 		if cfg.Secret == "" && (cfg.Project != "" || cfg.Version != "") {
 			return nil, fmt.Errorf("gcp-service-account source only uses 'project' and 'version' with 'secret'")
 		}
+		if cfg.TargetServiceAccount != "" && !cfg.ADC {
+			return nil, fmt.Errorf("gcp-service-account source uses 'target_service_account' only with 'adc'")
+		}
+		if cfg.TargetServiceAccount != "" && !validServiceAccountEmail(cfg.TargetServiceAccount) {
+			return nil, fmt.Errorf("gcp-service-account source: 'target_service_account' %q is not a service account email", cfg.TargetServiceAccount)
+		}
 		if cfg.Var != "" || cfg.Value != "" || cfg.Command != "" || cfg.TTL != "" || cfg.Region != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.Endpoint != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.ClientSecretEnv != "" || cfg.SubjectHeader != "" || cfg.SubjectFrom != "" || cfg.SubjectTokenType != "" || cfg.Resource != "" || cfg.ActorTokenFrom != "" || cfg.ActorTokenType != "" || cfg.BotSubject != "" {
-			return nil, fmt.Errorf("gcp-service-account source only uses a key location ('private_key_path', 'private_key_env', or 'secret'/'project'/'version') and 'scopes'; found extraneous fields")
+			return nil, fmt.Errorf("gcp-service-account source only uses a key location ('private_key_path', 'private_key_env', 'secret'/'project'/'version', or 'adc'/'target_service_account') and 'scopes'; found extraneous fields")
+		}
+		if cfg.ADC {
+			return credentialsource.NewGCPDefaultCredentialsSource(cfg.Scopes, cfg.TargetServiceAccount), nil
 		}
 		if cfg.Secret != "" {
 			keySource, err := credentialsource.NewGCPSecretManagerSource(cfg.Project, cfg.Secret, cfg.Version)
@@ -128,6 +138,22 @@ func resolveSource(cfg SourceConfig) (credentialsource.CredentialSource, error) 
 	default:
 		return nil, fmt.Errorf("unknown credential source type: %q", cfg.Type)
 	}
+}
+
+// validServiceAccountEmail reports whether s has the shape of a service
+// account email: one '@' with text on both sides, and no '/', whitespace, or
+// other byte that would change the IAM Credentials request path.
+func validServiceAccountEmail(s string) bool {
+	local, domain, ok := strings.Cut(s, "@")
+	if !ok || local == "" || domain == "" || strings.Contains(domain, "@") {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("@.-_", r)) {
+			return false
+		}
+	}
+	return true
 }
 
 // readKeyMaterial loads key material from a file path or an environment

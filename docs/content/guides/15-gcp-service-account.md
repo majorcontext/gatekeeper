@@ -1,12 +1,12 @@
 ---
 title: "GCP Service Account Tokens"
-description: "Mint short-lived GCP OAuth2 access tokens from a service account key and inject them into requests to Google APIs, with automatic background refresh."
+description: "Mint short-lived GCP OAuth2 access tokens from a service account key or Application Default Credentials (GKE Workload Identity) and inject them into requests to Google APIs, with automatic background refresh."
 keywords: ["gatekeeper", "GCP", "service account", "OAuth2", "credential source"]
 ---
 
 # GCP service account tokens
 
-Mint short-lived OAuth2 access tokens from a GCP service account key and inject them into requests to Google APIs. Tokens refresh automatically in the background before they expire.
+Mint short-lived OAuth2 access tokens from a GCP service account key and inject them into requests to Google APIs. Tokens refresh automatically in the background before they expire. To configure no key, see [Keyless mode](#keyless-mode-application-default-credentials).
 
 Unlike [GCP Secret Manager](./04-gcp-secret-manager.md), which fetches a literal secret value once, this source holds a service account key and continuously exchanges it for fresh access tokens — the credential injected into requests is never the key itself.
 
@@ -14,19 +14,20 @@ Unlike [GCP Secret Manager](./04-gcp-secret-manager.md), which fetches a literal
 
 - CA certificate generated ([CA Setup](./01-ca-setup.md))
 - A GCP service account with the IAM role(s) needed for the target API
-- The service account's key JSON (`gcloud iam service-accounts keys create key.json --iam-account=...@...iam.gserviceaccount.com`), or that key JSON stored in GCP Secret Manager
+- The service account's key JSON (`gcloud iam service-accounts keys create key.json --iam-account=...@...iam.gserviceaccount.com`), or that key JSON stored in GCP Secret Manager. Keyless mode needs no configured key.
 
 ## Key location modes
 
-The service account key JSON can come from exactly one of three places:
+The token comes from exactly one of four places:
 
 | Field              | Where the key lives                                    |
 |---------------------|---------------------------------------------------------|
 | `private_key_path`  | A file on disk, read once at startup                    |
 | `private_key_env`   | An environment variable, read once at startup           |
 | `secret` + `project` | GCP Secret Manager, read lazily on first use and re-read on key rotation |
+| `adc: true`          | No configured key. Application Default Credentials, such as GKE Workload Identity |
 
-Set exactly one. `secret` also requires `project` (the GCP project containing the secret); `project` and `version` are only valid alongside `secret`.
+Set exactly one. Config load fails when none is set or when more than one is set. `secret` also requires `project` (the GCP project containing the secret); `project` and `version` are only valid alongside `secret`.
 
 ### File or environment variable
 
@@ -65,6 +66,44 @@ credentials:
 
 The secret's payload must be the full service account key JSON. Reading it uses Application Default Credentials, same as the [GCP Secret Manager source](./04-gcp-secret-manager.md) directly. Unlike the file/env modes, this mode re-reads the secret when the key is rotated — see [Key Rotation](#key-rotation) below.
 
+### Keyless mode (Application Default Credentials)
+
+```yaml
+credentials:
+  - host: storage.googleapis.com
+    grant: gcs
+    source:
+      type: gcp-service-account
+      adc: true
+      scopes: https://www.googleapis.com/auth/devstorage.read_write
+```
+
+With `adc: true`, the config names no key. Gatekeeper gets tokens from Application Default Credentials: the file that `GOOGLE_APPLICATION_CREDENTIALS` names, the gcloud well-known file, or the metadata server. On GKE with Workload Identity, the metadata server gives tokens for the Google service account bound to the Pod's Kubernetes service account, and no key is mounted or read. If `GOOGLE_APPLICATION_CREDENTIALS` names a service account key file, ADC uses that key.
+
+On GKE, also set this variable in the gatekeeper container:
+
+```yaml
+env:
+  - name: GCE_METADATA_HOST
+    value: 169.254.169.254
+```
+
+Without it, the Google client library probes for the metadata server once and keeps the result for the life of the process. If that probe fails in the first seconds of a new Pod, every later lookup fails.
+
+The GKE metadata server can refuse requests for the first seconds of a Pod. In `adc` mode, gatekeeper retries a failed first fetch at startup for up to 30 seconds, with backoff (1s, then doubled, plus up to 25% jitter). Each retry logs `credential fetch failed at startup, retrying` at WARN. If the window ends, gatekeeper exits with the last error. The key modes do not retry at startup.
+
+To act as a different service account, add `target_service_account`. Gatekeeper then uses the ADC token to call the IAM Credentials `generateAccessToken` method, and injects the target account's token:
+
+```yaml
+source:
+  type: gcp-service-account
+  adc: true
+  target_service_account: gcs-uploader@my-project.iam.gserviceaccount.com
+  scopes: https://www.googleapis.com/auth/devstorage.read_write
+```
+
+The ADC principal needs `roles/iam.serviceAccountTokenCreator` on the target account.
+
 ## Scopes
 
 ```yaml
@@ -79,6 +118,8 @@ source:
 ## How the token mint and refresh work
 
 Gatekeeper signs a JWT asserting the service account's identity (`iss`, requested `scope`, the token endpoint as `aud`) with the key's RSA private key, and exchanges it at the key's `token_uri` (from the key JSON, defaulting to `https://oauth2.googleapis.com/token`) for an access token using the `urn:ietf:params:oauth:grant-type:jwt-bearer` grant. The response's `expires_in` sets the token's TTL.
+
+In `adc` mode, the token comes from ADC, or from `generateAccessToken` when `target_service_account` is set. The token's expiry sets its TTL.
 
 Background refresh follows the same schedule as every other refreshing source in gatekeeper: **75% of TTL, floored at 30 seconds**. For a typical one-hour Google access token, that's a refresh roughly every 45 minutes. Refresh is atomic — requests see either the old token or the new one, never a partial state.
 
@@ -124,6 +165,7 @@ log:
 
 - The service account needs whatever IAM role the target API requires — for example `roles/storage.objectAdmin` for read/write access to Cloud Storage objects. Grant the narrowest role that covers the request pattern.
 - If the key comes from Secret Manager (`secret` + `project`), the principal running gatekeeper additionally needs `roles/secretmanager.secretAccessor` on that secret — the same permission described in the [GCP Secret Manager guide](./04-gcp-secret-manager.md#iam-permissions).
+- In `adc` mode on GKE, bind the Kubernetes service account to the Google service account with `roles/iam.workloadIdentityUser`, and annotate the Kubernetes service account with `iam.gke.io/gcp-service-account`. With `target_service_account`, the bound account also needs `roles/iam.serviceAccountTokenCreator` on the target.
 - The key JSON itself grants whatever the service account can do — treat it as a credential. Prefer Secret Manager over a key file on disk where practical, since Secret Manager access is itself auditable and revocable without rotating the key.
 
 ## Start the proxy

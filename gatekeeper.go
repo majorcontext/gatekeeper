@@ -382,9 +382,7 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 		go func() {
 			defer wg.Done()
 			defer func() { <-slots }()
-			c, cancel := context.WithTimeout(fetchCtx, 10*time.Second)
-			defer cancel()
-			ps.val, ps.err = ps.src.Fetch(c)
+			ps.val, ps.err = s.fetchAtStartup(fetchCtx, ps.src)
 			if ps.err != nil {
 				firstFailure.Do(func() {
 					failed = ps
@@ -447,6 +445,71 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 	return nil
 }
 
+// startupFetchTimeout bounds one credential fetch during New.
+const startupFetchTimeout = 10 * time.Second
+
+// startupRetrier is a credential source whose first fetch can fail for a
+// short time after the process starts, such as Application Default
+// Credentials that wait for the GKE metadata server.
+type startupRetrier interface {
+	// StartupRetryWindow returns how long New keeps retrying a failed
+	// fetch.
+	StartupRetryWindow() time.Duration
+}
+
+// fetchAtStartup fetches src once. When src is a startupRetrier, a failed
+// fetch is retried with the refresh loop's backoff until the source's window
+// ends, and no Fetch context outlives the window. Work inside Fetch that
+// takes no context, such as ADC detection, can still run past it by its own
+// timeouts. It returns the last error.
+func (s *Server) fetchAtStartup(ctx context.Context, src credentialsource.CredentialSource) (string, error) {
+	r, ok := src.(startupRetrier)
+	if !ok || r.StartupRetryWindow() <= 0 {
+		c, cancel := context.WithTimeout(ctx, startupFetchTimeout)
+		defer cancel()
+		return src.Fetch(c)
+	}
+	deadline := time.Now().Add(r.StartupRetryWindow())
+	var backoff time.Duration
+	for {
+		c, cancel := context.WithTimeout(ctx, min(startupFetchTimeout, time.Until(deadline)))
+		val, err := src.Fetch(c)
+		cancel()
+		if err == nil || ctx.Err() != nil {
+			return val, err
+		}
+		backoff = nextBackoff(backoff)
+		if backoff >= time.Until(deadline) {
+			return "", err
+		}
+		s.log().Warn("credential fetch failed at startup, retrying",
+			"source", src.Type(),
+			"backoff", backoff.String(),
+			"error", err)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", err
+		case <-timer.C:
+		}
+	}
+}
+
+// maxFetchBackoff caps the wait between failed credential fetches.
+const maxFetchBackoff = 60 * time.Second
+
+// nextBackoff returns the wait after another failed fetch, given the
+// previous wait (zero after a success): 1s, then double the previous wait
+// capped at maxFetchBackoff, plus up to 25% jitter.
+func nextBackoff(prev time.Duration) time.Duration {
+	next := time.Second
+	if prev > 0 {
+		next = min(prev*2, maxFetchBackoff)
+	}
+	return next + time.Duration(rand.Int64N(int64(next)/4))
+}
+
 // fetchError never includes the credential value.
 func fetchError(cred CredentialConfig, postgres bool, err error) error {
 	if postgres {
@@ -465,7 +528,6 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 	go func() {
 		defer s.refreshWG.Done()
 		backoff := time.Duration(0)
-		const maxBackoff = 60 * time.Second
 
 		for {
 			var wait time.Duration
@@ -491,16 +553,7 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 				return
 			}
 			if err != nil {
-				if backoff == 0 {
-					backoff = time.Second
-				} else {
-					backoff *= 2
-					if backoff > maxBackoff {
-						backoff = maxBackoff
-					}
-				}
-				jitter := time.Duration(rand.Int64N(int64(backoff) / 4))
-				backoff += jitter
+				backoff = nextBackoff(backoff)
 				var hosts, grants []string
 				for _, c := range creds {
 					hosts = append(hosts, c.Host)

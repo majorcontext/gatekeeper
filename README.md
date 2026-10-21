@@ -130,6 +130,17 @@ source:
 
 See [`examples/gatekeeper-github-app.yaml`](examples/gatekeeper-github-app.yaml) for a complete example.
 
+### GCP service account
+
+Mints short-lived Google OAuth2 access tokens. Set one key location: `private_key_path`, `private_key_env`, `secret` (with `project`), or `adc: true`. With `adc: true`, the config names no key: gatekeeper uses Application Default Credentials. With GKE Workload Identity, no key exists anywhere. See [GCP Service Account Tokens](docs/content/guides/15-gcp-service-account.md).
+
+```yaml
+source:
+  type: gcp-service-account
+  adc: true
+  scopes: https://www.googleapis.com/auth/devstorage.read_write
+```
+
 ## Network policy
 
 Control which hosts the proxy will forward traffic to:

@@ -4,7 +4,14 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
-## Unreleased
+## v0.33.0 — 2026-10-21
+
+### Added
+
+- **`adc: true` makes `gcp-service-account` mint tokens with no configured key** (`config.go`, `config_credential.go`, `credentialsource/gcpdefaultcredentials.go`) — the source required a service account key in a file, an environment variable, or Secret Manager. With `adc: true`, it gets tokens with the rule's `scopes` from Application Default Credentials, such as GKE Workload Identity through the metadata server. Gatekeeper refreshes them on the same 75%-of-TTL loop as the key modes. `adc` is a fourth key location: config load fails when none is set or when more than one is set. `target_service_account`, valid only with `adc`, impersonates that service account through the IAM Credentials `generateAccessToken` method. `adc` or `target_service_account` on another source type fails config load. Errors from the ADC and IAM endpoints name the status code (and the Google error status), never the response body. Library users get `credentialsource.NewGCPDefaultCredentialsSource`.
+- **Startup retries an `adc` source's first fetch** (`gatekeeper.go`) — the GKE metadata server can refuse requests for the first seconds of a Pod, and a failed first fetch stopped startup. `New` now retries a source that reports a startup retry window (only `adc` mode does) for up to 30 seconds, with the refresh loop's backoff. Other sources still fail startup on their first fetch error. On GKE, set `GCE_METADATA_HOST=169.254.169.254`: the Google client library keeps a failed metadata-server probe for the life of the process.
+
+## v0.32.1 — 2026-10-20
 
 ### Security
 

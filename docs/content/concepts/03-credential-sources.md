@@ -37,7 +37,7 @@ type CredentialSource interface {
 | `process` | `command: "op read op://vault/item/field"` | Runs a host command, uses its stdout |
 | `aws-secretsmanager` | `secret: my-secret`, `region: us-east-1` | Fetches from AWS Secrets Manager |
 | `gcp-secretmanager` | `secret: my-secret`, `project: my-project` | Fetches from GCP Secret Manager |
-| `gcp-service-account` | key location, `scopes` | Mints GCP OAuth2 access tokens from a service account key |
+| `gcp-service-account` | key location or `adc`, `scopes`, `target_service_account` | Mints GCP OAuth2 access tokens from a service account key or Application Default Credentials |
 | `github-app` | `app_id`, `installation_id`, private key | Generates GitHub App installation tokens |
 
 ## RefreshingSource and background refresh
