@@ -290,7 +290,7 @@ credentials:
 - **Required:** One of `secret`, `private_key_path`, `private_key_env`, or `adc` is required
 - **Default:** `false`
 
-The token has the rule's `scopes`. Gatekeeper refreshes it at 75% of the remaining lifetime that the token reports, the same loop as the key modes.
+The token has the rule's `scopes`. Gatekeeper refreshes it at 75% of the remaining lifetime that the token reports, the same loop as the key modes. Each refresh asks ADC again and keeps no token cache of its own. The metadata server can return a token it has cached, with less than an hour left; the next refresh then comes at 75% of what is left.
 
 Gatekeeper finds ADC on the first fetch, not at config load. At startup, a failed first fetch in `adc` mode is retried with backoff (1s, then doubled, with up to 25% jitter) for up to 30 seconds. Each retry logs `credential fetch failed at startup, retrying` at WARN. The GKE metadata server can refuse requests for the first seconds of a new Pod. The key modes are not retried: their first fetch error stops startup.
 

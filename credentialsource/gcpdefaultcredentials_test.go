@@ -100,31 +100,26 @@ func TestGCPDefaultCredentialsSource_DefaultScope(t *testing.T) {
 	}
 }
 
-// TestGCPDefaultCredentialsSource_RefreshesNearExpiry shows that a Fetch
-// after the token nears expiry returns a new token and a new TTL, so the
-// gatekeeper refresh loop, which fetches at 75% of TTL, swaps in fresh
-// tokens.
-func TestGCPDefaultCredentialsSource_RefreshesNearExpiry(t *testing.T) {
+// TestGCPDefaultCredentialsSource_EveryFetchMintsANewToken pins that Fetch
+// does not return a cached token. The gatekeeper refresh loop fetches at 75%
+// of TTL; a cached one-hour token would come back with 15 minutes left, then
+// with less, and the last refresh before expiry would leave about a minute
+// to absorb a failure. The key path mints on every Fetch, and so must ADC.
+func TestGCPDefaultCredentialsSource_EveryFetchMintsANewToken(t *testing.T) {
 	requestScopes := fakeMetadataServer(t,
-		metadataToken{"ya29.first", 120},
+		metadataToken{"ya29.first", 3600},
 		metadataToken{"ya29.second", 3600},
 	)
 	src := NewGCPDefaultCredentialsSource("https://www.googleapis.com/auth/pubsub", "")
 
-	first, err := src.Fetch(context.Background())
-	if err != nil {
-		t.Fatalf("first Fetch: %v", err)
-	}
-	if ttl := src.TTL(); first != "ya29.first" || ttl > 2*time.Minute || ttl < time.Minute {
-		t.Fatalf("first Fetch = %q with TTL %v, want ya29.first with TTL ~2m", first, ttl)
-	}
-
-	second, err := src.Fetch(context.Background())
-	if err != nil {
-		t.Fatalf("second Fetch: %v", err)
-	}
-	if ttl := src.TTL(); second != "ya29.second" || ttl < 59*time.Minute {
-		t.Errorf("second Fetch = %q with TTL %v, want ya29.second with TTL ~1h", second, ttl)
+	for i, want := range []string{"ya29.first", "ya29.second"} {
+		got, err := src.Fetch(context.Background())
+		if err != nil {
+			t.Fatalf("Fetch %d: %v", i+1, err)
+		}
+		if ttl := src.TTL(); got != want || ttl < 59*time.Minute {
+			t.Errorf("Fetch %d = %q with TTL %v, want %q with TTL ~1h", i+1, got, ttl, want)
+		}
 	}
 	if got := requestScopes(); len(got) != 2 || got[1] != "https://www.googleapis.com/auth/pubsub" {
 		t.Errorf("metadata token requests asked for scopes %q, want two requests for pubsub", got)

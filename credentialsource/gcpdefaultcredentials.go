@@ -37,21 +37,15 @@ const (
 // gcloud well-known file, or the metadata server, which on GKE serves the
 // Kubernetes service account's Workload Identity. The caller configures no
 // key; ADC uses one only when GOOGLE_APPLICATION_CREDENTIALS or the
-// well-known file holds a service account key. With a target service account, the source uses the ADC token to call
-// the IAM Credentials generateAccessToken method and returns the target's
-// token instead. It implements both CredentialSource and RefreshingSource,
+// well-known file holds a service account key. With a target service
+// account, the source uses the ADC token to call the IAM Credentials
+// generateAccessToken method and returns the target's token instead. It implements both CredentialSource and RefreshingSource,
 // and is safe for concurrent use.
 type GCPDefaultCredentialsSource struct {
 	scopes []string
 	target string
 	iamURL string
 	client *http.Client
-
-	// detectMu guards provider. It is held across ADC detection, which
-	// can probe the metadata server, so it is separate from mu and a slow
-	// detection never blocks TTL.
-	detectMu sync.Mutex
-	provider auth.TokenProvider // ADC, detected on first Fetch
 
 	mu        sync.Mutex
 	expiresAt time.Time
@@ -64,9 +58,9 @@ type GCPDefaultCredentialsSource struct {
 // account, and the ADC principal needs permission to mint it
 // (roles/iam.serviceAccountTokenCreator).
 //
-// The constructor does no I/O: ADC is detected on the first Fetch, so a
-// metadata server that is not ready yet fails a Fetch that the caller can
-// retry, not the constructor.
+// The constructor does no I/O: each Fetch detects ADC, so a metadata server
+// that is not ready yet fails a Fetch that the caller can retry, not the
+// constructor.
 func NewGCPDefaultCredentialsSource(scopes, targetServiceAccount string) *GCPDefaultCredentialsSource {
 	s := strings.Fields(scopes)
 	if len(s) == 0 {
@@ -83,7 +77,7 @@ func NewGCPDefaultCredentialsSource(scopes, targetServiceAccount string) *GCPDef
 func (s *GCPDefaultCredentialsSource) Type() string { return "gcp-service-account" }
 
 func (s *GCPDefaultCredentialsSource) Fetch(ctx context.Context) (string, error) {
-	tp, err := s.loadProvider()
+	tp, err := s.newProvider()
 	if err != nil {
 		return "", err
 	}
@@ -123,23 +117,17 @@ func (s *GCPDefaultCredentialsSource) StartupRetryWindow() time.Duration {
 	return gcpStartupRetryWindow
 }
 
-// loadProvider returns the ADC token provider, detecting it on first use.
-// A failed detection is not cached, so the next Fetch detects again.
+// newProvider detects ADC and returns a token provider for it. Fetch calls
+// it every time, so every Fetch mints a new token, as the key path does. A
+// provider kept across Fetches would return its cached token until 3m45s
+// before expiry, so a refresh loop at 75% of TTL would get a one-hour token
+// back with 15 minutes left, then with about one minute left. A failure at
+// that last refresh would leave the proxy almost no time before the token
+// expired.
 //
-// The provider caches its token until 3m45s before expiry, and refreshes in
-// the calling goroutine (DisableAsyncRefresh) so a refresh failure reaches
-// the caller's retry. The token it returns still carries its real expiry, so
-// a refresh loop that fetches at a fraction of TTL never holds an expired
-// token. For a one-hour token, a loop at 75% of TTL makes a few fetches that
-// return the cached token with a shorter TTL (about 45m, 56m, 59m) before
-// the cache lapses and a new token comes back. DetectDefault takes no
-// context; its metadata probe is bounded by the library's own timeouts.
-func (s *GCPDefaultCredentialsSource) loadProvider() (auth.TokenProvider, error) {
-	s.detectMu.Lock()
-	defer s.detectMu.Unlock()
-	if s.provider != nil {
-		return s.provider, nil
-	}
+// DetectDefault takes no context; its metadata probe is bounded by the
+// library's own timeouts, and the library makes that probe once per process.
+func (s *GCPDefaultCredentialsSource) newProvider() (auth.TokenProvider, error) {
 	scopes := s.scopes
 	if s.target != "" {
 		// The ADC token only calls the IAM Credentials API.
@@ -152,7 +140,6 @@ func (s *GCPDefaultCredentialsSource) loadProvider() (auth.TokenProvider, error)
 	if err != nil {
 		return nil, fmt.Errorf("detecting application default credentials: %w", err)
 	}
-	s.provider = creds
 	return creds, nil
 }
 
