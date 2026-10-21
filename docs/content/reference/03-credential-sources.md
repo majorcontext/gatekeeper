@@ -215,7 +215,7 @@ The underlying gRPC connection is closed on gatekeeper shutdown.
 
 ## gcp-service-account
 
-Mint short-lived GCP OAuth2 access tokens from a service account key (the JSON file format produced by `gcloud iam service-accounts keys create`), or from Application Default Credentials with no key (see [`adc`](#adc)). In key mode, gatekeeper signs a JWT with the key, exchanges it for an access token at Google's OAuth2 token endpoint, and refreshes the token automatically in the background before expiry. Clients inside the sandbox never see the service account key — only the proxy holds it.
+Mint short-lived GCP OAuth2 access tokens from a service account key (the JSON file format produced by `gcloud iam service-accounts keys create`), or from Application Default Credentials with no configured key (see [`adc`](#adc)). In key mode, gatekeeper signs a JWT with the key, exchanges it for an access token at Google's OAuth2 token endpoint, and refreshes the token automatically in the background before expiry. Clients inside the sandbox never see the service account key — only the proxy holds it.
 
 ```yaml
 credentials:
@@ -228,7 +228,7 @@ credentials:
       scopes: https://www.googleapis.com/auth/devstorage.read_write
 ```
 
-The service account key JSON can come from one of three locations: GCP Secret Manager (`secret` + `project`), a file (`private_key_path`), or an environment variable (`private_key_env`). To use no key, set `adc: true`. Set exactly one of `secret`, `private_key_path`, `private_key_env`, and `adc`. Config load fails when none is set or when more than one is set.
+The service account key JSON can come from one of three locations: GCP Secret Manager (`secret` + `project`), a file (`private_key_path`), or an environment variable (`private_key_env`). To configure no key, set `adc: true`. Set exactly one of `secret`, `private_key_path`, `private_key_env`, and `adc`. Config load fails when none is set or when more than one is set.
 
 ### secret
 
@@ -274,7 +274,7 @@ The environment variable must be set and non-empty at startup.
 
 ### adc
 
-Mint tokens from Application Default Credentials (ADC) instead of a service account key. ADC looks in this order: the file that `GOOGLE_APPLICATION_CREDENTIALS` names, the gcloud well-known file, then the metadata server. On GKE with Workload Identity, the metadata server gives tokens for the Google service account that the Kubernetes service account is bound to. No key is mounted or read.
+Mint tokens from Application Default Credentials (ADC) instead of a service account key. ADC looks in this order: the file that `GOOGLE_APPLICATION_CREDENTIALS` names, the gcloud well-known file, then the metadata server. On GKE with Workload Identity, the metadata server gives tokens for the Google service account that the Kubernetes service account is bound to, and no key is mounted or read. If `GOOGLE_APPLICATION_CREDENTIALS` names a service account key file, ADC uses that key: `adc` does not prevent it.
 
 ```yaml
 credentials:

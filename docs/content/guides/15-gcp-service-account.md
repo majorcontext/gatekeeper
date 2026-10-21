@@ -6,7 +6,7 @@ keywords: ["gatekeeper", "GCP", "service account", "OAuth2", "credential source"
 
 # GCP service account tokens
 
-Mint short-lived OAuth2 access tokens from a GCP service account key and inject them into requests to Google APIs. Tokens refresh automatically in the background before they expire. To use no key at all, see [Keyless mode](#keyless-mode-application-default-credentials).
+Mint short-lived OAuth2 access tokens from a GCP service account key and inject them into requests to Google APIs. Tokens refresh automatically in the background before they expire. To configure no key, see [Keyless mode](#keyless-mode-application-default-credentials).
 
 Unlike [GCP Secret Manager](./04-gcp-secret-manager.md), which fetches a literal secret value once, this source holds a service account key and continuously exchanges it for fresh access tokens — the credential injected into requests is never the key itself.
 
@@ -14,7 +14,7 @@ Unlike [GCP Secret Manager](./04-gcp-secret-manager.md), which fetches a literal
 
 - CA certificate generated ([CA Setup](./01-ca-setup.md))
 - A GCP service account with the IAM role(s) needed for the target API
-- The service account's key JSON (`gcloud iam service-accounts keys create key.json --iam-account=...@...iam.gserviceaccount.com`), or that key JSON stored in GCP Secret Manager. Keyless mode needs no key.
+- The service account's key JSON (`gcloud iam service-accounts keys create key.json --iam-account=...@...iam.gserviceaccount.com`), or that key JSON stored in GCP Secret Manager. Keyless mode needs no configured key.
 
 ## Key location modes
 
@@ -25,7 +25,7 @@ The token comes from exactly one of four places:
 | `private_key_path`  | A file on disk, read once at startup                    |
 | `private_key_env`   | An environment variable, read once at startup           |
 | `secret` + `project` | GCP Secret Manager, read lazily on first use and re-read on key rotation |
-| `adc: true`          | No key. Application Default Credentials, such as GKE Workload Identity |
+| `adc: true`          | No configured key. Application Default Credentials, such as GKE Workload Identity |
 
 Set exactly one. Config load fails when none is set or when more than one is set. `secret` also requires `project` (the GCP project containing the secret); `project` and `version` are only valid alongside `secret`.
 
@@ -78,7 +78,7 @@ credentials:
       scopes: https://www.googleapis.com/auth/devstorage.read_write
 ```
 
-With `adc: true`, gatekeeper reads no key. It gets tokens from Application Default Credentials: the file that `GOOGLE_APPLICATION_CREDENTIALS` names, the gcloud well-known file, or the metadata server. On GKE with Workload Identity, the metadata server gives tokens for the Google service account bound to the Pod's Kubernetes service account.
+With `adc: true`, the config names no key. Gatekeeper gets tokens from Application Default Credentials: the file that `GOOGLE_APPLICATION_CREDENTIALS` names, the gcloud well-known file, or the metadata server. On GKE with Workload Identity, the metadata server gives tokens for the Google service account bound to the Pod's Kubernetes service account, and no key is mounted or read. If `GOOGLE_APPLICATION_CREDENTIALS` names a service account key file, ADC uses that key.
 
 On GKE, also set this variable in the gatekeeper container:
 

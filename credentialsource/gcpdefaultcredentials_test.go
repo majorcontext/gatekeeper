@@ -276,3 +276,56 @@ func TestGCPDefaultCredentialsSource_ImpersonationDenied(t *testing.T) {
 		t.Errorf("error = %q contains the ADC token", err)
 	}
 }
+
+// TestGCPDefaultCredentialsSource_ErrorsOmitResponseBodies pins that a
+// credential in an error response body never reaches the Fetch error, which
+// gatekeeper logs at startup and on every failed refresh.
+func TestGCPDefaultCredentialsSource_ErrorsOmitResponseBodies(t *testing.T) {
+	const leaked = "ya29.secret-should-not-be-logged"
+	body := `{"access_token":"` + leaked + `","error":{"code":403,"status":"PERMISSION_DENIED","message":"` + leaked + `"}}`
+
+	t.Run("metadata server", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, body, http.StatusForbidden)
+		}))
+		t.Cleanup(srv.Close)
+		u, _ := url.Parse(srv.URL)
+		t.Setenv("GCE_METADATA_HOST", u.Host)
+		t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+		t.Setenv("HOME", t.TempDir())
+
+		_, err := NewGCPDefaultCredentialsSource("", "").Fetch(context.Background())
+		if err == nil {
+			t.Fatal("Fetch with a 403 from the metadata server = nil error, want an error")
+		}
+		if strings.Contains(err.Error(), leaked) {
+			t.Errorf("error = %q contains the response body's token", err)
+		}
+		if !strings.Contains(err.Error(), "403") {
+			t.Errorf("error = %q, want it to name the 403", err)
+		}
+	})
+
+	t.Run("generateAccessToken", func(t *testing.T) {
+		fakeMetadataServer(t, metadataToken{"ya29.base", 3600})
+		iamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, body, http.StatusForbidden)
+		}))
+		t.Cleanup(iamSrv.Close)
+		src := NewGCPDefaultCredentialsSource("", "uploader@my-project.iam.gserviceaccount.com")
+		src.iamURL = iamSrv.URL
+
+		_, err := src.Fetch(context.Background())
+		if err == nil {
+			t.Fatal("Fetch with a 403 from generateAccessToken = nil error, want an error")
+		}
+		if strings.Contains(err.Error(), leaked) {
+			t.Errorf("error = %q contains the response body's token", err)
+		}
+		for _, want := range []string{"403", "PERMISSION_DENIED"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want it to contain %q", err, want)
+			}
+		}
+	})
+}

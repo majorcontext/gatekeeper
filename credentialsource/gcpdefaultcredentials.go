@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -13,6 +15,7 @@ import (
 
 	"cloud.google.com/go/auth"
 	"cloud.google.com/go/auth/credentials"
+	"cloud.google.com/go/compute/metadata"
 )
 
 const (
@@ -32,8 +35,9 @@ const (
 // GCPDefaultCredentialsSource mints OAuth2 access tokens from Google
 // Application Default Credentials (ADC): GOOGLE_APPLICATION_CREDENTIALS, the
 // gcloud well-known file, or the metadata server, which on GKE serves the
-// Kubernetes service account's Workload Identity. No service account key is
-// read. With a target service account, the source uses the ADC token to call
+// Kubernetes service account's Workload Identity. The caller configures no
+// key; ADC uses one only when GOOGLE_APPLICATION_CREDENTIALS or the
+// well-known file holds a service account key. With a target service account, the source uses the ADC token to call
 // the IAM Credentials generateAccessToken method and returns the target's
 // token instead. It implements both CredentialSource and RefreshingSource,
 // and is safe for concurrent use.
@@ -85,7 +89,7 @@ func (s *GCPDefaultCredentialsSource) Fetch(ctx context.Context) (string, error)
 	}
 	tok, err := tp.Token(ctx)
 	if err != nil {
-		return "", fmt.Errorf("fetching application default credentials token: %w", err)
+		return "", adcTokenError(err)
 	}
 	if tok.Value == "" || tok.Expiry.IsZero() {
 		return "", fmt.Errorf("application default credentials returned a token without a value or expiry")
@@ -177,9 +181,12 @@ func (s *GCPDefaultCredentialsSource) impersonate(ctx context.Context, adcToken 
 	}
 	defer resp.Body.Close()
 
-	respBody, err := readTokenResponse(resp, http.StatusOK, "IAM Credentials generateAccessToken for "+s.target)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenResponseSize))
 	if err != nil {
-		return "", time.Time{}, err
+		return "", time.Time{}, fmt.Errorf("reading generateAccessToken response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", time.Time{}, iamError(s.target, resp.StatusCode, respBody)
 	}
 	var result struct {
 		AccessToken string    `json:"accessToken"`
@@ -195,4 +202,67 @@ func (s *GCPDefaultCredentialsSource) impersonate(ctx context.Context, adcToken 
 		return "", time.Time{}, fmt.Errorf("generateAccessToken response missing expireTime field")
 	}
 	return result.AccessToken, result.ExpireTime, nil
+}
+
+// adcTokenError describes a failed ADC token fetch without the upstream
+// response body. The metadata client and the auth library put the body in
+// their error text, and gatekeeper logs this error at startup and on every
+// failed refresh, so an error body that carries a credential must not reach
+// it. Transport errors (a refused connection, a timeout) carry no body and
+// are kept for diagnosis.
+func adcTokenError(err error) error {
+	const op = "fetching application default credentials token"
+	var (
+		metaErr    *metadata.Error
+		authErr    *auth.Error
+		notDefined metadata.NotDefinedError
+		urlErr     *url.Error
+	)
+	switch {
+	case errors.As(err, &metaErr):
+		return fmt.Errorf("%s: metadata server returned %d", op, metaErr.Code)
+	case errors.As(err, &authErr):
+		if authErr.Response != nil {
+			return fmt.Errorf("%s: token endpoint returned %d", op, authErr.Response.StatusCode)
+		}
+		return fmt.Errorf("%s: token endpoint returned an error", op)
+	case errors.As(err, &notDefined), errors.As(err, &urlErr):
+		return fmt.Errorf("%s: %w", op, err)
+	case errors.Is(err, context.Canceled):
+		return fmt.Errorf("%s: %w", op, context.Canceled)
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Errorf("%s: %w", op, context.DeadlineExceeded)
+	default:
+		return fmt.Errorf("%s: failed (%T)", op, err)
+	}
+}
+
+// iamError describes a non-200 generateAccessToken response by its status
+// code and the Google error status (such as PERMISSION_DENIED), never the
+// response body, which can carry arbitrary text.
+func iamError(target string, status int, body []byte) error {
+	var parsed struct {
+		Error struct {
+			Status string `json:"status"`
+		} `json:"error"`
+	}
+	msg := fmt.Sprintf("IAM Credentials generateAccessToken for %s returned %d", target, status)
+	if json.Unmarshal(body, &parsed) == nil && isGoogleErrorStatus(parsed.Error.Status) {
+		msg += " " + parsed.Error.Status
+	}
+	return errors.New(msg)
+}
+
+// isGoogleErrorStatus reports whether s looks like a google.rpc.Code name:
+// upper-case letters and underscores, at most 64 bytes.
+func isGoogleErrorStatus(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'A' && r <= 'Z' || r == '_') {
+			return false
+		}
+	}
+	return true
 }
