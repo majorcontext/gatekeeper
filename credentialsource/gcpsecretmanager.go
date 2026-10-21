@@ -44,6 +44,10 @@ func (s *gcpSMSource) Fetch(ctx context.Context) (string, error) {
 
 func (s *gcpSMSource) Type() string { return "gcp-secretmanager" }
 
+// StartupRetryWindow returns how long a caller should keep retrying a failed
+// first Fetch. The client authenticates with Application Default Credentials.
+func (s *gcpSMSource) StartupRetryWindow() time.Duration { return startupRetryWindow }
+
 // Close releases the underlying client connection if it implements io.Closer.
 func (s *gcpSMSource) Close() error {
 	if c, ok := s.client.(io.Closer); ok {

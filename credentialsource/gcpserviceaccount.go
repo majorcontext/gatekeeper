@@ -160,6 +160,15 @@ func (s *GCPServiceAccountSource) TTL() time.Duration {
 	return ttl
 }
 
+// StartupRetryWindow returns the key source's startup retry window, or zero
+// when the key was provided directly.
+func (s *GCPServiceAccountSource) StartupRetryWindow() time.Duration {
+	if r, ok := s.keySource.(interface{ StartupRetryWindow() time.Duration }); ok {
+		return r.StartupRetryWindow()
+	}
+	return 0
+}
+
 // Close releases the key source if it implements io.Closer.
 func (s *GCPServiceAccountSource) Close() error {
 	if c, ok := s.keySource.(io.Closer); ok {

@@ -56,7 +56,7 @@ config.go           YAML config parsing (proxy, TLS, credentials, network, log)
 config_credential.go  Credential source resolution (maps source config to backends)
 
 credentialsource/   Pluggable credential backends
-  source.go           Source interface (CredentialSource, RefreshingSource)
+  source.go           Source interface (CredentialSource, RefreshingSource), shared startup retry window
   env.go             Environment variable source
   static.go          Literal value source
   process.go         Host command (credential_process-style) source

@@ -449,8 +449,8 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 const startupFetchTimeout = 10 * time.Second
 
 // startupRetrier is a credential source whose first fetch can fail for a
-// short time after the process starts, such as Application Default
-// Credentials that wait for the GKE metadata server.
+// short time after the process starts, such as a source with ambient cloud
+// credentials that waits for the GKE metadata server.
 type startupRetrier interface {
 	// StartupRetryWindow returns how long New keeps retrying a failed
 	// fetch.
