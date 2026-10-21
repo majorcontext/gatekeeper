@@ -17,7 +17,7 @@ Each credential entry in gatekeeper.yaml includes a `source` block that determin
 | `process` | Run a host command, use its stdout | Yes (auto-refresh; expiry read from `credential_process`-format JSON, else configurable `ttl`) |
 | `aws-secretsmanager` | Fetch from AWS Secrets Manager | No |
 | `gcp-secretmanager` | Fetch from GCP Secret Manager | No |
-| `gcp-service-account` | Mint GCP OAuth2 access token from a service account key | Yes (auto-refresh before expiry) |
+| `gcp-service-account` | Mint GCP OAuth2 access token from a service account key or Application Default Credentials | Yes (auto-refresh before expiry) |
 | `github-app` | Generate GitHub App installation token | Yes (auto-refresh before expiry) |
 | `token-exchange` | RFC 8693 token exchange | Yes (per-request, cached with TTL) |
 
@@ -215,7 +215,7 @@ The underlying gRPC connection is closed on gatekeeper shutdown.
 
 ## gcp-service-account
 
-Mint short-lived GCP OAuth2 access tokens from a service account key (the JSON file format produced by `gcloud iam service-accounts keys create`). Gatekeeper signs a JWT with the key, exchanges it for an access token at Google's OAuth2 token endpoint, and refreshes the token automatically in the background before expiry. Clients inside the sandbox never see the service account key — only the proxy holds it.
+Mint short-lived GCP OAuth2 access tokens from a service account key (the JSON file format produced by `gcloud iam service-accounts keys create`), or from Application Default Credentials with no key (see [`adc`](#adc)). In key mode, gatekeeper signs a JWT with the key, exchanges it for an access token at Google's OAuth2 token endpoint, and refreshes the token automatically in the background before expiry. Clients inside the sandbox never see the service account key — only the proxy holds it.
 
 ```yaml
 credentials:
@@ -228,14 +228,14 @@ credentials:
       scopes: https://www.googleapis.com/auth/devstorage.read_write
 ```
 
-The service account key JSON can come from one of three locations: GCP Secret Manager (`secret` + `project`), a file (`private_key_path`), or an environment variable (`private_key_env`). Exactly one must be set.
+The service account key JSON can come from one of three locations: GCP Secret Manager (`secret` + `project`), a file (`private_key_path`), or an environment variable (`private_key_env`). To use no key, set `adc: true`. Set exactly one of `secret`, `private_key_path`, `private_key_env`, and `adc`. Config load fails when none is set or when more than one is set.
 
 ### secret
 
 GCP Secret Manager secret holding the service account key JSON. Reading the secret uses Application Default Credentials, same as the `gcp-secretmanager` source. If the token endpoint rejects an assertion (e.g., after the key is rotated and the old key revoked), gatekeeper drops the cached key and re-reads it from Secret Manager on the next refresh, so key rotation is picked up without a restart.
 
 - **Type:** `string`
-- **Required:** One of `secret`, `private_key_path`, or `private_key_env` is required
+- **Required:** One of `secret`, `private_key_path`, `private_key_env`, or `adc` is required
 - **Default:** —
 
 ### project
@@ -259,7 +259,7 @@ Secret version to access.
 File path to the service account key JSON.
 
 - **Type:** `string`
-- **Required:** One of `secret`, `private_key_path`, or `private_key_env` is required
+- **Required:** One of `secret`, `private_key_path`, `private_key_env`, or `adc` is required
 - **Default:** —
 
 ### private_key_env
@@ -267,10 +267,52 @@ File path to the service account key JSON.
 Name of an environment variable containing the service account key JSON.
 
 - **Type:** `string`
-- **Required:** One of `secret`, `private_key_path`, or `private_key_env` is required
+- **Required:** One of `secret`, `private_key_path`, `private_key_env`, or `adc` is required
 - **Default:** —
 
 The environment variable must be set and non-empty at startup.
+
+### adc
+
+Mint tokens from Application Default Credentials (ADC) instead of a service account key. ADC looks in this order: the file that `GOOGLE_APPLICATION_CREDENTIALS` names, the gcloud well-known file, then the metadata server. On GKE with Workload Identity, the metadata server gives tokens for the Google service account that the Kubernetes service account is bound to. No key is mounted or read.
+
+```yaml
+credentials:
+  - host: storage.googleapis.com
+    grant: gcs
+    source:
+      type: gcp-service-account
+      adc: true
+      scopes: https://www.googleapis.com/auth/devstorage.read_write
+```
+
+- **Type:** `bool`
+- **Required:** One of `secret`, `private_key_path`, `private_key_env`, or `adc` is required
+- **Default:** `false`
+
+The token has the rule's `scopes`. Gatekeeper refreshes it at 75% of the remaining lifetime that the token reports, the same loop as the key modes.
+
+Gatekeeper finds ADC on the first fetch, not at config load. At startup, a failed first fetch in `adc` mode is retried with backoff (1s, then doubled, with up to 25% jitter) for up to 30 seconds. Each retry logs `credential fetch failed at startup, retrying` at WARN. The GKE metadata server can refuse requests for the first seconds of a new Pod. The key modes are not retried: their first fetch error stops startup.
+
+> **Note:** On GKE, set `GCE_METADATA_HOST=169.254.169.254` in the gatekeeper container. Without it, the Google client library probes for the metadata server once per process and keeps the result. A probe that fails in the first seconds of a Pod makes every later ADC lookup fail, and the startup retry cannot recover. With the variable set, the library skips the probe.
+
+### target_service_account
+
+Email of a service account to impersonate. Only valid with `adc: true`. Gatekeeper gets an ADC token with the `cloud-platform` scope, then calls the IAM Credentials `generateAccessToken` method for this service account with the rule's `scopes`. The injected token belongs to the target account. Each refresh mints a new one-hour token.
+
+```yaml
+source:
+  type: gcp-service-account
+  adc: true
+  target_service_account: gcs-uploader@my-project.iam.gserviceaccount.com
+  scopes: https://www.googleapis.com/auth/devstorage.read_write
+```
+
+- **Type:** `string`
+- **Required:** No
+- **Default:** — (inject the ADC principal's own token)
+
+The ADC principal needs `roles/iam.serviceAccountTokenCreator` on the target account. Config load fails when the value is not a service account email.
 
 ### scopes
 

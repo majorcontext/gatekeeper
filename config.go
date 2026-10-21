@@ -157,6 +157,16 @@ type SourceConfig struct {
 	PrivateKeyPath string `yaml:"private_key_path,omitempty"` // for github-app (PEM key), gcp-service-account (key JSON)
 	PrivateKeyEnv  string `yaml:"private_key_env,omitempty"`  // for github-app (PEM key), gcp-service-account (key JSON)
 	Scopes         string `yaml:"scopes,omitempty"`           // for gcp-service-account: space-separated OAuth scopes (default: cloud-platform)
+	// ADC makes gcp-service-account mint tokens from Application Default
+	// Credentials (GKE Workload Identity, the metadata server, or
+	// GOOGLE_APPLICATION_CREDENTIALS) instead of a service account key. It is
+	// a key location: set it instead of private_key_path, private_key_env,
+	// or secret.
+	ADC bool `yaml:"adc,omitempty"`
+	// TargetServiceAccount, with adc, makes gcp-service-account impersonate
+	// this service account email through the IAM Credentials API. The ADC
+	// principal needs roles/iam.serviceAccountTokenCreator on it.
+	TargetServiceAccount string `yaml:"target_service_account,omitempty"`
 
 	// token-exchange (RFC 8693) fields
 	Endpoint         string `yaml:"endpoint,omitempty"`

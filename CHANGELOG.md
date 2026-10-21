@@ -6,6 +6,11 @@ Gatekeeper is pre-1.0. The configuration schema and credential source interface 
 
 ## Unreleased
 
+### Added
+
+- **`adc: true` makes `gcp-service-account` mint tokens with no key** (`config.go`, `config_credential.go`, `credentialsource/gcpdefaultcredentials.go`) — the source required a service account key in a file, an environment variable, or Secret Manager. With `adc: true`, it gets tokens with the rule's `scopes` from Application Default Credentials, such as GKE Workload Identity through the metadata server. Gatekeeper refreshes them on the same 75%-of-TTL loop as the key modes. `adc` is a fourth key location: config load fails when none is set or when more than one is set. `target_service_account`, valid only with `adc`, impersonates that service account through the IAM Credentials `generateAccessToken` method. `adc` or `target_service_account` on another source type fails config load. Library users get `credentialsource.NewGCPDefaultCredentialsSource`.
+- **Startup retries an `adc` source's first fetch** (`gatekeeper.go`) — the GKE metadata server can refuse requests for the first seconds of a Pod, and a failed first fetch stopped startup. `New` now retries a source that reports a startup retry window (only `adc` mode does) for up to 30 seconds, with the refresh loop's backoff. Other sources still fail startup on their first fetch error. On GKE, set `GCE_METADATA_HOST=169.254.169.254`: the Google client library keeps a failed metadata-server probe for the life of the process.
+
 ### Security
 
 - **Build with Go 1.27.3** (`go.mod`, `cmd/gatekeeper/Dockerfile`) — Go 1.27.3 makes `crypto/x509` reject chains through eight compromised eMudhra intermediates (CVE-2026-111943, go.dev/issue/82345). Gatekeeper verifies upstream TLS chains, so a gatekeeper built with Go 1.25 still trusted them; Go 1.25 is out of support and gets no fix. The builder image is pinned by digest.

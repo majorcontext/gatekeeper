@@ -48,11 +48,12 @@ The `region` field in the source config takes precedence over these environment 
 
 ## GCP variables
 
-Used by the `gcp-secretmanager` credential source via Application Default Credentials.
+Used by the `gcp-secretmanager` credential source, the `secret` mode of `gcp-service-account`, and `gcp-service-account` with `adc: true`, through Application Default Credentials.
 
 | Variable | Description |
 |----------|-------------|
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to a service account key JSON file |
+| `GCE_METADATA_HOST` | Metadata server host. When set, the GCP SDK uses it and skips its one-time probe for a metadata server. On GKE, set it to `169.254.169.254` for `adc: true`, so a probe that fails while the Pod starts does not disable ADC for the life of the process |
 
 When unset, the GCP SDK uses the metadata server (on GCE/GKE) or gcloud application-default credentials.
 

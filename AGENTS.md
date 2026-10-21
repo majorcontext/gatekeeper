@@ -8,7 +8,7 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Key capabilities:
 
-- **Credential injection** — Resolve credentials from environment variables, static values, host command output, AWS Secrets Manager, GCP Secret Manager, GCP service account keys, GitHub App keys, or RFC 8693 token exchange, then inject them as HTTP headers for matching hosts
+- **Credential injection** — Resolve credentials from environment variables, static values, host command output, AWS Secrets Manager, GCP Secret Manager, GCP service account keys or Application Default Credentials, GitHub App keys, or RFC 8693 token exchange, then inject them as HTTP headers for matching hosts
 - **Postgres data plane** — Credential-injecting Postgres proxy on a second listener: routes by TLS SNI, authenticates clients with their run token (sent as the Postgres password inside gatekeeper's TLS), and resolves per-branch Neon passwords (or a static password) on the fly so no database secret lives in the sandbox
 - **TLS interception** — MITM proxy with per-host certificate generation from a configured CA
 - **PROXY protocol** — Per-listener v1/v2 header parsing (`proxy.proxy_protocol`, `postgres.proxy_protocol`) recovers the real client IP behind a TCP-terminating load balancer, fail-open on headerless connections
@@ -63,6 +63,7 @@ credentialsource/   Pluggable credential backends
   awssecretsmanager.go  AWS Secrets Manager source
   gcpsecretmanager.go   GCP Secret Manager source
   gcpserviceaccount.go  GCP service account OAuth2 token source
+  gcpdefaultcredentials.go  Keyless gcp-service-account mode: Application Default Credentials tokens, optional impersonation, startup retry window
   githubapp.go       GitHub App installation token source
   tokenexchange.go   RFC 8693 token exchange source
   tokenexchange_resolver.go  Per-request token-exchange resolver (subject extraction, bot_subject, header shaping)

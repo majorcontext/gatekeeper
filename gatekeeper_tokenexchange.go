@@ -137,7 +137,7 @@ func resolveSharedTokenExchange(cred CredentialConfig, shared map[SourceConfig]*
 		return nil, fmt.Errorf("token-exchange source: set 'client_secret' or 'client_secret_env', not both")
 	}
 	// Reject extraneous fields from other source types
-	if cfg.Var != "" || cfg.Value != "" || cfg.Command != "" || cfg.TTL != "" || cfg.Secret != "" || cfg.Region != "" || cfg.Project != "" || cfg.Version != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Scopes != "" {
+	if cfg.Var != "" || cfg.Value != "" || cfg.Command != "" || cfg.TTL != "" || cfg.Secret != "" || cfg.Region != "" || cfg.Project != "" || cfg.Version != "" || cfg.AppID != "" || cfg.InstallationID != "" || cfg.PrivateKeyPath != "" || cfg.PrivateKeyEnv != "" || cfg.Scopes != "" || cfg.ADC || cfg.TargetServiceAccount != "" {
 		return nil, fmt.Errorf("token-exchange source only uses 'endpoint', 'client_id', 'client_secret'/'client_secret_env', 'subject_header'/'subject_from', 'bot_subject', 'static_fallback', 'actor_token_from', 'actor_token_type', 'subject_token_type', and 'resource'; found extraneous fields")
 	}
 

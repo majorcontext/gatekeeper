@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/majorcontext/gatekeeper/credentialsource"
 )
 
 func TestResolveSourceEnv(t *testing.T) {
@@ -725,5 +727,116 @@ func TestResolveSourceEnvRejectsCommandField(t *testing.T) {
 	_, err := resolveSource(SourceConfig{Type: "env", Var: "SOME_VAR", Command: "printf x"})
 	if err == nil {
 		t.Fatal("expected error: env source must reject the process-only command field")
+	}
+}
+
+func TestResolveSourceGCPServiceAccountADC(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  SourceConfig
+	}{
+		{"adc", SourceConfig{Type: "gcp-service-account", ADC: true, Scopes: "https://www.googleapis.com/auth/devstorage.read_write"}},
+		{"adc with target_service_account", SourceConfig{Type: "gcp-service-account", ADC: true, TargetServiceAccount: "uploader@my-project.iam.gserviceaccount.com"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src, err := resolveSource(tt.cfg)
+			if err != nil {
+				t.Fatalf("resolveSource(%+v): %v", tt.cfg, err)
+			}
+			if _, ok := src.(*credentialsource.GCPDefaultCredentialsSource); !ok {
+				t.Errorf("resolveSource(%+v) = %T, want *credentialsource.GCPDefaultCredentialsSource", tt.cfg, src)
+			}
+			// New retries this source's first fetch while the GKE
+			// metadata server starts.
+			if r, ok := src.(startupRetrier); !ok || r.StartupRetryWindow() <= 0 {
+				t.Errorf("resolveSource(%+v) = %T, want a startupRetrier with a positive window", tt.cfg, src)
+			}
+		})
+	}
+}
+
+func TestResolveSourceGCPServiceAccountNoKeyNamesADC(t *testing.T) {
+	_, err := resolveSource(SourceConfig{Type: "gcp-service-account", Scopes: "https://www.googleapis.com/auth/pubsub"})
+	if err == nil {
+		t.Fatal("resolveSource with no key location and no adc = nil error, want an error")
+	}
+	if !strings.Contains(err.Error(), "'adc'") {
+		t.Errorf("error = %q, want it to list 'adc' as a key location", err)
+	}
+}
+
+func TestResolveSourceGCPServiceAccountADCInvalid(t *testing.T) {
+	const sa = "uploader@my-project.iam.gserviceaccount.com"
+	tests := []struct {
+		name    string
+		cfg     SourceConfig
+		wantErr string
+	}{
+		{"adc and private_key_path", SourceConfig{Type: "gcp-service-account", ADC: true, PrivateKeyPath: "/p"}, "only one of"},
+		{"adc and private_key_env", SourceConfig{Type: "gcp-service-account", ADC: true, PrivateKeyEnv: "E"}, "only one of"},
+		{"adc and secret", SourceConfig{Type: "gcp-service-account", ADC: true, Secret: "sa-key", Project: "pr"}, "only one of"},
+		{"adc and every key location", SourceConfig{Type: "gcp-service-account", ADC: true, PrivateKeyPath: "/p", PrivateKeyEnv: "E", Secret: "sa-key", Project: "pr"}, "only one of"},
+		{"adc and project", SourceConfig{Type: "gcp-service-account", ADC: true, Project: "pr"}, "'project' and 'version' with 'secret'"},
+		{"adc and version", SourceConfig{Type: "gcp-service-account", ADC: true, Version: "3"}, "'project' and 'version' with 'secret'"},
+		{"target_service_account without a key location", SourceConfig{Type: "gcp-service-account", TargetServiceAccount: sa}, "requires a key location"},
+		{"target_service_account with private_key_env", SourceConfig{Type: "gcp-service-account", PrivateKeyEnv: "E", TargetServiceAccount: sa}, "'target_service_account' only with 'adc'"},
+		{"target_service_account with secret", SourceConfig{Type: "gcp-service-account", Secret: "sa-key", Project: "pr", TargetServiceAccount: sa}, "'target_service_account' only with 'adc'"},
+		{"target_service_account not an email", SourceConfig{Type: "gcp-service-account", ADC: true, TargetServiceAccount: "uploader"}, "service account email"},
+		{"target_service_account with a path", SourceConfig{Type: "gcp-service-account", ADC: true, TargetServiceAccount: "a/../b@my-project.iam.gserviceaccount.com"}, "service account email"},
+		{"adc with an extraneous field", SourceConfig{Type: "gcp-service-account", ADC: true, Region: "us-east-1"}, "extraneous"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := resolveSource(tt.cfg)
+			if err == nil {
+				t.Fatalf("resolveSource(%+v) = nil error, want an error containing %q", tt.cfg, tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("resolveSource(%+v) error = %q, want it to contain %q", tt.cfg, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestResolveSourceADCExtraneousOnOtherTypes pins that adc and
+// target_service_account, which only gcp-service-account reads, fail config
+// load on every other source type instead of being ignored.
+func TestResolveSourceADCExtraneousOnOtherTypes(t *testing.T) {
+	t.Setenv("TEST_TE_SECRET_ADC", "s")
+	base := []struct {
+		name string
+		cfg  SourceConfig
+	}{
+		{"env", SourceConfig{Type: "env", Var: "X"}},
+		{"process", SourceConfig{Type: "process", Command: "echo hi"}},
+		{"static", SourceConfig{Type: "static", Value: "v"}},
+		{"aws-secretsmanager", SourceConfig{Type: "aws-secretsmanager", Secret: "s"}},
+		{"gcp-secretmanager", SourceConfig{Type: "gcp-secretmanager", Secret: "s", Project: "p"}},
+		{"github-app", SourceConfig{Type: "github-app", AppID: "1", InstallationID: "2", PrivateKeyEnv: "X"}},
+		{"token-exchange", SourceConfig{Type: "token-exchange", Endpoint: "http://x", ClientID: "gk", ClientSecretEnv: "TEST_TE_SECRET_ADC", SubjectHeader: "X-S"}},
+	}
+	for _, b := range base {
+		withADC := b.cfg
+		withADC.ADC = true
+		withTarget := b.cfg
+		withTarget.TargetServiceAccount = "uploader@my-project.iam.gserviceaccount.com"
+		for _, tt := range []struct {
+			name string
+			cfg  SourceConfig
+		}{
+			{b.name + " with adc", withADC},
+			{b.name + " with target_service_account", withTarget},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				_, _, err := resolveCredentialSource(CredentialConfig{Host: "api.example.com", Source: tt.cfg})
+				if err == nil {
+					t.Fatalf("resolveCredentialSource(%+v) = nil error, want an error for an extraneous field", tt.cfg)
+				}
+				if !strings.Contains(err.Error(), "extraneous") {
+					t.Errorf("resolveCredentialSource(%+v) error = %q, want it to mention 'extraneous'", tt.cfg, err)
+				}
+			})
+		}
 	}
 }
