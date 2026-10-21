@@ -39,8 +39,9 @@ const (
 // key; ADC uses one only when GOOGLE_APPLICATION_CREDENTIALS or the
 // well-known file holds a service account key. With a target service
 // account, the source uses the ADC token to call the IAM Credentials
-// generateAccessToken method and returns the target's token instead. It implements both CredentialSource and RefreshingSource,
-// and is safe for concurrent use.
+// generateAccessToken method and returns the target's token instead. It
+// implements both CredentialSource and RefreshingSource, and is safe for
+// concurrent use.
 type GCPDefaultCredentialsSource struct {
 	scopes []string
 	target string
