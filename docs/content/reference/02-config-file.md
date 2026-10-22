@@ -392,6 +392,50 @@ credentials:
 
 By default gatekeeper refuses a request whose upstream scheme is `http` when a credential matches its host. The client receives `403` and the request is not forwarded. This also applies to `/relay/` targets with an `http://` URL. Set `allow_insecure: true` only for a trusted network path, such as an in-cluster service. HTTPS and CONNECT traffic is not affected. Token-exchange `endpoint` URLs and other fetches that gatekeeper makes itself are not affected.
 
+### credentials[].match
+
+Selects this credential when the request contains the configured header and matches its optional path prefixes and methods. All predicate kinds must match. Multiple paths or methods are alternatives.
+
+```yaml
+credentials:
+  - host: api.anthropic.com
+    header: Authorization
+    match: {header: x-api-key, paths: [/v1/messages], methods: [POST]}
+    source: {type: static, value: test-token}
+```
+
+- **Type:** `object`
+- **Required:** No
+
+Gatekeeper applies the existing exact and wildcard host precedence. Within the selected host key, it tries matched credentials in registration order. The first match wins across all source types. If no match wins, unmatched credentials keep their existing behavior. `match` is not valid on a credential with a `postgres` block. Gatekeeper rejects a match that is identical to or fully covered by an earlier match on the same host. A partial overlap is valid. Two unmatched `token-exchange` credentials on one host remain invalid.
+
+### credentials[].set_headers
+
+Sets additional request headers after credential injection and header removal. If a name appears in both `set_headers` and `remove_headers`, the set value wins.
+
+```yaml
+credentials:
+  - host: api.anthropic.com
+    set_headers:
+      anthropic-beta: oauth-2025-04-20
+```
+
+- **Type:** `map[string]string`
+- **Required:** No
+
+### credentials[].remove_headers
+
+Removes request headers after credential injection. Gatekeeper preserves headers injected as credentials. Gatekeeper applies `set_headers` after this list.
+
+```yaml
+credentials:
+  - host: api.anthropic.com
+    remove_headers: [x-api-key]
+```
+
+- **Type:** `[]string`
+- **Required:** No
+
 ### credentials[].source
 
 Determines where the credential value comes from. See [Credential sources](./03-credential-sources.md) for all source types and their fields.
@@ -532,21 +576,36 @@ log:
 - **Default:** `"stderr"`
 - **Valid values:** `"stderr"`, `"stdout"`, or a file path
 
-When set to a file path, gatekeeper opens the file in append mode (creating it with mode `0600` if needed) and closes it on shutdown. The `gatekeeper` binary applies `log.level`, `log.format`, and `log.output`; `log.capture_headers` applies to every caller of `gatekeeper.New`. A program that embeds `gatekeeper.New` passes its own logger instead.
+The `gatekeeper` binary applies `log.level`, `log.format`, and `log.output`; the capture settings apply to every caller of `gatekeeper.New`. A program that embeds `gatekeeper.New` passes its own logger instead.
 
-### log.capture_headers
+### log.capture_request_headers
 
 Request headers to capture in log output and strip before forwarding to the upstream server.
 
 ```yaml
 log:
-  capture_headers:
-    - X-Request-Id
-    - X-Correlation-Id
+  capture_request_headers: [X-Request-Id]
 ```
 
 - **Type:** `[]string`
 - **Required:** No
 - **Default:** `[]`
 
-Captured header values are included as structured log attributes (lowercased, hyphens replaced with underscores). Values longer than 256 characters are truncated at a valid UTF-8 boundary. The headers are removed from the request before it is forwarded upstream.
+Gatekeeper logs configured request values under `http.request.header.<lowercase-name>` and as OpenTelemetry string-array attributes. It strips the headers before forwarding. Values are sanitized and limited to 256 bytes. Configure at most 10 unique headers. Gatekeeper rejects `Authorization`, `Proxy-Authorization`, `WWW-Authenticate`, `Proxy-Authenticate`, `Cookie`, `Set-Cookie`, and API-key or token headers such as `X-Api-Key`, `X-Auth-Token`, `X-Access-Token`, `X-Goog-Api-Key`, and `X-Amz-Security-Token`.
+
+This replaces `log.capture_headers`. The old key is not accepted.
+
+### log.capture_response_headers
+
+Response headers to capture in log output. This setting does not change the response sent to the client.
+
+```yaml
+log:
+  capture_response_headers: [X-Request-Id]
+```
+
+- **Type:** `[]string`
+- **Required:** No
+- **Default:** `[]`
+
+Gatekeeper logs configured response values under `http.response.header.<lowercase-name>` and as OpenTelemetry string-array attributes. Values are sanitized and limited to 256 bytes. Configure at most 10 unique headers. Gatekeeper rejects `Authorization`, `Proxy-Authorization`, `WWW-Authenticate`, `Proxy-Authenticate`, `Cookie`, `Set-Cookie`, and API-key or token headers such as `X-Api-Key`, `X-Auth-Token`, `X-Access-Token`, `X-Goog-Api-Key`, and `X-Amz-Security-Token`.

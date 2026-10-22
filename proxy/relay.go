@@ -215,6 +215,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	p.logExit(r, logBase, start, resp.StatusCode, func(d *RequestLogData) {
 		d.Err = streamErr
 		d.ResponseSize = written
+		d.ResponseHeaders = resp.Header.Clone()
 		d.InjectedHeaders = credResult.InjectedHeaders
 		d.Grants = credResult.Grants
 	})

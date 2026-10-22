@@ -84,14 +84,35 @@ _ = p.CloseConnections(ctx)
 |------------------------------|------------------------------------------------------|
 | `NewProxy()`                 | Create a new proxy instance                          |
 | `SetCA(ca)`                  | Set the CA for TLS interception                      |
-| `SetCredentialWithGrant(host, header, value, grant)` | Set a static credential for a host  |
-| `SetCredentialResolver(host, resolver)`               | Set a dynamic per-request resolver  |
+| `SetCredentialWithGrant(host, header, value, grant)` | Set a static credential for a host |
+| `SetCredentialEntry(credential)` | Register a static credential with request matching and header transforms; returns validation errors |
+| `UpdateCredentialEntry(credential)` | Replace an existing static credential during source refresh; rejects resolver-backed credentials |
+| `SetCredentialResolverEntry(credential, stripHeaders...)` | Register a credential model with its runtime resolver and policy fields; returns validation errors |
+| `SetCredentialResolver(host, resolver)` | Set a dynamic per-request resolver |
 | `SetCredentialResolverWithStripHeaders(host, resolver, headers...)` | Set a dynamic resolver that also removes request headers it consumes; prefer this over `SetCredentialResolver` when the resolver reads a subject-identity or other header that must not reach the upstream, since the proxy strips those headers even when a better-matched static credential skips calling the resolver |
 | `SetNetworkPolicy(policy, allows, grants)`            | Configure network allow/deny; returns an error unless `policy` is `permissive`, `strict`, or empty |
 | `SetDelegateAuth(true)`      | Delegate password checks to resolvers; returns an error, and the proxy refuses every request, until `SetAuthToken` sets a token |
 | `CloseConnections(ctx)`      | Close open CONNECT tunnels and refuse new ones; call on shutdown |
 | `SetAuthToken(token)`        | Require proxy authentication                         |
 | `SetContextResolver(fn)`     | Map proxy auth tokens to per-caller contexts         |
+
+`proxy.Credential` is the shared model for YAML, static registration, resolver registration, and `RunContextData.Credentials`. `proxy.CredentialHeader` is an alias for the same type. A credential can select and transform a request:
+
+```go
+if err := p.SetCredentialEntry(proxy.Credential{
+	Host: "api.anthropic.com",
+	Header: "Authorization",
+	Value: "Bearer test-token",
+	Grant: "workload",
+	Match: &proxy.RequestMatch{Header: "x-api-key", Paths: []string{"/v1/messages"}, Methods: []string{"POST"}},
+	SetHeaders: map[string]string{"anthropic-beta": "oauth-2025-04-20"},
+	RemoveHeaders: []string{"x-api-key"},
+}); err != nil {
+	log.Fatal(err)
+}
+```
+
+Use `SetCredentialResolverEntry` for a per-request resolver. Set its callback on `Credential.Resolver` before registration. The first matching credential wins in registration order. `SetMatchedCredentialResolver` remains available with its existing resolver-ranking behavior.
 
 ## Custom context resolver
 
@@ -127,6 +148,27 @@ p.SetContextResolver(func(token string) (*proxy.RunContextData, bool) {
 ```
 
 Each caller authenticates via `Proxy-Authorization` (or the username/password in `HTTP_PROXY`). The resolver returns per-caller credentials, network policy, and MCP server configuration.
+
+## Atomic credential bundles
+
+Use `CredentialBundle` when one credential spans multiple headers. The proxy checks the bundle scope and all required placeholders before it replaces any header.
+
+```go
+runCtx := &proxy.RunContextData{
+	CredentialBundles: []proxy.CredentialBundle{{
+	ID: "codex-subscription",
+	Grant: "codex",
+	RequireAll: true,
+	Scope: proxy.CredentialScope{RequireTLS: true, Origins: []string{"https://chatgpt.com"}, Methods: []string{"POST"}, PathPrefixes: []string{"/backend-api/codex"}},
+	Replacements: []proxy.HeaderReplacement{
+		{Name: "Authorization", Placeholder: "Bearer fake", Value: "Bearer test-token"},
+		{Name: "ChatGPT-Account-ID", Placeholder: "fake-account", Value: "test-account"},
+	},
+}}
+}
+```
+
+`RunContextData.CredentialBundles` accepts these values. The bundle scope limits the origin, methods, and paths that receive replacements.
 
 ## How Moat uses Gatekeeper
 

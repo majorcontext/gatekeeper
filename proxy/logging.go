@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -158,7 +159,21 @@ func (p *Proxy) logRequest(ctxReq *http.Request, data RequestLogData) {
 		}
 	}
 	data.AuthInjected = len(data.InjectedHeaders) > 0
+	data.CapturedResponseHeaders = captureHeaderValues(data.ResponseHeaders, p.captureResponseHeaders)
 	p.logger(data)
+}
+
+func captureHeaderValues(headers http.Header, names []string) http.Header {
+	if headers == nil || len(names) == 0 {
+		return nil
+	}
+	captured := make(http.Header, len(names))
+	for _, name := range names {
+		if values := headers.Values(name); len(values) > 0 {
+			captured[http.CanonicalHeaderKey(name)] = slices.Clone(values)
+		}
+	}
+	return captured
 }
 
 // logExit emits the canonical log line for a handler exit path. It copies
@@ -203,25 +218,42 @@ func (p *Proxy) logPolicy(ctxReq *http.Request, scope, operation, rule, message 
 
 // sensitiveHeaders are headers that must never be captured, even if configured.
 var sensitiveHeaders = map[string]bool{
-	"authorization":       true,
-	"proxy-authorization": true,
-	"cookie":              true,
+	"authorization":        true,
+	"proxy-authorization":  true,
+	"www-authenticate":     true,
+	"proxy-authenticate":   true,
+	"cookie":               true,
+	"set-cookie":           true,
+	"api-key":              true,
+	"x-api-key":            true,
+	"x-auth-token":         true,
+	"x-access-token":       true,
+	"x-goog-api-key":       true,
+	"x-amz-security-token": true,
 }
 
-// ValidateCaptureHeaders checks a capture headers list for validity.
-// Rejects sensitive headers, more than 10 entries, and case-insensitive duplicates.
-func ValidateCaptureHeaders(headers []string) error {
+// ValidateCaptureRequestHeaders checks a request-header capture list.
+func ValidateCaptureRequestHeaders(headers []string) error {
+	return validateCaptureHeaders("capture_request_headers", headers)
+}
+
+// ValidateCaptureResponseHeaders checks a response-header capture list.
+func ValidateCaptureResponseHeaders(headers []string) error {
+	return validateCaptureHeaders("capture_response_headers", headers)
+}
+
+func validateCaptureHeaders(field string, headers []string) error {
 	if len(headers) > 10 {
-		return fmt.Errorf("capture_headers: max 10 headers allowed, got %d", len(headers))
+		return fmt.Errorf("%s: max 10 headers allowed, got %d", field, len(headers))
 	}
 	seen := make(map[string]bool, len(headers))
 	for _, h := range headers {
 		lower := strings.ToLower(h)
 		if sensitiveHeaders[lower] {
-			return fmt.Errorf("capture_headers: %q is a sensitive header and cannot be captured", h)
+			return fmt.Errorf("%s: %q is a sensitive header and cannot be captured", field, h)
 		}
 		if seen[lower] {
-			return fmt.Errorf("capture_headers: duplicate header %q", h)
+			return fmt.Errorf("%s: duplicate header %q", field, h)
 		}
 		seen[lower] = true
 	}
@@ -238,7 +270,8 @@ const maxCapturedLogValueLen = 256
 // additional log lines or otherwise corrupt structured log output, and
 // bounds the result to maxCapturedLogValueLen bytes, truncating at a valid
 // UTF-8 boundary rather than splitting a multi-byte rune. Used for both
-// captured HTTP header values (capture_headers) and the Postgres
+// captured HTTP header values (capture_request_headers and
+// capture_response_headers) and the Postgres
 // application_name startup parameter — both are free-form text supplied by
 // the client, not constrained by any protocol grammar the way most other
 // logged fields are.

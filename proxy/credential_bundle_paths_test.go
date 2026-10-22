@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -620,6 +622,81 @@ func TestZeroValuePolicyLogDataCountsAsADenial(t *testing.T) {
 // The Postgres-plane network denial builds its entry directly rather than
 // through logPolicy, so it needs its own guard: it closes the connection, and
 // must be counted like any other refusal.
+func TestMoatRunContextCompatibility(t *testing.T) {
+	type captured struct {
+		path, auth, account, credential, extra, removed, body string
+	}
+	requests := make(chan captured, 2)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requests <- captured{
+			path: r.URL.Path, auth: r.Header.Get("Authorization"), account: r.Header.Get("ChatGPT-Account-ID"),
+			credential: r.Header.Get("X-Moat-Credential"), extra: r.Header.Get("X-Moat-Extra"),
+			removed: r.Header.Get("X-Moat-Remove"), body: string(body),
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer backend.Close()
+	target, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := target.Hostname()
+	substitution := NewTokenSubstitution("substitute-token", "replacement-token")
+	substitution.AllowInsecure = true
+	ctx := &RunContextData{
+		RunID: "moat-run", Policy: "permissive",
+		Credentials:        map[string][]CredentialHeader{host: {{Name: "X-Moat-Credential", Value: "test-credential", Grant: "moat-test", AllowInsecure: true}}},
+		ExtraHeaders:       map[string][]ExtraHeader{host: {{Name: "X-Moat-Extra", Value: "extra"}}},
+		RemoveHeaders:      map[string][]string{host: {"X-Moat-Remove"}},
+		TokenSubstitutions: map[string]*TokenSubstitution{host: substitution},
+		CredentialBundles: []CredentialBundle{{
+			ID: "codex-test", Grant: "codex-test", RequireAll: true,
+			Scope: CredentialScope{Origins: []string{backend.URL}, Methods: []string{"POST"}, PathPrefixes: []string{"/backend-api/codex"}},
+			Replacements: []HeaderReplacement{
+				{Name: "Authorization", Placeholder: "Bearer bundle-placeholder", Value: "Bearer bundle-token"},
+				{Name: "ChatGPT-Account-ID", Placeholder: "fake-account", Value: "test-account"},
+			},
+		}},
+	}
+	p := NewProxy()
+	var logs []RequestLogData
+	p.SetLogger(func(data RequestLogData) { logs = append(logs, data) })
+	first := httptest.NewRequest(http.MethodPost, backend.URL+"/bot-substitute-token", strings.NewReader(`{"token":"substitute-token"}`))
+	first.Header.Set("Authorization", "Bearer substitute-token")
+	first.Header.Set("X-Moat-Extra", "client")
+	first.Header.Set("X-Moat-Remove", "remove")
+	first = withRunContext(first, ctx)
+	firstResponse := httptest.NewRecorder()
+	p.ServeHTTP(firstResponse, first)
+	if firstResponse.Code != http.StatusAccepted {
+		t.Fatalf("credential request status = %d, want 202", firstResponse.Code)
+	}
+	got := <-requests
+	if got.path != "/bot-replacement-token" || got.auth != "Bearer replacement-token" || got.body != `{"token":"replacement-token"}` {
+		t.Errorf("token substitution output = %+v", got)
+	}
+	if got.credential != "test-credential" || got.extra != "client,extra" || got.removed != "" {
+		t.Errorf("per-run header output = %+v", got)
+	}
+	second := httptest.NewRequest(http.MethodPost, backend.URL+"/backend-api/codex/responses", nil)
+	second.Header.Set("Authorization", "Bearer bundle-placeholder")
+	second.Header.Set("ChatGPT-Account-ID", "fake-account")
+	second = withRunContext(second, ctx)
+	secondResponse := httptest.NewRecorder()
+	p.ServeHTTP(secondResponse, second)
+	if secondResponse.Code != http.StatusAccepted {
+		t.Fatalf("bundle request status = %d, want 202", secondResponse.Code)
+	}
+	got = <-requests
+	if got.credential != "" || got.auth != "Bearer bundle-token" || got.account != "test-account" {
+		t.Errorf("credential bundle output = %+v", got)
+	}
+	if len(logs) != 2 || !slices.Contains(logs[0].Grants, "moat-test") || !slices.Contains(logs[1].Grants, "codex-test") || slices.Contains(logs[1].Grants, "moat-test") {
+		t.Errorf("Moat-compatible grants = %+v", logs)
+	}
+}
+
 func TestPostgresNetworkDenialIsCountedAsADenial(t *testing.T) {
 	var policy []PolicyLogData
 	p := NewProxy()

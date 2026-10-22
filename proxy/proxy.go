@@ -108,31 +108,33 @@ const maxPolicyBodySize = 10 << 20
 // RequestLogData contains all data for a logged request.
 // Designed for canonical log lines: one wide structured entry per request.
 type RequestLogData struct {
-	RequestID        string // Unique request identifier (from X-Request-Id or generated)
-	Method           string
-	URL              string
-	Host             string // Target hostname (extracted from URL or CONNECT)
-	Path             string // Request path (empty for CONNECT tunnel-level logs)
-	RequestType      string // "http", "connect", "mcp", "relay", "postgres"
-	StatusCode       int
-	Duration         time.Duration
-	Err              error
-	RequestHeaders   http.Header
-	ResponseHeaders  http.Header
-	RequestBody      []byte
-	ResponseBody     []byte
-	RequestSize      int64           // Content-Length of the request body, -1 if unknown. Always -1 for postgres connections (see RequestMessages).
-	ResponseSize     int64           // For the streaming relay/MCP paths, the actual bytes delivered to the client; for other paths, the response Content-Length (-1 if unknown). Always -1 for postgres connections (see ResponseMessages).
-	RequestMessages  int64           // Postgres protocol messages relayed client→upstream; 0 for non-postgres connections.
-	ResponseMessages int64           // Postgres protocol messages relayed upstream→client; 0 for non-postgres connections.
-	AuthInjected     bool            // True if any credential header was injected for this host
-	InjectedHeaders  map[string]bool // Lower-cased header names that were injected
-	Grants           []string        // Credential grant names that were injected
-	Denied           bool            // True if request was denied by network/keep policy
-	DenyReason       string          // Why the request was denied (e.g., "network_policy", "keep_policy")
-	RunID            string          // Run ID from per-run context (daemon mode)
-	UserID           string          // User ID from proxy auth username. For postgres connections this carries the Postgres role, not the proxy auth user.
-	Ctx              context.Context // Request context (for OTel span extraction, may be nil)
+	RequestID       string // Unique request identifier (from X-Request-Id or generated)
+	Method          string
+	URL             string
+	Host            string // Target hostname (extracted from URL or CONNECT)
+	Path            string // Request path (empty for CONNECT tunnel-level logs)
+	RequestType     string // "http", "connect", "mcp", "relay", "postgres"
+	StatusCode      int
+	Duration        time.Duration
+	Err             error
+	RequestHeaders  http.Header
+	ResponseHeaders http.Header
+	// CapturedResponseHeaders contains configured response headers for logs.
+	CapturedResponseHeaders http.Header
+	RequestBody             []byte
+	ResponseBody            []byte
+	RequestSize             int64           // Content-Length of the request body, -1 if unknown. Always -1 for postgres connections (see RequestMessages).
+	ResponseSize            int64           // For the streaming relay/MCP paths, the actual bytes delivered to the client; for other paths, the response Content-Length (-1 if unknown). Always -1 for postgres connections (see ResponseMessages).
+	RequestMessages         int64           // Postgres protocol messages relayed client→upstream; 0 for non-postgres connections.
+	ResponseMessages        int64           // Postgres protocol messages relayed upstream→client; 0 for non-postgres connections.
+	AuthInjected            bool            // True if any credential header was injected for this host
+	InjectedHeaders         map[string]bool // Lower-cased header names that were injected
+	Grants                  []string        // Credential grant names that were injected
+	Denied                  bool            // True if request was denied by network/keep policy
+	DenyReason              string          // Why the request was denied (e.g., "network_policy", "keep_policy")
+	RunID                   string          // Run ID from per-run context (daemon mode)
+	UserID                  string          // User ID from proxy auth username. For postgres connections this carries the Postgres role, not the proxy auth user.
+	Ctx                     context.Context // Request context (for OTel span extraction, may be nil)
 
 	// ClientAddr is the client's network address ("ip:port") as seen by the
 	// listener. For intercepted CONNECT traffic it is the address of the
@@ -172,28 +174,80 @@ type PolicyLogData struct {
 	NonBlocking bool
 }
 
-// CredentialHeader holds a header name and value for credential injection.
-type CredentialHeader struct {
-	Name  string // Header name (e.g., "Authorization", "x-api-key")
-	Value string // Header value (e.g., "Bearer token", "sk-ant-...")
-	Grant string // Grant name for logging (e.g., "github", "anthropic")
+// Credential carries YAML policy and the resolved header or resolver for one credential.
+type Credential struct {
+	Host string `yaml:"host"`
+	// Header is the configured name for the credential output header.
+	Header string `yaml:"header,omitempty"`
+	// Name and Value hold the resolved HTTP header and value.
+	Name  string `yaml:"-"`
+	Value string `yaml:"-"`
+	// Prefix and Format control how a source value becomes an HTTP header value.
+	Prefix   string                    `yaml:"prefix,omitempty"`
+	Format   string                    `yaml:"format,omitempty"`
+	Source   SourceConfig              `yaml:"source"`
+	Grant    string                    `yaml:"grant,omitempty"`
+	Postgres *PostgresCredentialConfig `yaml:"postgres,omitempty"`
+	// Match selects the credential by request header presence, path prefixes, and methods.
+	Match *RequestMatch `yaml:"match,omitempty"`
+	// SetHeaders are applied after RemoveHeaders when this credential is injected.
+	SetHeaders map[string]string `yaml:"set_headers,omitempty"`
+	// RemoveHeaders are removed when this credential is injected unless credentials write them.
+	RemoveHeaders []string `yaml:"remove_headers,omitempty"`
+	// AllowInsecure permits injection into plain HTTP requests.
+	AllowInsecure bool `yaml:"allow_insecure,omitempty"`
+	// Resolver provides a runtime credential instead of a Source value.
+	Resolver CredentialResolver `yaml:"-"`
 
-	// Invalidate, when non-nil, drops whatever cached state produced Value so
-	// the next request re-resolves it. The proxy calls it when the destination
-	// rejects the credential (401/403), or reports an exhausted allowance (429).
-	// Sources are expected to rate-limit their own evictions: these statuses do
-	// not reliably distinguish a stale credential from one that will resolve to
-	// the same value again.
-	// Nil for credentials with no cache behind them (e.g. static headers).
-	Invalidate func()
+	// Invalidate drops cached state that produced Value when the destination
+	// rejects the credential or reports an exhausted allowance.
+	Invalidate func() `yaml:"-"`
 
-	// UpgradeHint, when non-nil, is sent to the client in UpgradeHintHeader
-	// when the destination answers 401 or 403.
-	UpgradeHint UpgradeHint
+	UpgradeHint UpgradeHint `yaml:"-"`
+}
 
-	// AllowInsecure permits injecting this credential into a request whose
-	// upstream scheme is http. The default refuses the request.
-	AllowInsecure bool
+// CredentialHeader is the resolved-header name for Credential.
+type CredentialHeader = Credential
+
+// SourceConfig describes where to read a credential value from.
+// It is comparable because Gatekeeper deduplicates identical sources.
+type SourceConfig struct {
+	Type    string `yaml:"type"`
+	Var     string `yaml:"var,omitempty"`
+	Value   string `yaml:"value,omitempty"`
+	Command string `yaml:"command,omitempty"`
+	TTL     string `yaml:"ttl,omitempty"`
+	Secret  string `yaml:"secret,omitempty"`
+	Region  string `yaml:"region,omitempty"`
+	Project string `yaml:"project,omitempty"`
+	Version string `yaml:"version,omitempty"`
+
+	AppID                string `yaml:"app_id,omitempty"`
+	InstallationID       string `yaml:"installation_id,omitempty"`
+	PrivateKeyPath       string `yaml:"private_key_path,omitempty"`
+	PrivateKeyEnv        string `yaml:"private_key_env,omitempty"`
+	Scopes               string `yaml:"scopes,omitempty"`
+	ADC                  bool   `yaml:"adc,omitempty"`
+	TargetServiceAccount string `yaml:"target_service_account,omitempty"`
+	Endpoint             string `yaml:"endpoint,omitempty"`
+	ClientID             string `yaml:"client_id,omitempty"`
+	ClientSecret         string `yaml:"client_secret,omitempty"`
+	ClientSecretEnv      string `yaml:"client_secret_env,omitempty"`
+	SubjectHeader        string `yaml:"subject_header,omitempty"`
+	SubjectFrom          string `yaml:"subject_from,omitempty"`
+	SubjectTokenType     string `yaml:"subject_token_type,omitempty"`
+	Resource             string `yaml:"resource,omitempty"`
+	ActorTokenFrom       string `yaml:"actor_token_from,omitempty"`
+	ActorTokenType       string `yaml:"actor_token_type,omitempty"`
+	BotSubject           string `yaml:"bot_subject,omitempty"`
+	StaticFallback       string `yaml:"static_fallback,omitempty"`
+}
+
+// PostgresCredentialConfig configures a Postgres credential resolver.
+type PostgresCredentialConfig struct {
+	Resolver   string `yaml:"resolver"`
+	Project    string `yaml:"project,omitempty"`
+	ProjectEnv string `yaml:"project_env,omitempty"`
 }
 
 // ExtraHeader holds an additional header to inject for a host.
@@ -234,6 +288,7 @@ func MatchesHostPattern(pattern HostPattern, host string, port int) bool {
 type RunContextData struct {
 	RunID                string
 	Credentials          map[string][]CredentialHeader
+	CredentialBundles    []CredentialBundle
 	credentialBundles    []credentialBundle
 	ExtraHeaders         map[string][]ExtraHeader
 	RemoveHeaders        map[string][]string
@@ -307,15 +362,16 @@ type Proxy struct {
 	credStore            interface {
 		GetToken(provider string) (string, error)
 	}
-	mcpServers         []MCPServerConfig
-	removeHeaders      map[string][]string                        // host -> []headerName
-	tokenSubstitutions map[string]*TokenSubstitution              // host -> substitution
-	relays             map[string]string                          // name -> target URL for relay endpoints
-	contextResolver    func(token string) (*RunContextData, bool) // optional per-run credential resolver
-	policyLogger       func(data PolicyLogData)                   // optional policy decision logger
-	upstreamCAs        *x509.CertPool                             // optional CA pool for upstream TLS verification
-	captureHeaders     []string                                   // headers to capture in logs and strip before forwarding
-	branding           Branding                                   // client-visible wording of blocks and errors
+	mcpServers             []MCPServerConfig
+	removeHeaders          map[string][]string                        // host -> []headerName
+	tokenSubstitutions     map[string]*TokenSubstitution              // host -> substitution
+	relays                 map[string]string                          // name -> target URL for relay endpoints
+	contextResolver        func(token string) (*RunContextData, bool) // optional per-run credential resolver
+	policyLogger           func(data PolicyLogData)                   // optional policy decision logger
+	upstreamCAs            *x509.CertPool                             // optional CA pool for upstream TLS verification
+	captureRequestHeaders  []string
+	captureResponseHeaders []string
+	branding               Branding // client-visible wording of blocks and errors
 
 	h2UpstreamTransports  map[poolKey]*http.Transport
 	guardedHTTPTransports map[poolKey]*http.Transport

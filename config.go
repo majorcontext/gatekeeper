@@ -6,12 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"regexp"
-	"slices"
 	"strings"
 
 	"github.com/majorcontext/gatekeeper/proxy"
-	"golang.org/x/net/http/httpguts"
 	"gopkg.in/yaml.v3"
 )
 
@@ -86,116 +83,15 @@ type TLSConfig struct {
 	CAKey  string `yaml:"ca_key"`
 }
 
-// CredentialConfig describes a credential to resolve and inject.
-// Host specifies which requests receive the credential. Header names the
-// HTTP header to set (defaults to "Authorization"). Grant is an optional
-// label used for logging.
-//
-// When the header is "Authorization", the proxy needs a full header value
-// including the auth scheme (e.g., "Bearer token123"). If the source value
-// is a bare token without a scheme prefix, the gatekeeper auto-detects the
-// correct scheme from known token prefixes (GitHub ghp_/gho_/etc.) or
-// defaults to "Bearer". Set Prefix to override the auto-detected scheme.
-//
-// For hosts that require HTTP Basic authentication (e.g., github.com git
-// smart HTTP), set Format to "basic" and Prefix to the Basic auth username.
-// The credential value becomes the password: Authorization: Basic base64(prefix:value).
-type CredentialConfig struct {
-	Host     string                    `yaml:"host"`             // Target host (e.g., "api.github.com")
-	Header   string                    `yaml:"header,omitempty"` // Header name (default: "Authorization")
-	Prefix   string                    `yaml:"prefix,omitempty"` // Auth scheme prefix (e.g., "Bearer", "token"); auto-detected if omitted
-	Format   string                    `yaml:"format,omitempty"` // Auth format: "" (default scheme prefix) or "basic" (HTTP Basic)
-	Source   SourceConfig              `yaml:"source"`
-	Grant    string                    `yaml:"grant,omitempty"` // Optional label for logging
-	Postgres *PostgresCredentialConfig `yaml:"postgres,omitempty"`
-	// Match selects this token-exchange rule per request. It is valid only
-	// on token-exchange sources; see MatchConfig.
-	Match *MatchConfig `yaml:"match,omitempty"`
+// CredentialConfig is the YAML configuration form of proxy.Credential.
+type CredentialConfig = proxy.Credential
 
-	AllowInsecure bool `yaml:"allow_insecure,omitempty"` // Permit injection into plain-HTTP requests (default: refused)
-}
+// MatchConfig is the request predicate type used by credentials.
+type MatchConfig = proxy.RequestMatch
 
-// MatchConfig selects a token-exchange rule by request. Its fields mirror
-// proxy.RequestMatch; a zero field matches anything.
-type MatchConfig struct {
-	Header  string   `yaml:"header"`
-	Paths   []string `yaml:"paths,omitempty"`
-	Methods []string `yaml:"methods,omitempty"`
-}
+type SourceConfig = proxy.SourceConfig
 
-// PostgresCredentialConfig marks a credential as a Postgres credential and
-// selects how the upstream password is resolved. Resolver is "neon" (the
-// Source supplies the Neon API key, passwords are minted per branch) or
-// "static" (the Source supplies the password directly).
-type PostgresCredentialConfig struct {
-	Resolver string `yaml:"resolver"`
-	Project  string `yaml:"project,omitempty"` // optional Neon project ID; required for project-scoped API keys
-	// ProjectEnv names an environment variable holding the Neon project ID.
-	// An empty value registers no resolver. Mutually exclusive with Project.
-	ProjectEnv string `yaml:"project_env,omitempty"`
-}
-
-// SourceConfig describes where to read a credential value from.
-//
-// SourceConfig is used as a map key to deduplicate identical sources (see
-// Server.setCredentials), so it must remain comparable: add list-valued
-// fields as delimited strings (like Scopes), never slices, and avoid
-// pointer fields, which would compile but silently break deduplication.
-type SourceConfig struct {
-	Type    string `yaml:"type"`              // "env", "static", "process", "aws-secretsmanager", "gcp-secretmanager", "gcp-service-account", "github-app", "token-exchange"
-	Var     string `yaml:"var,omitempty"`     // for env source
-	Value   string `yaml:"value,omitempty"`   // for static source
-	Command string `yaml:"command,omitempty"` // for process source: host command run with `sh -c`
-	TTL     string `yaml:"ttl,omitempty"`     // for process source: refresh interval when output has no expiry (Go duration, default 5m)
-	Secret  string `yaml:"secret,omitempty"`  // for aws-secretsmanager, gcp-secretmanager; for gcp-service-account, the secret holding the key JSON
-	Region  string `yaml:"region,omitempty"`  // for aws-secretsmanager
-	Project string `yaml:"project,omitempty"` // for gcp-secretmanager, gcp-service-account
-	Version string `yaml:"version,omitempty"` // for gcp-secretmanager, gcp-service-account (default: "latest")
-
-	AppID          string `yaml:"app_id,omitempty"`           // for github-app source
-	InstallationID string `yaml:"installation_id,omitempty"`  // for github-app source
-	PrivateKeyPath string `yaml:"private_key_path,omitempty"` // for github-app (PEM key), gcp-service-account (key JSON)
-	PrivateKeyEnv  string `yaml:"private_key_env,omitempty"`  // for github-app (PEM key), gcp-service-account (key JSON)
-	Scopes         string `yaml:"scopes,omitempty"`           // for gcp-service-account: space-separated OAuth scopes (default: cloud-platform)
-	// ADC makes gcp-service-account mint tokens from Application Default
-	// Credentials (GKE Workload Identity, the metadata server, or
-	// GOOGLE_APPLICATION_CREDENTIALS) instead of a service account key. It is
-	// a key location: set it instead of private_key_path, private_key_env,
-	// or secret.
-	ADC bool `yaml:"adc,omitempty"`
-	// TargetServiceAccount, with adc, makes gcp-service-account impersonate
-	// this service account email through the IAM Credentials API. The ADC
-	// principal needs roles/iam.serviceAccountTokenCreator on it.
-	TargetServiceAccount string `yaml:"target_service_account,omitempty"`
-
-	// token-exchange (RFC 8693) fields
-	Endpoint         string `yaml:"endpoint,omitempty"`
-	ClientID         string `yaml:"client_id,omitempty"`
-	ClientSecret     string `yaml:"client_secret,omitempty"`
-	ClientSecretEnv  string `yaml:"client_secret_env,omitempty"`
-	SubjectHeader    string `yaml:"subject_header,omitempty"`
-	SubjectFrom      string `yaml:"subject_from,omitempty"`
-	SubjectTokenType string `yaml:"subject_token_type,omitempty"`
-	Resource         string `yaml:"resource,omitempty"`
-	ActorTokenFrom   string `yaml:"actor_token_from,omitempty"`
-	ActorTokenType   string `yaml:"actor_token_type,omitempty"`
-	// BotSubject designates one sentinel subject value that resolves to the
-	// next credential rule for this host (typically a github-app/bot
-	// fallback) instead of an STS exchange -- exactly like the empty-string
-	// subject already does. Optional; the zero value ("") disables it, so
-	// every config written before this field existed keeps its current
-	// behavior unchanged. Set it to a value that can never collide with a
-	// real subject (e.g. "-": no CF-Access email or similar identity is
-	// ever a bare hyphen) to give bot/service traffic a deliberate,
-	// non-empty identity that still reaches the bot fallback -- see
-	// docs/content/guides/06-token-exchange.md.
-	BotSubject string `yaml:"bot_subject,omitempty"`
-	// StaticFallback sets what a request gets when the exchange yields no
-	// token: an empty or bot_subject subject, or a decline. "auto" (the
-	// default) injects the host's static credentials. "explicit" injects only
-	// those whose header the client sent, and refuses the request otherwise.
-	StaticFallback string `yaml:"static_fallback,omitempty"`
-}
+type PostgresCredentialConfig = proxy.PostgresCredentialConfig
 
 // NetworkConfig configures network policy.
 type NetworkConfig struct {
@@ -205,10 +101,11 @@ type NetworkConfig struct {
 
 // LogConfig configures logging.
 type LogConfig struct {
-	Level          string   `yaml:"level"`                     // Log level (e.g., "debug", "info", "warn", "error")
-	Format         string   `yaml:"format"`                    // Output format ("json" or "text")
-	Output         string   `yaml:"output"`                    // Destination ("stderr", "stdout", or a file path; default: stderr)
-	CaptureHeaders []string `yaml:"capture_headers,omitempty"` // Request headers to log and strip before forwarding
+	Level                  string   `yaml:"level"`  // Log level (e.g., "debug", "info", "warn", "error")
+	Format                 string   `yaml:"format"` // Output format ("json" or "text")
+	Output                 string   `yaml:"output"` // Destination ("stderr", "stdout", or a file path; default: stderr)
+	CaptureRequestHeaders  []string `yaml:"capture_request_headers,omitempty"`
+	CaptureResponseHeaders []string `yaml:"capture_response_headers,omitempty"`
 }
 
 // resolveProxyAuthToken resolves the effective proxy auth token from
@@ -257,7 +154,7 @@ func (c *Config) validate() error {
 	if err := c.Network.validate(); err != nil {
 		return err
 	}
-	if err := c.validateTokenExchangeHosts(); err != nil {
+	if err := c.validateCredentialMatches(); err != nil {
 		return err
 	}
 	if c.Proxy.AuthToken != "" || c.Proxy.AuthTokenEnv != "" {
@@ -271,69 +168,31 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// validateTokenExchangeHosts validates every match block and rejects rules
-// on one host that the proxy could not tell apart: a second token-exchange
-// rule is allowed only when every token-exchange rule on the host has a
-// distinct match.
-func (c *Config) validateTokenExchangeHosts() error {
+// validateCredentialMatches validates request predicates and rejects covered
+// matches or multiple unmatched token-exchange credentials on one host.
+func (c *Config) validateCredentialMatches() error {
 	rules := map[string][]CredentialConfig{}
 	for _, cred := range c.Credentials {
-		if err := cred.validateMatch(); err != nil {
+		if err := cred.ValidateRequestPolicy(); err != nil {
 			return err
 		}
-		if cred.Source.Type != "token-exchange" {
-			continue
-		}
 		for _, prev := range rules[cred.Host] {
-			if prev.Match == nil || cred.Match == nil {
+			if prev.Source.Type == "token-exchange" && cred.Source.Type == "token-exchange" && prev.Match == nil && cred.Match == nil {
 				return fmt.Errorf("credentials: host %q has two token-exchange rules (grants %q and %q); only one resolver applies per host: add match to every rule", cred.Host, prev.Grant, cred.Grant)
 			}
-			if prev.Match.equal(*cred.Match) {
-				return fmt.Errorf("credentials: host %q grants %q and %q have identical match blocks", cred.Host, prev.Grant, cred.Grant)
+			if err := proxy.Credential(cred).ValidateAgainst([]proxy.Credential{prev}); err != nil {
+				return fmt.Errorf("credentials: host %q grant %q: %w", cred.Host, cred.Grant, err)
 			}
 			for _, pair := range [][2]CredentialConfig{{prev, cred}, {cred, prev}} {
-				sel, other := pair[0], pair[1]
-				if slices.ContainsFunc(tokenExchangeStripHeaders(other), func(h string) bool { return strings.EqualFold(h, sel.Match.Header) }) {
-					return fmt.Errorf("credentials: host %q grant %q: match.header %q is the subject header of grant %q", cred.Host, sel.Grant, sel.Match.Header, other.Grant)
+				selected, other := pair[0], pair[1]
+				if selected.Match != nil && other.Source.Type == "token-exchange" && other.Source.SubjectHeader != "" && strings.EqualFold(selected.Match.Header, other.Source.SubjectHeader) {
+					return fmt.Errorf("credentials: host %q grant %q: match.header %q is the subject header of grant %q", cred.Host, selected.Grant, selected.Match.Header, other.Grant)
 				}
 			}
 		}
 		rules[cred.Host] = append(rules[cred.Host], cred)
 	}
 	return nil
-}
-
-func (c CredentialConfig) validateMatch() error {
-	m := c.Match
-	if m == nil {
-		return nil
-	}
-	if c.Source.Type != "token-exchange" {
-		return fmt.Errorf("credentials: host %q grant %q: match applies only to token-exchange sources", c.Host, c.Grant)
-	}
-	if m.Header == "" {
-		return fmt.Errorf("credentials: host %q grant %q: match.header is required", c.Host, c.Grant)
-	}
-	if !httpguts.ValidHeaderFieldName(m.Header) {
-		return fmt.Errorf("credentials: host %q grant %q: match.header %q is not a valid HTTP header name", c.Host, c.Grant, m.Header)
-	}
-	for _, p := range m.Paths {
-		if !strings.HasPrefix(p, "/") {
-			return fmt.Errorf("credentials: host %q grant %q: match.paths entry %q must start with \"/\"", c.Host, c.Grant, p)
-		}
-	}
-	for _, method := range m.Methods {
-		if !upperMethod.MatchString(method) {
-			return fmt.Errorf("credentials: host %q grant %q: match.methods entry %q must be upper-case letters", c.Host, c.Grant, method)
-		}
-	}
-	return nil
-}
-
-var upperMethod = regexp.MustCompile(`^[A-Z]+$`)
-
-func (m MatchConfig) equal(o MatchConfig) bool {
-	return strings.EqualFold(m.Header, o.Header) && slices.Equal(m.Paths, o.Paths) && slices.Equal(m.Methods, o.Methods)
 }
 
 func (n NetworkConfig) validate() error {

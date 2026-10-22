@@ -8,32 +8,37 @@ import (
 	"strings"
 )
 
-// headerReplacement describes one exact placeholder-to-secret replacement.
+// HeaderReplacement describes one exact placeholder-to-secret replacement.
 // A bundle is validated in full before any replacement is applied.
-type headerReplacement struct {
+type HeaderReplacement struct {
 	Name        string
 	Placeholder string
 	Value       string
 }
 
-// credentialScope limits where a credential bundle may be injected.
-type credentialScope struct {
+type headerReplacement = HeaderReplacement
+
+// CredentialScope limits where a credential bundle may be injected.
+type CredentialScope struct {
 	RequireTLS   bool
 	Origins      []string
 	Methods      []string
 	PathPrefixes []string
 }
 
-// credentialBundle groups headers that must be selected and replaced as one
-// atomic credential. It is intended for protocols whose identity consists of
-// more than one header, such as an OAuth access token plus account identifier.
-type credentialBundle struct {
+type credentialScope = CredentialScope
+
+// CredentialBundle groups headers that must be selected and replaced as one
+// atomic credential.
+type CredentialBundle struct {
 	ID           string
 	Grant        string
-	Scope        credentialScope
-	Replacements []headerReplacement
+	Scope        CredentialScope
+	Replacements []HeaderReplacement
 	RequireAll   bool
 }
+
+type credentialBundle = CredentialBundle
 
 type credentialBundleInjectionResult struct {
 	credentialInjectionResult

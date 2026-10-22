@@ -146,7 +146,7 @@ The sentinel subject is exactly what shows up as `user_id` on the [canonical log
 
 ## Several rules on one host
 
-A host can have several `token-exchange` rules when each rule has a `match` block. The proxy picks the rule from the request, so one host such as `api.anthropic.com` can serve an admin key, a workload key, and a per-user subscription, each from its own grant:
+A host can have several matched credentials, including `token-exchange` credentials. Each matched credential uses the same request predicates regardless of source type. The proxy picks the first matching credential in configuration order. A host such as `api.anthropic.com` can use separate grants for admin, workload, and per-user credentials:
 
 ```yaml
 credentials:
@@ -186,9 +186,9 @@ credentials:
 How gatekeeper chooses:
 
 - **First match wins, in config order.** A request to `/v1/organizations/` with `x-api-key` uses `admin`; a `GET` is required. Put the narrower rule first.
-- **No match means static credentials.** A request that matches no rule gets the host's static credentials, as it does when no resolver exists. The client's headers pass through unchanged when no static credential uses them.
-- **The selecting header is removed.** The `admin` and `api` rules inject `Authorization`, so gatekeeper removes the `x-api-key` header the client used to select them. The `sub` rule injects `Authorization` too, which replaces the client's value.
-- **Token-exchange only.** `match` on any other source type fails config load, as does a second `token-exchange` rule on a host when either rule has no `match`, or when two `match` blocks are identical.
+- **No match means unmatched credentials follow their existing behavior.** A request that matches no rule gets the host's unmatched credentials.
+- **The selecting header is removed.** When the chosen credential writes another header, gatekeeper removes the `match.header` value the client used to select it.
+- **Any source can be matched.** `match` applies to every HTTP credential source. Two unmatched `token-exchange` credentials on one host remain invalid. Identical matches and matches fully covered by an earlier match fail config validation; partial overlap is valid.
 
 Give each rule its own `resource` so the STS issues a different token for each. Rules with identical `source` settings share one exchange and its cache; rules that differ in `resource` or any other setting cache their tokens separately.
 

@@ -859,6 +859,7 @@ func TestServeHTTP_DirectAWSCredentials_NoAuth(t *testing.T) {
 // authenticated MCP call must not look unauthenticated in the audit trail.
 func TestMCPRelay_LogsCredentialInjection(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-MCP-Trace", "response-trace")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))
 	}))
@@ -882,6 +883,9 @@ func TestMCPRelay_LogsCredentialInjection(t *testing.T) {
 				},
 			},
 		},
+	}
+	if err := p.SetCaptureResponseHeaders([]string{"X-MCP-Trace"}); err != nil {
+		t.Fatal(err)
 	}
 
 	var mu sync.Mutex
@@ -911,6 +915,9 @@ func TestMCPRelay_LogsCredentialInjection(t *testing.T) {
 	}
 	if !data.InjectedHeaders["x-api-key"] {
 		t.Errorf("InjectedHeaders = %v, want to contain %q", data.InjectedHeaders, "x-api-key")
+	}
+	if got := data.CapturedResponseHeaders.Get("X-MCP-Trace"); got != "response-trace" {
+		t.Errorf("captured MCP response header = %q, want response-trace", got)
 	}
 }
 

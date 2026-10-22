@@ -283,11 +283,17 @@ func (m hostMatch) outranks(other hostMatch) bool {
 // it runs only when the verbatim and bare lookups miss, and the maps are
 // config-scale, not request-scale.
 func lookupHostKeyed[V any](m map[string]V, host string, usable func(V) bool) (V, hostMatch) {
-	if v, ok := m[host]; ok && usable(v) {
-		return v, hostMatch{hostMatchExact, host}
+	return lookupHostKeyedExcluding(m, host, usable, nil)
+}
+
+func lookupHostKeyedExcluding[V any](m map[string]V, host string, usable func(V) bool, excluded map[string]bool) (V, hostMatch) {
+	if !excluded[host] {
+		if v, ok := m[host]; ok && usable(v) {
+			return v, hostMatch{hostMatchExact, host}
+		}
 	}
 	bare := bareHost(host)
-	if bare != host {
+	if bare != host && !excluded[bare] {
 		if v, ok := m[bare]; ok && usable(v) {
 			return v, hostMatch{hostMatchExact, bare}
 		}
@@ -298,7 +304,7 @@ func lookupHostKeyed[V any](m map[string]V, host string, usable func(V) bool) (V
 	tier := hostMatchNone
 	bestFoldsHost := false // best fold key matches the full host:port, not just bare
 	for key, v := range m {
-		if !usable(v) {
+		if excluded[key] || !usable(v) {
 			continue
 		}
 		// The case-insensitive exact tier must fold both the bare host and

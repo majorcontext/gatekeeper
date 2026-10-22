@@ -957,7 +957,7 @@ func TestIntercept_CaptureHeaders_StrippedBeforeForwarding(t *testing.T) {
 		w.Write([]byte("ok"))
 	}))
 
-	setup.Proxy.SetCaptureHeaders([]string{"X-Workspace-Slug", "X-Request-Source"})
+	setup.Proxy.SetCaptureRequestHeaders([]string{"X-Workspace-Slug", "X-Request-Source"})
 
 	waitLog := captureLog(t, setup.Proxy)
 
@@ -997,13 +997,13 @@ func TestIntercept_CaptureHeaders_StrippedBeforeForwarding(t *testing.T) {
 func TestIntercept_CaptureHeaders_PreservesInjectedCredential(t *testing.T) {
 	var receivedAPIKey string
 	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedAPIKey = r.Header.Get("X-Api-Key")
+		receivedAPIKey = r.Header.Get("X-Test-Credential")
 		w.Write([]byte("ok"))
 	}))
 
 	// Configure both a credential injection and a capture header for the same header name.
-	setup.Proxy.SetCredentialHeader(setup.BackendHost, "X-Api-Key", "secret-key-123")
-	setup.Proxy.SetCaptureHeaders([]string{"X-Api-Key"})
+	setup.Proxy.SetCredentialHeader(setup.BackendHost, "X-Test-Credential", "secret-key-123")
+	setup.Proxy.SetCaptureRequestHeaders([]string{"X-Test-Credential"})
 
 	resp, err := setup.Client.Get(setup.Backend.URL + "/test")
 	if err != nil {
@@ -1014,7 +1014,7 @@ func TestIntercept_CaptureHeaders_PreservesInjectedCredential(t *testing.T) {
 
 	// The injected credential must survive the capture header stripping.
 	if receivedAPIKey != "secret-key-123" {
-		t.Errorf("X-Api-Key = %q, want %q (injected credential should not be stripped)", receivedAPIKey, "secret-key-123")
+		t.Errorf("X-Test-Credential = %q, want %q (injected credential should not be stripped)", receivedAPIKey, "secret-key-123")
 	}
 }
 

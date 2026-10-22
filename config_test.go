@@ -4,6 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,6 +17,13 @@ import (
 	"github.com/majorcontext/gatekeeper/proxy"
 	"gopkg.in/yaml.v3"
 )
+
+func TestCredentialConfigSharesProxyCredentialModel(t *testing.T) {
+	var yamlCredential CredentialConfig
+	var runtimeCredential proxy.CredentialHeader
+	yamlCredential = runtimeCredential
+	runtimeCredential = yamlCredential
+}
 
 func TestParseConfig_Full(t *testing.T) {
 	yaml := `
@@ -273,10 +284,10 @@ func TestLoadConfig_NotFound(t *testing.T) {
 	}
 }
 
-func TestParseConfig_CaptureHeaders(t *testing.T) {
+func TestParseConfig_CaptureRequestHeaders(t *testing.T) {
 	yaml := `
 log:
-  capture_headers:
+  capture_request_headers:
     - X-Workspace-Slug
     - X-Request-Source
 `
@@ -284,20 +295,70 @@ log:
 	if err != nil {
 		t.Fatalf("ParseConfig: %v", err)
 	}
-	if len(cfg.Log.CaptureHeaders) != 2 {
-		t.Fatalf("CaptureHeaders len = %d, want 2", len(cfg.Log.CaptureHeaders))
+	if len(cfg.Log.CaptureRequestHeaders) != 2 {
+		t.Fatalf("CaptureRequestHeaders len = %d, want 2", len(cfg.Log.CaptureRequestHeaders))
 	}
-	if cfg.Log.CaptureHeaders[0] != "X-Workspace-Slug" {
-		t.Errorf("CaptureHeaders[0] = %q, want X-Workspace-Slug", cfg.Log.CaptureHeaders[0])
+	if cfg.Log.CaptureRequestHeaders[0] != "X-Workspace-Slug" {
+		t.Errorf("CaptureRequestHeaders[0] = %q, want X-Workspace-Slug", cfg.Log.CaptureRequestHeaders[0])
 	}
 }
 
-func TestValidateCaptureHeaders_MaxExceeded(t *testing.T) {
+func TestParseConfig_RejectsOldCaptureHeadersKey(t *testing.T) {
+	if _, err := ParseConfig([]byte("log:\n  capture_headers: [X-Request-Id]\n")); err == nil {
+		t.Fatal("ParseConfig accepted capture_headers")
+	}
+}
+
+func TestParseConfig_CaptureResponseHeaders(t *testing.T) {
+	cfg, err := ParseConfig([]byte("log:\n  capture_response_headers:\n    - X-Request-Id\n"))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if len(cfg.Log.CaptureResponseHeaders) != 1 || cfg.Log.CaptureResponseHeaders[0] != "X-Request-Id" {
+		t.Fatalf("CaptureResponseHeaders = %v, want [X-Request-Id]", cfg.Log.CaptureResponseHeaders)
+	}
+}
+
+func TestValidateCaptureResponseHeaders(t *testing.T) {
+	tooMany := make([]string, 11)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("X-Response-%d", i)
+	}
+	for _, tt := range []struct {
+		name    string
+		headers []string
+		want    string
+	}{
+		{name: "limit", headers: tooMany, want: "max 10"},
+		{name: "sensitive authorization", headers: []string{"Authorization"}, want: "sensitive"},
+		{name: "sensitive proxy authorization", headers: []string{"Proxy-Authorization"}, want: "sensitive"},
+		{name: "sensitive www authenticate", headers: []string{"WWW-Authenticate"}, want: "sensitive"},
+		{name: "sensitive proxy authenticate", headers: []string{"Proxy-Authenticate"}, want: "sensitive"},
+		{name: "sensitive cookie", headers: []string{"Cookie"}, want: "sensitive"},
+		{name: "sensitive set-cookie", headers: []string{"Set-Cookie"}, want: "sensitive"},
+		{name: "sensitive mixed-case API key", headers: []string{"X-aPi-KeY"}, want: "sensitive"},
+		{name: "sensitive API key", headers: []string{"api-key"}, want: "sensitive"},
+		{name: "sensitive auth token", headers: []string{"X-Auth-Token"}, want: "sensitive"},
+		{name: "sensitive access token", headers: []string{"X-Access-Token"}, want: "sensitive"},
+		{name: "sensitive Google API key", headers: []string{"X-Goog-Api-Key"}, want: "sensitive"},
+		{name: "sensitive AWS security token", headers: []string{"X-Amz-Security-Token"}, want: "sensitive"},
+		{name: "case insensitive duplicate", headers: []string{"X-Trace", "x-trace"}, want: "duplicate"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := proxy.ValidateCaptureResponseHeaders(tt.headers)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateCaptureRequestHeaders_MaxExceeded(t *testing.T) {
 	headers := make([]string, 11)
 	for i := range headers {
 		headers[i] = fmt.Sprintf("X-Header-%d", i)
 	}
-	err := proxy.ValidateCaptureHeaders(headers)
+	err := proxy.ValidateCaptureRequestHeaders(headers)
 	if err == nil {
 		t.Fatal("expected error for >10 headers")
 	}
@@ -306,11 +367,11 @@ func TestValidateCaptureHeaders_MaxExceeded(t *testing.T) {
 	}
 }
 
-func TestValidateCaptureHeaders_SensitiveRejected(t *testing.T) {
-	tests := []string{"Authorization", "proxy-authorization", "Cookie"}
+func TestValidateCaptureRequestHeaders_SensitiveRejected(t *testing.T) {
+	tests := []string{"Authorization", "proxy-authorization", "Cookie", "Set-Cookie", "Proxy-Authenticate", "WWW-Authenticate", "X-Api-Key", "api-key", "X-Auth-Token", "X-Access-Token", "X-Goog-Api-Key", "X-Amz-Security-Token"}
 	for _, h := range tests {
 		t.Run(h, func(t *testing.T) {
-			err := proxy.ValidateCaptureHeaders([]string{h})
+			err := proxy.ValidateCaptureRequestHeaders([]string{h})
 			if err == nil {
 				t.Fatalf("expected error for sensitive header %q", h)
 			}
@@ -321,26 +382,26 @@ func TestValidateCaptureHeaders_SensitiveRejected(t *testing.T) {
 	}
 }
 
-func TestValidateCaptureHeaders_Valid(t *testing.T) {
-	err := proxy.ValidateCaptureHeaders([]string{"X-Workspace-Slug", "X-Request-Source"})
+func TestValidateCaptureRequestHeaders_Valid(t *testing.T) {
+	err := proxy.ValidateCaptureRequestHeaders([]string{"X-Workspace-Slug", "X-Request-Source"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestValidateCaptureHeaders_Empty(t *testing.T) {
-	err := proxy.ValidateCaptureHeaders(nil)
+func TestValidateCaptureRequestHeaders_Empty(t *testing.T) {
+	err := proxy.ValidateCaptureRequestHeaders(nil)
 	if err != nil {
 		t.Fatalf("unexpected error for nil: %v", err)
 	}
-	err = proxy.ValidateCaptureHeaders([]string{})
+	err = proxy.ValidateCaptureRequestHeaders([]string{})
 	if err != nil {
 		t.Fatalf("unexpected error for empty: %v", err)
 	}
 }
 
-func TestValidateCaptureHeaders_Duplicate(t *testing.T) {
-	err := proxy.ValidateCaptureHeaders([]string{"X-Workspace-Slug", "x-workspace-slug"})
+func TestValidateCaptureRequestHeaders_Duplicate(t *testing.T) {
+	err := proxy.ValidateCaptureRequestHeaders([]string{"X-Workspace-Slug", "x-workspace-slug"})
 	if err == nil {
 		t.Fatal("expected error for duplicate headers")
 	}
@@ -589,6 +650,119 @@ func TestConfig_RejectsTwoTokenExchangeRulesOnOneHost(t *testing.T) {
 	})
 }
 
+func TestYAMLAndLibraryMatchedCredentialsForwardEquivalentHeaders(t *testing.T) {
+	var received http.Header
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	backendURL, _ := url.Parse(backend.URL)
+	host, port, _ := net.SplitHostPort(backendURL.Host)
+	configYAML := fmt.Sprintf(`credentials:
+  - host: %s
+    header: Authorization
+    allow_insecure: true
+    match:
+      header: x-api-key
+      paths: [/v1/]
+      methods: [POST]
+    set_headers:
+      anthropic-beta: oauth-2025-04-20
+    remove_headers: [x-client]
+    source:
+      type: static
+      value: test-token
+`, host)
+	cfg, err := ParseConfig([]byte(configYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(context.Background(), cfg, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Stop(context.Background()) })
+	credential := proxy.CredentialHeader{
+		Host: host, Name: "Authorization", Value: "Bearer test-token", AllowInsecure: true,
+		Match:         &proxy.RequestMatch{Header: "x-api-key", Paths: []string{"/v1/"}, Methods: []string{"POST"}},
+		SetHeaders:    map[string]string{"anthropic-beta": "oauth-2025-04-20"},
+		RemoveHeaders: []string{"x-client"},
+	}
+	direct := proxy.NewProxy()
+	if err := direct.SetCredentialEntry(credential); err != nil {
+		t.Fatal(err)
+	}
+	run := func(handler http.Handler) http.Header {
+		req := httptest.NewRequest("POST", "http://"+net.JoinHostPort(host, port)+"/v1/messages", nil)
+		req.Header.Set("x-api-key", "placeholder")
+		req.Header.Set("x-client", "remove")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		return received.Clone()
+	}
+	fromYAML := run(server.proxy)
+	fromLibrary := run(direct)
+	for _, name := range []string{"Authorization", "x-api-key", "x-client", "anthropic-beta"} {
+		if got, want := fromYAML.Get(name), fromLibrary.Get(name); got != want {
+			t.Errorf("%s: YAML = %q, library = %q", name, got, want)
+		}
+	}
+	if fromYAML.Get("Authorization") != "Bearer test-token" || fromYAML.Get("x-api-key") != "" || fromYAML.Get("x-client") != "" || fromYAML.Get("anthropic-beta") != "oauth-2025-04-20" {
+		t.Errorf("forwarded headers = %v", fromYAML)
+	}
+}
+
+func TestYAMLMatchedCredentialOrderIncludesTokenExchange(t *testing.T) {
+	var received http.Header
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	backendURL, _ := url.Parse(backend.URL)
+	host, port, _ := net.SplitHostPort(backendURL.Host)
+	configYAML := fmt.Sprintf(`credentials:
+  - host: %s
+    header: Authorization
+    allow_insecure: true
+    match: {header: x-api-key, paths: [/v1/messages], methods: [GET]}
+    source: {type: static, value: static-token}
+  - host: %s
+    header: Authorization
+    allow_insecure: true
+    match: {header: x-api-key, paths: [/v1/messages], methods: [GET, POST]}
+    source:
+      type: token-exchange
+      endpoint: https://sts.example.test/token
+      client_id: test-client
+      client_secret: placeholder
+      subject_header: X-Subject
+`, host, host)
+	cfg, err := ParseConfig([]byte(configYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(context.Background(), cfg, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Stop(context.Background()) })
+	req := httptest.NewRequest("GET", "http://"+net.JoinHostPort(host, port)+"/v1/messages", nil)
+	req.Header.Set("x-api-key", "selector")
+	req.Header.Set("x-subject", "subject")
+	server.proxy.ServeHTTP(httptest.NewRecorder(), req)
+	if got := received.Get("Authorization"); got != "Bearer static-token" {
+		t.Errorf("Authorization = %q, want first matching static credential", got)
+	}
+	if received.Get("x-api-key") != "" {
+		t.Errorf("selector header reached upstream: %q", received.Get("x-api-key"))
+	}
+}
+
 func TestConfig_MatchValidation(t *testing.T) {
 	te := func(grant string, m *MatchConfig) CredentialConfig {
 		return CredentialConfig{Host: "api.anthropic.com", Grant: grant, Match: m, Source: SourceConfig{
@@ -598,20 +772,47 @@ func TestConfig_MatchValidation(t *testing.T) {
 	static := CredentialConfig{Host: "api.anthropic.com", Grant: "anthropic", Header: "x-api-key", Source: SourceConfig{Type: "static", Value: "k"}}
 	staticMatched := static
 	staticMatched.Match = &MatchConfig{Header: "x-api-key"}
+	postgresMatched := staticMatched
+	postgresMatched.Postgres = &PostgresCredentialConfig{Resolver: "static"}
+	invalidSetHeader := static
+	invalidSetHeader.SetHeaders = map[string]string{"X Bad": "value"}
+	invalidSetValue := static
+	invalidSetValue.SetHeaders = map[string]string{"X-Trace": "bad\r\nvalue"}
+	invalidRemoveHeader := static
+	invalidRemoveHeader.RemoveHeaders = []string{"X Bad"}
+	duplicateSetHeaders := static
+	duplicateSetHeaders.SetHeaders = map[string]string{"X-Api-Key": "one", "x-api-key": "two"}
+	postgresTransform := static
+	postgresTransform.Postgres = &PostgresCredentialConfig{Resolver: "static"}
+	postgresTransform.SetHeaders = map[string]string{"X-Trace": "value"}
 	tests := []struct {
 		name    string
 		creds   []CredentialConfig
 		wantErr string
 	}{
-		{"match on a static source", []CredentialConfig{staticMatched}, "match"},
+		{"match on a static source", []CredentialConfig{staticMatched}, ""},
+		{"match on a Postgres credential", []CredentialConfig{postgresMatched}, "postgres"},
+		{"invalid set header name", []CredentialConfig{invalidSetHeader}, "set_headers"},
+		{"invalid set header value", []CredentialConfig{invalidSetValue}, "set_headers"},
+		{"invalid remove header name", []CredentialConfig{invalidRemoveHeader}, "remove_headers"},
+		{"case-insensitive set header duplicate", []CredentialConfig{duplicateSetHeaders}, "duplicate"},
+		{"transforms on a Postgres credential", []CredentialConfig{postgresTransform}, "postgres"},
 		{"empty match header", []CredentialConfig{te("g1", &MatchConfig{Paths: []string{"/v1/"}})}, "header"},
 		{"header with a space", []CredentialConfig{te("g1", &MatchConfig{Header: "X Tenant"})}, "header"},
 		{"header with a colon", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api:key"})}, "header"},
 		{"path without a leading slash", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key", Paths: []string{"v1/"}})}, "path"},
 		{"lower-case method", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key", Methods: []string{"get"}})}, "method"},
-		{"unmatched rule beside a matched one", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key"}), te("g2", nil)}, "add match to every rule"},
+		{"unmatched rule beside a matched one", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key"}), te("g2", nil)}, ""},
 		{"selector equals another rule's subject header", []CredentialConfig{te("g1", &MatchConfig{Header: "x-subject"}), te("g2", &MatchConfig{Header: "x-api-key"})}, "subject header"},
 		{"identical match blocks", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key", Methods: []string{"GET"}}), te("g2", &MatchConfig{Header: "x-api-key", Methods: []string{"GET"}})}, "identical"},
+		{"covered match", []CredentialConfig{
+			te("early", &MatchConfig{Header: "x-api-key", Paths: []string{"/v1/", "/v2/"}, Methods: []string{"GET", "POST"}}),
+			te("covered", &MatchConfig{Header: "X-API-KEY", Paths: []string{"/v2/messages"}, Methods: []string{"POST"}}),
+		}, "covered"},
+		{"overlap is not coverage", []CredentialConfig{
+			te("early", &MatchConfig{Header: "x-api-key", Paths: []string{"/v1/"}, Methods: []string{"GET"}}),
+			te("overlap", &MatchConfig{Header: "x-api-key", Paths: []string{"/v1/messages"}, Methods: []string{"GET", "POST"}}),
+		}, ""},
 		{"three distinct rules", []CredentialConfig{
 			te("admin", &MatchConfig{Header: "x-api-key", Paths: []string{"/v1/organizations/"}, Methods: []string{"GET"}}),
 			te("api", &MatchConfig{Header: "x-api-key", Paths: []string{"/v1/messages"}}),
