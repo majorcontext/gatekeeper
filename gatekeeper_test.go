@@ -1642,6 +1642,68 @@ func TestEnsureAuthScheme(t *testing.T) {
 	}
 }
 
+func TestCaptureResponseHeadersEnrichRequestLog(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	tracerProvider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	t.Cleanup(func() { _ = tracerProvider.Shutdown(context.Background()) })
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Response-Trace", "origin-456")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	cfg := &Config{Log: LogConfig{CaptureRequestHeaders: []string{"X-Request-Id"}, CaptureResponseHeaders: []string{"X-Response-Trace"}}}
+	server, err := New(context.Background(), cfg, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Stop(context.Background()) })
+	handler, err := proxy.NewOTelHandler(&healthHandler{next: server.proxy}, proxy.OTelOptions{TracerProvider: tracerProvider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyServer := httptest.NewServer(handler)
+	defer proxyServer.Close()
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	defer client.CloseIdleConnections()
+	req, _ := http.NewRequest("GET", backend.URL, nil)
+	req.Header.Set("X-Request-Id", "req-123")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := resp.Header.Get("X-Response-Trace"); got != "origin-456" {
+		t.Errorf("response header = %q, want unchanged", got)
+	}
+	resp.Body.Close()
+	if err := tracerProvider.ForceFlush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	spans := exporter.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("spans = %d, want 1", len(spans))
+	}
+	for _, event := range spans[0].Events {
+		if event.Name != "request.complete" {
+			continue
+		}
+		values := make(map[string][]string)
+		for _, attr := range event.Attributes {
+			if strings.HasPrefix(string(attr.Key), "http.") {
+				values[string(attr.Key)] = attr.Value.AsStringSlice()
+			}
+		}
+		if got := values["http.request.header.x-request-id"]; len(got) != 1 || got[0] != "req-123" {
+			t.Errorf("request capture = %v", got)
+		}
+		if got := values["http.response.header.x-response-trace"]; len(got) != 1 || got[0] != "origin-456" {
+			t.Errorf("response capture = %v", got)
+		}
+		return
+	}
+	t.Fatal("request.complete event not found")
+}
+
 func TestOTelSpanEventsViaHTTPRequest(t *testing.T) {
 	spanExporter := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExporter))
@@ -3076,7 +3138,7 @@ func TestServerPostgresProxyProtocol(t *testing.T) {
 // "request" log line -- the slog attrs wired in New()'s p.SetLogger callback,
 // not just the RequestLogData the proxy package hands it -- carries an
 // application_name attribute for a client-set Postgres application_name
-// startup parameter (the Postgres analogue of the HTTP capture_headers
+// startup parameter (the Postgres analogue of the HTTP capture_request_headers
 // feature), and that the attribute is entirely absent, not merely empty,
 // when the client never set one -- the same non-empty gating run_id and
 // client_ip already get.

@@ -196,10 +196,14 @@ func (s *Server) configurePolicy(cfg *Config) error {
 		}
 	}
 
-	// Configure capture headers if specified.
-	if len(cfg.Log.CaptureHeaders) > 0 {
-		if err := s.proxy.SetCaptureHeaders(cfg.Log.CaptureHeaders); err != nil {
-			return fmt.Errorf("capture_headers: %w", err)
+	if len(cfg.Log.CaptureRequestHeaders) > 0 {
+		if err := s.proxy.SetCaptureRequestHeaders(cfg.Log.CaptureRequestHeaders); err != nil {
+			return fmt.Errorf("capture_request_headers: %w", err)
+		}
+	}
+	if len(cfg.Log.CaptureResponseHeaders) > 0 {
+		if err := s.proxy.SetCaptureResponseHeaders(cfg.Log.CaptureResponseHeaders); err != nil {
+			return fmt.Errorf("capture_response_headers: %w", err)
 		}
 	}
 
@@ -230,11 +234,13 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 		err   error
 	}
 	type credEntry struct {
-		cred   CredentialConfig
-		header string
-		source *pendingSource
-		pg     bool
-		neon   *credentialsource.NeonResolver
+		cred         CredentialConfig
+		header       string
+		source       *pendingSource
+		pg           bool
+		neon         *credentialsource.NeonResolver
+		resolver     proxy.CredentialResolver
+		stripHeaders []string
 	}
 	sources := make(map[SourceConfig]*pendingSource)
 	exchanges := make(map[SourceConfig]*credentialsource.TokenExchangeSource)
@@ -328,7 +334,7 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 			header = "Authorization"
 		}
 
-		if err := cred.validateMatch(); err != nil {
+		if err := validateCredentialMatch(cred); err != nil {
 			return err
 		}
 
@@ -346,10 +352,12 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 			// therefore skips) this resolver.
 			resolver = allowInsecureResolver(resolver, cred.AllowInsecure)
 			if cred.Match != nil {
-				s.proxy.SetMatchedCredentialResolver(cred.Host, proxy.RequestMatch(*cred.Match), resolver, tokenExchangeStripHeaders(cred)...)
+				entries = append(entries, credEntry{cred: cred, header: header, resolver: resolver, stripHeaders: tokenExchangeStripHeaders(cred)})
 				continue
 			}
-			s.proxy.SetCredentialResolverWithStripHeaders(cred.Host, resolver, tokenExchangeStripHeaders(cred)...)
+			policy := credentialHeader(cred, header, "")
+			policy.Resolver = resolver
+			s.proxy.SetCredentialResolverEntry(policy, tokenExchangeStripHeaders(cred)...)
 			continue
 		}
 
@@ -410,6 +418,13 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 				resolver = proxy.NewStaticPostgresResolver(e.source.val)
 			}
 			s.proxy.SetPostgresResolver(e.cred.Host, resolver)
+			continue
+		}
+
+		if e.resolver != nil {
+			policy := credentialHeader(e.cred, e.header, "")
+			policy.Resolver = e.resolver
+			s.proxy.SetCredentialResolverEntry(policy, e.stripHeaders...)
 			continue
 		}
 
@@ -589,11 +604,21 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 }
 
 func (s *Server) setCredential(cred CredentialConfig, header, val string) {
-	if cred.AllowInsecure {
-		s.proxy.SetInsecureCredentialWithGrant(cred.Host, header, val, cred.Grant)
-		return
+	s.proxy.SetCredentialEntry(credentialHeader(cred, header, val))
+}
+
+func credentialHeader(cred CredentialConfig, header, value string) proxy.CredentialHeader {
+	entry := proxy.CredentialHeader{
+		Host: cred.Host, Header: cred.Header, Name: header, Value: value,
+		Prefix: cred.Prefix, Format: cred.Format, Source: cred.Source, Postgres: cred.Postgres,
+		Grant: cred.Grant, AllowInsecure: cred.AllowInsecure,
+		SetHeaders: cred.SetHeaders, RemoveHeaders: cred.RemoveHeaders,
 	}
-	s.proxy.SetCredentialWithGrant(cred.Host, header, val, cred.Grant)
+	if cred.Match != nil {
+		match := proxy.RequestMatch(*cred.Match)
+		entry.Match = &match
+	}
+	return entry
 }
 
 func allowInsecureResolver(r proxy.CredentialResolver, allow bool) proxy.CredentialResolver {

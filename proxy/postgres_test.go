@@ -788,7 +788,7 @@ func TestPostgresEndToEnd(t *testing.T) {
 
 // TestPostgresLogsApplicationName verifies that the client-supplied Postgres
 // "application_name" startup parameter is captured into the request log as a
-// tracing slug -- the Postgres analogue of the HTTP capture_headers feature.
+// tracing slug -- the Postgres analogue of the HTTP capture_request_headers feature.
 // application_name is a correlation slug the client sets (e.g. a box ID),
 // not a trusted identity: RunID, populated from the authenticated run token,
 // remains the trusted identity. Each case also confirms that capturing for

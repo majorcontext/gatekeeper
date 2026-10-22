@@ -109,30 +109,72 @@ type outboundPrep struct {
 // Substitution targets out, so logs built from in keep the placeholder.
 func (p *Proxy) prepareOutbound(in, out *http.Request, o outboundPrep) credentialInjectionResult {
 	credResult := mergeCredentialInjectionResults(o.bundle, injectCredentials(out, o.creds, o.host, out.Method, o.path, o.bundle.InjectedHeaders))
-	mergeExtraHeaders(out, o.lookupHost, p.getExtraHeadersForRequest(in, o.lookupHost))
+	legacyPolicy := p.legacyCredentialPolicy(in, o.lookupHost, out.Header)
+	applyCredentialTransforms(out, legacyPolicy, credResult.InjectedHeaders)
+	for _, credential := range credResult.Injected {
+		applyCredentialTransforms(out, credential, credResult.InjectedHeaders)
+	}
 
 	out.Header.Del("Proxy-Connection")
 	out.Header.Del("Proxy-Authorization")
-
-	// A header the proxy just injected survives removal: "claude" registers
-	// RemoveRequestHeader("x-api-key") for OAuth, but if "anthropic" also
-	// injected x-api-key on the same host, that value must reach upstream.
-	for _, headerName := range p.getRemoveHeadersForRequest(in, o.lookupHost) {
-		if credResult.InjectedHeaders[strings.ToLower(headerName)] {
-			continue
+	for _, headerName := range p.captureRequestHeaders {
+		if !credResult.InjectedHeaders[strings.ToLower(headerName)] {
+			out.Header.Del(headerName)
 		}
-		out.Header.Del(headerName)
-	}
-	for _, headerName := range p.captureHeaders {
-		if credResult.InjectedHeaders[strings.ToLower(headerName)] {
-			continue
-		}
-		out.Header.Del(headerName)
 	}
 	if sub := p.getTokenSubstitutionForRequest(in, o.lookupHost); sub != nil {
 		p.applyTokenSubstitution(out, sub)
 	}
 	return credResult
+}
+
+func applyCredentialTransforms(req *http.Request, credential CredentialHeader, injectedHeaders map[string]bool) {
+	for _, header := range credential.RemoveHeaders {
+		if !injectedHeaders[strings.ToLower(header)] {
+			req.Header.Del(header)
+		}
+	}
+	for _, header := range sortedHeaderNames(credential.SetHeaders) {
+		req.Header.Set(header, credential.SetHeaders[header])
+	}
+}
+
+func (p *Proxy) legacyCredentialPolicy(r *http.Request, host string, headers http.Header) CredentialHeader {
+	policy := CredentialHeader{RemoveHeaders: p.getRemoveHeadersForRequest(r, host)}
+	extraHeaders := p.getExtraHeadersForRequest(r, host)
+	if len(extraHeaders) == 0 {
+		return policy
+	}
+	merged := headers.Clone()
+	policy.SetHeaders = make(map[string]string, len(extraHeaders))
+	for _, header := range extraHeaders {
+		if existing := merged.Get(header.Name); existing != "" {
+			merged.Set(header.Name, existing+","+header.Value)
+		} else {
+			merged.Set(header.Name, header.Value)
+		}
+		policy.SetHeaders[http.CanonicalHeaderKey(header.Name)] = merged.Get(header.Name)
+	}
+	for name := range policy.SetHeaders {
+		if slices.ContainsFunc(policy.RemoveHeaders, func(header string) bool { return strings.EqualFold(header, name) }) {
+			delete(policy.SetHeaders, name)
+		}
+	}
+	slog.Debug("extra headers injected",
+		"subsystem", "proxy",
+		"action", "inject-extra",
+		"host", host,
+		"count", len(extraHeaders))
+	return policy
+}
+
+func sortedHeaderNames(headers map[string]string) []string {
+	names := make([]string, 0, len(headers))
+	for name := range headers {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
 }
 
 // getCredentials returns all credential headers for a host; see
@@ -158,9 +200,8 @@ func (p *Proxy) getCredentialsMatch(host string) ([]CredentialHeader, hostMatch)
 	return out, match
 }
 
-// credentialResolverEntry is a registered dynamic resolver plus the request
-// headers it declared for removal. A nil resolve func is an explicit
-// opt-out: the entry matches and terminates the lookup.
+// credentialResolverEntry holds a credential resolver and its request policy.
+// A nil resolver is an explicit opt-out that terminates the lookup.
 type credentialResolverEntry struct {
 	resolve      CredentialResolver
 	stripHeaders []string
@@ -174,7 +215,8 @@ type credentialResolverEntry struct {
 	declared bool
 	// match restricts the entry to requests it matches; nil matches every
 	// request. An unmatched entry is always the last of its host's entries.
-	match *RequestMatch
+	match      *RequestMatch
+	credential *CredentialHeader
 }
 
 // getCredentialResolver returns the first dynamic resolver for a host; see
@@ -202,9 +244,13 @@ func (p *Proxy) getCredentialResolverMatch(host string) ([]credentialResolverEnt
 // chooseResolverEntry returns the first entry that applies to req, or the
 // zero entry when none does.
 func chooseResolverEntry(entries []credentialResolverEntry, req *http.Request, path string) credentialResolverEntry {
-	for _, e := range entries {
-		if e.match == nil || e.match.matches(req, path) {
-			return e
+	selected := firstMatchingRequestMatch(req, path, len(entries), func(i int) *RequestMatch { return entries[i].match })
+	if selected >= 0 {
+		return entries[selected]
+	}
+	for _, entry := range entries {
+		if entry.match == nil {
+			return entry
 		}
 	}
 	return credentialResolverEntry{}
@@ -341,33 +387,6 @@ func injectCredentials(req *http.Request, creds []CredentialHeader, host, method
 	return credentialInjectionResult{InjectedHeaders: injected, Grants: grants, Injected: injectedCreds}
 }
 
-// mergeExtraHeaders injects extra headers into a request. If the request
-// already has a value for a header, the new value is appended with a comma
-// separator (standard HTTP multi-value format). This preserves client-sent
-// flags like anthropic-beta while adding proxy-injected flags.
-//
-// Note: comma-joining is correct for list-valued headers (RFC 9110 §5.3) like
-// anthropic-beta, Accept, Cache-Control, etc. It is NOT correct for headers
-// like Set-Cookie that cannot be combined. All headers currently registered
-// via routing.go are list-safe; if that changes, this function will need a
-// per-header strategy.
-func mergeExtraHeaders(req *http.Request, host string, headers []ExtraHeader) {
-	for _, h := range headers {
-		if existing := req.Header.Get(h.Name); existing != "" {
-			req.Header.Set(h.Name, existing+","+h.Value)
-		} else {
-			req.Header.Set(h.Name, h.Value)
-		}
-	}
-	if len(headers) > 0 {
-		slog.Debug("extra headers injected",
-			"subsystem", "proxy",
-			"action", "inject-extra",
-			"host", host,
-			"count", len(headers))
-	}
-}
-
 // getExtraHeaders returns additional headers to inject for a host.
 func (p *Proxy) getExtraHeaders(host string) []ExtraHeader {
 	p.mu.RLock()
@@ -426,6 +445,7 @@ func getRunContext(r *http.Request) *RunContextData {
 func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, path string) (resolvedCredentials, error) {
 	if rc := getRunContext(ctxReq); rc != nil {
 		creds, _ := lookupHostKeyed(rc.Credentials, host, nonEmptySlice)
+		creds = selectRunContextCredentials(creds, innerReq, path)
 		return resolvedCredentials{creds: creds}, nil
 	}
 	entries, resolverMatch := p.getCredentialResolverMatch(host)
@@ -505,6 +525,30 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 		return finish(resolvedCredentials{creds: withRequestedStatics(sentBefore, innerReq, resolved, p.getCredentials(host))}), nil
 	}
 	return finish(resolvedCredentials{creds: p.getCredentials(host)}), nil
+}
+
+func selectRunContextCredentials(creds []CredentialHeader, req *http.Request, path string) []CredentialHeader {
+	selected := firstMatchingRequestMatch(req, path, len(creds), func(i int) *RequestMatch { return creds[i].Match })
+	if selected >= 0 {
+		credential := creds[selected]
+		if credential.Name == "" {
+			credential.Name = credential.Header
+		}
+		if !strings.EqualFold(credential.Name, credential.Match.Header) {
+			req.Header.Del(credential.Match.Header)
+		}
+		return []CredentialHeader{credential}
+	}
+	var unmatched []CredentialHeader
+	for _, credential := range creds {
+		if credential.Match == nil {
+			if credential.Name == "" {
+				credential.Name = credential.Header
+			}
+			unmatched = append(unmatched, credential)
+		}
+	}
+	return unmatched
 }
 
 // stripDeclared removes the request headers every entry declared for removal,

@@ -6,11 +6,26 @@ import (
 	"strings"
 )
 
-// RequestMatch selects a resolver for a request. A zero field matches anything.
+// RequestMatch selects a credential for a request. A zero field matches anything.
 type RequestMatch struct {
-	Header  string   // the client must send this header with a non-empty value
-	Paths   []string // URL path prefixes; empty = any path
-	Methods []string // exact upper-case HTTP methods; empty = any method
+	Header  string   `yaml:"header"`            // non-empty request header required for a match
+	Paths   []string `yaml:"paths,omitempty"`   // path prefixes; any prefix matches
+	Methods []string `yaml:"methods,omitempty"` // exact upper-case methods; any method matches
+}
+
+func firstMatchingRequestMatch(req *http.Request, path string, count int, matchAt func(int) *RequestMatch) int {
+	for i := 0; i < count; i++ {
+		match := matchAt(i)
+		if match != nil && match.matches(req, path) {
+			return i
+		}
+	}
+	return -1
+}
+
+// Equal reports whether two request predicates have the same fields.
+func (m RequestMatch) Equal(o RequestMatch) bool {
+	return strings.EqualFold(m.Header, o.Header) && slices.Equal(m.Paths, o.Paths) && slices.Equal(m.Methods, o.Methods)
 }
 
 func (m RequestMatch) matches(req *http.Request, path string) bool {

@@ -42,6 +42,29 @@ Gatekeeper injects credentials in two modes:
 
 2. **Auto-injection.** If the client sends no matching header, gatekeeper injects the credential unconditionally. When multiple credentials share the same header name for a host, the `claude` grant is deprioritized — it is only injected when the client explicitly sends a placeholder.
 
+## Request matching
+
+Add `match` to any credential source to select it by request header, path, and method. Header presence, a matching path prefix, and a matching method are combined with AND. Multiple path prefixes and methods are combined with OR.
+
+```yaml
+credentials:
+  - host: api.anthropic.com
+    header: Authorization
+    match: {header: x-api-key, paths: [/v1/messages], methods: [POST]}
+    remove_headers: [x-api-key]
+    set_headers:
+      anthropic-beta: oauth-2025-04-20
+    source:
+      type: static
+      value: test-token
+```
+
+Gatekeeper applies its existing exact and wildcard host precedence. Within the selected host key, it tries matched credentials in registration order. The first matching credential wins, regardless of source type. If none matches, unmatched credentials follow their existing behavior. Gatekeeper removes the selecting header unless the selected credential writes that header.
+
+Gatekeeper applies `remove_headers` after credential injection and before `set_headers`. It preserves injected credential headers. `set_headers` therefore wins when a name appears in both lists. These transforms apply when Gatekeeper injects the credential that declares them.
+
+Config validation rejects identical matches and a match fully covered by an earlier match. It allows partial overlap. Two unmatched `token-exchange` credentials on one host remain invalid.
+
 ## Plain HTTP
 
 Gatekeeper does not inject credentials into plain-HTTP requests by default. If a request to an `http://` URL matches a credential, gatekeeper answers `403`, logs a warning with the host only, and does not forward the request. The same rule covers token substitution and `/relay/` targets with an `http://` URL.

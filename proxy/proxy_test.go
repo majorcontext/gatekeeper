@@ -3994,7 +3994,7 @@ func TestProxy_CaptureHeaders_StrippedBeforeForwarding(t *testing.T) {
 	defer backend.Close()
 
 	p := NewProxy()
-	p.SetCaptureHeaders([]string{"X-Workspace-Slug", "X-Request-Source"})
+	p.SetCaptureRequestHeaders([]string{"X-Workspace-Slug", "X-Request-Source"})
 
 	proxyServer := httptest.NewServer(p)
 	defer proxyServer.Close()
@@ -4078,7 +4078,7 @@ func TestProxy_CaptureHeaders_AvailableInLogData(t *testing.T) {
 	defer backend.Close()
 
 	p := NewProxy()
-	p.SetCaptureHeaders([]string{"X-Workspace-Slug"})
+	p.SetCaptureRequestHeaders([]string{"X-Workspace-Slug"})
 
 	var logged RequestLogData
 	p.SetLogger(func(data RequestLogData) {

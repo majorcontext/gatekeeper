@@ -84,14 +84,32 @@ _ = p.CloseConnections(ctx)
 |------------------------------|------------------------------------------------------|
 | `NewProxy()`                 | Create a new proxy instance                          |
 | `SetCA(ca)`                  | Set the CA for TLS interception                      |
-| `SetCredentialWithGrant(host, header, value, grant)` | Set a static credential for a host  |
-| `SetCredentialResolver(host, resolver)`               | Set a dynamic per-request resolver  |
+| `SetCredentialWithGrant(host, header, value, grant)` | Set a static credential for a host |
+| `SetCredentialEntry(credential)` | Register a static credential with request matching and header transforms |
+| `SetCredentialResolverEntry(credential, stripHeaders...)` | Register a credential model with its runtime resolver and policy fields |
+| `SetCredentialResolver(host, resolver)` | Set a dynamic per-request resolver |
 | `SetCredentialResolverWithStripHeaders(host, resolver, headers...)` | Set a dynamic resolver that also removes request headers it consumes; prefer this over `SetCredentialResolver` when the resolver reads a subject-identity or other header that must not reach the upstream, since the proxy strips those headers even when a better-matched static credential skips calling the resolver |
 | `SetNetworkPolicy(policy, allows, grants)`            | Configure network allow/deny; returns an error unless `policy` is `permissive`, `strict`, or empty |
 | `SetDelegateAuth(true)`      | Delegate password checks to resolvers; returns an error, and the proxy refuses every request, until `SetAuthToken` sets a token |
 | `CloseConnections(ctx)`      | Close open CONNECT tunnels and refuse new ones; call on shutdown |
 | `SetAuthToken(token)`        | Require proxy authentication                         |
 | `SetContextResolver(fn)`     | Map proxy auth tokens to per-caller contexts         |
+
+`proxy.Credential` is the shared model for YAML, static registration, resolver registration, and `RunContextData.Credentials`. `proxy.CredentialHeader` is an alias for the same type. A credential can select and transform a request:
+
+```go
+p.SetCredentialEntry(proxy.Credential{
+	Host: "api.anthropic.com",
+	Header: "Authorization",
+	Value: "Bearer test-token",
+	Grant: "workload",
+	Match: &proxy.RequestMatch{Header: "x-api-key", Paths: []string{"/v1/messages"}, Methods: []string{"POST"}},
+	SetHeaders: map[string]string{"anthropic-beta": "oauth-2025-04-20"},
+	RemoveHeaders: []string{"x-api-key"},
+})
+```
+
+Use `SetCredentialResolverEntry` for a per-request resolver. Set its callback on `Credential.Resolver` before registration. The first matching credential wins in registration order. `SetMatchedCredentialResolver` remains available with its existing resolver-ranking behavior.
 
 ## Custom context resolver
 

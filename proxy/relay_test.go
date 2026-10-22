@@ -677,8 +677,8 @@ func TestRelay_StripsCaptureHeadersAndSubstitutesTokens(t *testing.T) {
 	if err := p.AddRelay("tg", backend.URL); err != nil {
 		t.Fatalf("AddRelay: %v", err)
 	}
-	if err := p.SetCaptureHeaders([]string{"X-Trace-Id"}); err != nil {
-		t.Fatalf("SetCaptureHeaders: %v", err)
+	if err := p.SetCaptureRequestHeaders([]string{"X-Trace-Id"}); err != nil {
+		t.Fatalf("SetCaptureRequestHeaders: %v", err)
 	}
 	p.SetInsecureTokenSubstitution(strings.TrimPrefix(backend.URL, "http://"), "placeholder-token", "real-secret")
 

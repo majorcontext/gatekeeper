@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"net/http"
 	"slices"
 	"strings"
 
@@ -79,15 +80,29 @@ func (s *Server) installRequestLogger() {
 			attrs = append(attrs, slog.String("error", data.Err.Error()))
 		}
 
-		// Append captured request headers as structured log attributes.
-		// SanitizeLogValue bounds and cleans the value the same way
-		// data.ApplicationName above already was — see its doc comment.
-		if data.RequestHeaders != nil {
-			for _, h := range s.cfg.Log.CaptureHeaders {
-				if v := data.RequestHeaders.Get(h); v != "" {
-					key := strings.ReplaceAll(strings.ToLower(h), "-", "_")
-					attrs = append(attrs, slog.String(key, proxy.SanitizeLogValue(v)))
+		var capturedHeaderAttrs []attribute.KeyValue
+		for _, capture := range []struct {
+			name, prefix string
+			headers      http.Header
+		}{
+			{name: "request", prefix: "http.request.header.", headers: data.RequestHeaders},
+			{name: "response", prefix: "http.response.header.", headers: data.ResponseHeaders},
+		} {
+			configured := s.cfg.Log.CaptureRequestHeaders
+			if capture.name == "response" {
+				configured = s.cfg.Log.CaptureResponseHeaders
+			}
+			for _, header := range configured {
+				values := capture.headers.Values(header)
+				for i := range values {
+					values[i] = proxy.SanitizeLogValue(values[i])
 				}
+				if len(values) == 0 {
+					continue
+				}
+				key := capture.prefix + strings.ToLower(header)
+				attrs = append(attrs, slog.Any(key, values))
+				capturedHeaderAttrs = append(capturedHeaderAttrs, attribute.StringSlice(key, values))
 			}
 		}
 
@@ -142,6 +157,7 @@ func (s *Server) installRequestLogger() {
 					spanAttrs = append(spanAttrs, attribute.Bool("denied", true))
 					spanAttrs = append(spanAttrs, attribute.String("deny_reason", data.DenyReason))
 				}
+				spanAttrs = append(spanAttrs, capturedHeaderAttrs...)
 				span.AddEvent("request.complete", trace.WithAttributes(spanAttrs...))
 				if data.Err != nil {
 					span.RecordError(data.Err)

@@ -60,7 +60,8 @@ See [network-policy.md](network-policy.md).
 | `level`           | no       | `info`   | `debug`, `info`, `warn`, `error`.                            |
 | `format`          | no       | `text`   | `text` or `json`.                                            |
 | `output`          | no       | `stderr` | `stderr`, `stdout`, or a file path.                          |
-| `capture_headers` | no       | —        | Request headers to log and strip before forwarding.         |
+| `capture_request_headers` | no | — | Request headers to log and strip before forwarding. |
+| `capture_response_headers` | no | — | Response headers to log without changing the response. |
 
 ## postgres
 

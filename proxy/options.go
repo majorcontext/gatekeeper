@@ -1,11 +1,14 @@
 package proxy
 
 import (
+	"context"
 	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -97,15 +100,21 @@ func (p *Proxy) SetContextResolver(resolver func(token string) (*RunContextData,
 	p.contextResolver = resolver
 }
 
-// SetCaptureHeaders configures headers to capture in request logs and strip
-// before forwarding upstream. Header matching is case-insensitive.
-// Returns an error if any header is sensitive (Authorization, Proxy-Authorization, Cookie),
-// if there are more than 10 headers, or if duplicates are present.
-func (p *Proxy) SetCaptureHeaders(headers []string) error {
-	if err := ValidateCaptureHeaders(headers); err != nil {
+// SetCaptureRequestHeaders configures request headers to capture and strip.
+func (p *Proxy) SetCaptureRequestHeaders(headers []string) error {
+	if err := ValidateCaptureRequestHeaders(headers); err != nil {
 		return err
 	}
-	p.captureHeaders = headers
+	p.captureRequestHeaders = headers
+	return nil
+}
+
+// SetCaptureResponseHeaders configures response headers to capture in logs.
+func (p *Proxy) SetCaptureResponseHeaders(headers []string) error {
+	if err := ValidateCaptureResponseHeaders(headers); err != nil {
+		return err
+	}
+	p.captureResponseHeaders = headers
 	return nil
 }
 
@@ -156,6 +165,90 @@ func (p *Proxy) setCredential(host string, entry CredentialHeader) {
 		}
 	}
 	p.credentials[host] = append(p.credentials[host], entry)
+}
+
+func cloneCredentialHeader(credential CredentialHeader) CredentialHeader {
+	if credential.Match != nil {
+		match := *credential.Match
+		match.Paths = slices.Clone(match.Paths)
+		match.Methods = slices.Clone(match.Methods)
+		credential.Match = &match
+	}
+	credential.SetHeaders = maps.Clone(credential.SetHeaders)
+	credential.RemoveHeaders = slices.Clone(credential.RemoveHeaders)
+	return credential
+}
+
+func normalizeCredentialHeader(credential CredentialHeader) CredentialHeader {
+	if credential.Name == "" {
+		credential.Name = credential.Header
+	}
+	if credential.Header == "" {
+		credential.Header = credential.Name
+	}
+	return cloneCredentialHeader(credential)
+}
+
+// SetCredentialEntry registers a credential with optional request matching
+// and header transforms.
+func (p *Proxy) SetCredentialEntry(credential CredentialHeader) {
+	credential = normalizeCredentialHeader(credential)
+	host := credential.Host
+	if credential.Resolver != nil {
+		p.SetCredentialResolverEntry(credential)
+		return
+	}
+	if credential.Match == nil {
+		p.setCredential(host, credential)
+		return
+	}
+	resolver := func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
+		return []CredentialHeader{credential}, nil
+	}
+	p.addMatchedCredentialResolver(host, *credential.Match, resolver, nil, &credential)
+}
+
+// SetCredentialResolverEntry registers Credential.Resolver with the request policy.
+func (p *Proxy) SetCredentialResolverEntry(credential CredentialHeader, stripHeaders ...string) {
+	resolver := credential.Resolver
+	if resolver == nil {
+		return
+	}
+	credential = normalizeCredentialHeader(credential)
+	credential.Resolver = resolver
+	policy := credential
+	host := credential.Host
+	original := resolver
+	resolver = func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]CredentialHeader, error) {
+		resolved, err := original(ctx, proxyReq, innerReq, host)
+		for i := range resolved {
+			if policy.Name != "" {
+				resolved[i].Name = policy.Name
+			}
+			if policy.Header != "" {
+				resolved[i].Header = policy.Header
+			}
+			if policy.Grant != "" {
+				resolved[i].Grant = policy.Grant
+			}
+			resolved[i].Match = policy.Match
+			if policy.SetHeaders != nil {
+				resolved[i].SetHeaders = policy.SetHeaders
+			}
+			if policy.RemoveHeaders != nil {
+				resolved[i].RemoveHeaders = policy.RemoveHeaders
+			}
+			if policy.AllowInsecure {
+				resolved[i].AllowInsecure = true
+			}
+		}
+		return resolved, err
+	}
+	if credential.Match == nil {
+		p.SetCredentialResolverWithStripHeaders(host, resolver, stripHeaders...)
+		return
+	}
+	p.addMatchedCredentialResolver(host, *credential.Match, resolver, stripHeaders, &credential)
 }
 
 // SetCredentialResolver registers a dynamic credential resolver for a host.
@@ -350,23 +443,43 @@ func (rc *RunContextData) permissive() bool {
 // or methods) is ignored.
 func (p *Proxy) SetMatchedCredentialResolver(host string, m RequestMatch, resolver CredentialResolver, stripHeaders ...string) {
 	if resolver == nil || (m.Header == "" && len(m.Paths) == 0 && len(m.Methods) == 0) {
-		slog.Debug("ignoring nil resolver or empty match for matched credential resolver",
-			"subsystem", "proxy",
-			"host", host)
+		slog.Debug("ignoring nil resolver or empty match for matched credential resolver", "subsystem", "proxy", "host", host)
 		return
 	}
 	if !isValidHost(host) {
-		slog.Debug("ignoring invalid host for credential resolver",
-			"subsystem", "proxy",
-			"host", host)
+		slog.Debug("ignoring invalid host for credential resolver", "subsystem", "proxy", "host", host)
 		return
 	}
-	entry := credentialResolverEntry{resolve: resolver, stripHeaders: stripHeaders, declared: true, match: &m}
+	p.addMatchedCredentialResolver(host, m, resolver, stripHeaders, nil)
+}
+
+func (p *Proxy) addMatchedCredentialResolver(host string, match RequestMatch, resolver CredentialResolver, stripHeaders []string, credential *CredentialHeader) {
+	if resolver == nil || (match.Header == "" && len(match.Paths) == 0 && len(match.Methods) == 0) || !isValidHost(host) {
+		return
+	}
+	match.Paths = slices.Clone(match.Paths)
+	match.Methods = slices.Clone(match.Methods)
+	entry := credentialResolverEntry{
+		resolve:      resolver,
+		stripHeaders: slices.Clone(stripHeaders),
+		declared:     true,
+		match:        &match,
+		credential:   credential,
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	entries := p.credentialResolvers[host]
+	if credential != nil && credential.Resolver == nil {
+		for i := range entries {
+			existing := entries[i]
+			if existing.credential != nil && existing.credential.Resolver == nil && existing.match != nil && existing.credential.Grant == credential.Grant && strings.EqualFold(existing.credential.Name, credential.Name) && existing.match.Equal(match) {
+				entries[i] = entry
+				p.credentialResolvers[host] = entries
+				return
+			}
+		}
+	}
 	if n := len(entries); n > 0 && entries[n-1].match == nil {
-		// The unmatched entry stays last as the catch-all.
 		entries = append(entries[:n-1:n-1], entry, entries[n-1])
 	} else {
 		entries = append(entries[:len(entries):len(entries)], entry)

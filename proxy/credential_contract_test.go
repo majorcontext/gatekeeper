@@ -604,7 +604,7 @@ func contractRows() []contractRow {
 		{
 			name: "capture headers are stripped and other headers pass",
 			proxy: func(p *Proxy, _ hostKeys, _ *atomic.Int32) {
-				if err := p.SetCaptureHeaders([]string{"X-Workspace-Slug"}); err != nil {
+				if err := p.SetCaptureRequestHeaders([]string{"X-Workspace-Slug"}); err != nil {
 					panic(err)
 				}
 			},
@@ -614,7 +614,7 @@ func contractRows() []contractRow {
 		{
 			name: "capture header survives when it is an injected credential header",
 			proxy: func(p *Proxy, k hostKeys, _ *atomic.Int32) {
-				if err := p.SetCaptureHeaders([]string{"X-Api-Key"}); err != nil {
+				if err := p.SetCaptureRequestHeaders([]string{"X-Api-Key"}); err != nil {
 					panic(err)
 				}
 				p.SetCredentialWithGrant(k.h, "X-Api-Key", "key", "anthropic")
