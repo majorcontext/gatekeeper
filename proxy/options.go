@@ -298,27 +298,41 @@ func normalizeCredentialHeader(credential CredentialHeader) CredentialHeader {
 	return cloneCredentialHeader(credential)
 }
 
-func (p *Proxy) validateRegisteredCredential(credential Credential, allowUpdate bool) error {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+func (p *Proxy) validateRegisteredCredentialLocked(credential Credential, allowUpdate bool) error {
 	var earlier []Credential
-	for _, registered := range p.credentials {
+	for hostKey, registered := range p.credentials {
 		for _, previous := range registered {
-			if allowUpdate && previous.Match != nil && credential.Match != nil && previous.Grant == credential.Grant && strings.EqualFold(previous.Name, credential.Name) && previous.Match.Equal(*credential.Match) {
+			if allowUpdate && credential.Match != nil && previous.Match != nil && previous.Host == credential.Host && previous.Grant == credential.Grant && strings.EqualFold(previous.Name, credential.Name) && previous.Match.Equal(*credential.Match) {
 				continue
+			}
+			if previous.Host == "" {
+				previous.Host = hostKey
 			}
 			earlier = append(earlier, previous)
 		}
 	}
-	for _, entries := range p.credentialResolvers {
-		for _, entry := range entries {
-			if entry.credential != nil {
-				if allowUpdate && credential.Match != nil && entry.credential.Grant == credential.Grant && strings.EqualFold(entry.credential.Name, credential.Name) && entry.match.Equal(*credential.Match) {
-					continue
+	for hostKey, entries := range p.credentialResolvers {
+		replaceAt := -1
+		if allowUpdate && hostKey == credential.Host && credential.Match != nil {
+			for i, entry := range entries {
+				if entry.credential != nil && entry.match != nil && entry.credential.Grant == credential.Grant && strings.EqualFold(entry.credential.Name, credential.Name) && entry.match.Equal(*credential.Match) {
+					replaceAt = i
+					break
 				}
-				earlier = append(earlier, *entry.credential)
+			}
+		}
+		for i, entry := range entries {
+			if replaceAt >= 0 && i >= replaceAt {
+				break
+			}
+			if entry.credential != nil {
+				previous := *entry.credential
+				if previous.Host == "" {
+					previous.Host = hostKey
+				}
+				earlier = append(earlier, previous)
 			} else if entry.match != nil {
-				earlier = append(earlier, Credential{Host: credential.Host, Match: entry.match})
+				earlier = append(earlier, Credential{Host: hostKey, Match: entry.match})
 			}
 		}
 	}
@@ -331,6 +345,8 @@ func (p *Proxy) SetCredentialEntry(credential CredentialHeader) error {
 	return p.registerCredential(credential, false)
 }
 
+// UpdateCredentialEntry replaces a registered static credential with the same
+// host, grant, header, and match. It rejects resolver-backed credentials.
 func (p *Proxy) UpdateCredentialEntry(credential CredentialHeader) error {
 	return p.registerCredential(credential, true)
 }
@@ -338,9 +354,6 @@ func (p *Proxy) UpdateCredentialEntry(credential CredentialHeader) error {
 func (p *Proxy) registerCredential(credential CredentialHeader, allowUpdate bool) error {
 	credential = normalizeCredentialHeader(credential)
 	if err := credential.ValidateRequestPolicy(); err != nil {
-		return err
-	}
-	if err := p.validateRegisteredCredential(credential, allowUpdate); err != nil {
 		return err
 	}
 	host := credential.Host
@@ -357,7 +370,33 @@ func (p *Proxy) registerCredential(credential CredentialHeader, allowUpdate bool
 	resolver := func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
 		return []CredentialHeader{credential}, nil
 	}
-	p.addMatchedCredentialResolver(host, *credential.Match, resolver, nil, &credential)
+	return p.registerMatchedCredential(credential, resolver, nil, allowUpdate)
+}
+
+func (p *Proxy) registerMatchedCredential(credential CredentialHeader, resolver CredentialResolver, stripHeaders []string, allowUpdate bool) error {
+	match := *credential.Match
+	entry := credentialResolverEntry{resolve: resolver, stripHeaders: slices.Clone(stripHeaders), declared: true, match: &match, credential: &credential}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.validateRegisteredCredentialLocked(credential, allowUpdate); err != nil {
+		return err
+	}
+	entries := p.credentialResolvers[credential.Host]
+	if allowUpdate {
+		for i, existing := range entries {
+			if existing.credential != nil && existing.match != nil && existing.credential.Grant == credential.Grant && strings.EqualFold(existing.credential.Name, credential.Name) && existing.match.Equal(match) {
+				entries[i] = entry
+				p.credentialResolvers[credential.Host] = entries
+				return nil
+			}
+		}
+	}
+	if n := len(entries); n > 0 && entries[n-1].match == nil {
+		entries = append(entries[:n-1:n-1], entry, entries[n-1])
+	} else {
+		entries = append(entries[:len(entries):len(entries)], entry)
+	}
+	p.credentialResolvers[credential.Host] = entries
 	return nil
 }
 
@@ -371,17 +410,13 @@ func (p *Proxy) SetCredentialResolverEntry(credential CredentialHeader, stripHea
 	if err := credential.ValidateRequestPolicy(); err != nil {
 		return err
 	}
-	if err := p.validateRegisteredCredential(credential, false); err != nil {
-		return err
-	}
 	credential.Resolver = resolver
 	resolver = credentialResolverWithPolicy(credential, resolver)
 	host := credential.Host
-	if credential.Match == nil {
-		p.SetCredentialResolverWithStripHeaders(host, resolver, stripHeaders...)
-		return nil
+	if credential.Match != nil {
+		return p.registerMatchedCredential(credential, resolver, stripHeaders, false)
 	}
-	p.addMatchedCredentialResolver(host, *credential.Match, resolver, stripHeaders, &credential)
+	p.SetCredentialResolverWithStripHeaders(host, resolver, stripHeaders...)
 	return nil
 }
 

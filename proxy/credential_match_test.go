@@ -220,6 +220,39 @@ func TestRunContextDataUsesCredentialMatchAndTransforms(t *testing.T) {
 	}
 }
 
+func TestCredentialRegistrationAllowsSameMatchOnDifferentHosts(t *testing.T) {
+	p := NewProxy()
+	match := RequestMatch{Header: "x-select"}
+	p.SetMatchedCredentialResolver("a.example.com", match, func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
+		return []CredentialHeader{{Name: "Authorization", Value: "Bearer a"}}, nil
+	})
+	credential := Credential{Host: "b.example.com", Name: "Authorization", Value: "Bearer b", Match: &match}
+	if err := p.SetCredentialEntry(credential); err != nil {
+		t.Fatalf("different-host registration rejected: %v", err)
+	}
+}
+
+func TestCredentialRegistrationAtomicallyRejectsConcurrentDuplicate(t *testing.T) {
+	p := NewProxy()
+	credential := Credential{Host: "api.example.com", Name: "Authorization", Value: "Bearer value", Grant: "workload", Match: &RequestMatch{Header: "x-select"}}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			results <- p.SetCredentialEntry(credential)
+		}()
+	}
+	close(start)
+	first, second := <-results, <-results
+	if (first == nil) == (second == nil) {
+		t.Fatalf("registration results = %v, %v; want one success and one duplicate rejection", first, second)
+	}
+	if first != nil && !strings.Contains(first.Error(), "identical") || second != nil && !strings.Contains(second.Error(), "identical") {
+		t.Fatalf("duplicate error = %v, %v", first, second)
+	}
+}
+
 func TestCredentialRegistrationRejectsDuplicateAndCoveredMatches(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -352,6 +385,9 @@ func TestMatchedCredentialEntryRefreshReplacesInPlace(t *testing.T) {
 	if err := p.SetCredentialEntry(policy); err != nil {
 		t.Fatal(err)
 	}
+	p.SetMatchedCredentialResolver("api.example.com", *policy.Match, func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
+		return []CredentialHeader{{Name: "Authorization", Value: "Bearer later"}}, nil
+	})
 	policy.Value = "Bearer refreshed"
 	if err := p.UpdateCredentialEntry(policy); err != nil {
 		t.Fatal(err)

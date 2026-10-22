@@ -85,8 +85,9 @@ _ = p.CloseConnections(ctx)
 | `NewProxy()`                 | Create a new proxy instance                          |
 | `SetCA(ca)`                  | Set the CA for TLS interception                      |
 | `SetCredentialWithGrant(host, header, value, grant)` | Set a static credential for a host |
-| `SetCredentialEntry(credential)` | Register a static credential with request matching and header transforms |
-| `SetCredentialResolverEntry(credential, stripHeaders...)` | Register a credential model with its runtime resolver and policy fields |
+| `SetCredentialEntry(credential)` | Register a static credential with request matching and header transforms; returns validation errors |
+| `UpdateCredentialEntry(credential)` | Replace an existing static credential during source refresh; rejects resolver-backed credentials |
+| `SetCredentialResolverEntry(credential, stripHeaders...)` | Register a credential model with its runtime resolver and policy fields; returns validation errors |
 | `SetCredentialResolver(host, resolver)` | Set a dynamic per-request resolver |
 | `SetCredentialResolverWithStripHeaders(host, resolver, headers...)` | Set a dynamic resolver that also removes request headers it consumes; prefer this over `SetCredentialResolver` when the resolver reads a subject-identity or other header that must not reach the upstream, since the proxy strips those headers even when a better-matched static credential skips calling the resolver |
 | `SetNetworkPolicy(policy, allows, grants)`            | Configure network allow/deny; returns an error unless `policy` is `permissive`, `strict`, or empty |
