@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"slices"
 	"strings"
 
 	"github.com/majorcontext/gatekeeper/proxy"
@@ -181,51 +180,19 @@ func (c *Config) validateCredentialMatches() error {
 			if prev.Source.Type == "token-exchange" && cred.Source.Type == "token-exchange" && prev.Match == nil && cred.Match == nil {
 				return fmt.Errorf("credentials: host %q has two token-exchange rules (grants %q and %q); only one resolver applies per host: add match to every rule", cred.Host, prev.Grant, cred.Grant)
 			}
-			if prev.Match != nil && cred.Match != nil {
-				if prev.Match.Equal(*cred.Match) {
-					return fmt.Errorf("credentials: host %q grants %q and %q have identical match blocks", cred.Host, prev.Grant, cred.Grant)
-				}
-				if matchCovers(*prev.Match, *cred.Match) {
-					return fmt.Errorf("credentials: host %q grant %q has a match covered by earlier grant %q", cred.Host, cred.Grant, prev.Grant)
-				}
-				for _, pair := range [][2]CredentialConfig{{prev, cred}, {cred, prev}} {
-					selected, other := pair[0], pair[1]
-					if selected.Match != nil && other.Source.Type == "token-exchange" && other.Source.SubjectHeader != "" && strings.EqualFold(selected.Match.Header, other.Source.SubjectHeader) {
-						return fmt.Errorf("credentials: host %q grant %q: match.header %q is the subject header of grant %q", cred.Host, selected.Grant, selected.Match.Header, other.Grant)
-					}
+			if err := proxy.Credential(cred).ValidateAgainst([]proxy.Credential{prev}); err != nil {
+				return fmt.Errorf("credentials: host %q grant %q: %w", cred.Host, cred.Grant, err)
+			}
+			for _, pair := range [][2]CredentialConfig{{prev, cred}, {cred, prev}} {
+				selected, other := pair[0], pair[1]
+				if selected.Match != nil && other.Source.Type == "token-exchange" && other.Source.SubjectHeader != "" && strings.EqualFold(selected.Match.Header, other.Source.SubjectHeader) {
+					return fmt.Errorf("credentials: host %q grant %q: match.header %q is the subject header of grant %q", cred.Host, selected.Grant, selected.Match.Header, other.Grant)
 				}
 			}
 		}
 		rules[cred.Host] = append(rules[cred.Host], cred)
 	}
 	return nil
-}
-
-func matchCovers(earlier, later MatchConfig) bool {
-	if !strings.EqualFold(earlier.Header, later.Header) {
-		return false
-	}
-	if len(earlier.Paths) > 0 {
-		if len(later.Paths) == 0 {
-			return false
-		}
-		for _, laterPath := range later.Paths {
-			if !slices.ContainsFunc(earlier.Paths, func(earlierPath string) bool { return strings.HasPrefix(laterPath, earlierPath) }) {
-				return false
-			}
-		}
-	}
-	if len(earlier.Methods) > 0 {
-		if len(later.Methods) == 0 {
-			return false
-		}
-		for _, laterMethod := range later.Methods {
-			if !slices.Contains(earlier.Methods, laterMethod) {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 func (n NetworkConfig) validate() error {

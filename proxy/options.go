@@ -231,7 +231,58 @@ func (credential Credential) ValidateRequestPolicy() error {
 		}
 		seen[lower] = true
 	}
+	if credential.Match != nil {
+		if err := credential.ValidateAgainst(nil); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// ValidateAgainst rejects a credential whose request match is identical to or fully covered by an earlier match.
+func (credential Credential) ValidateAgainst(earlier []Credential) error {
+	if credential.Match == nil {
+		return nil
+	}
+	for _, previous := range earlier {
+		if previous.Match == nil || !strings.EqualFold(previous.Host, credential.Host) {
+			continue
+		}
+		if previous.Match.Equal(*credential.Match) {
+			return fmt.Errorf("credential match for host %q grant %q is identical to earlier grant %q", credential.Host, credential.Grant, previous.Grant)
+		}
+		if matchCovers(*previous.Match, *credential.Match) {
+			return fmt.Errorf("credential match for host %q grant %q is covered by earlier grant %q", credential.Host, credential.Grant, previous.Grant)
+		}
+	}
+	return nil
+}
+
+func matchCovers(earlier, later RequestMatch) bool {
+	if !strings.EqualFold(earlier.Header, later.Header) {
+		return false
+	}
+	if len(earlier.Paths) > 0 {
+		if len(later.Paths) == 0 {
+			return false
+		}
+		for _, laterPath := range later.Paths {
+			if !slices.ContainsFunc(earlier.Paths, func(earlierPath string) bool { return strings.HasPrefix(laterPath, earlierPath) }) {
+				return false
+			}
+		}
+	}
+	if len(earlier.Methods) > 0 {
+		if len(later.Methods) == 0 {
+			return false
+		}
+		for _, laterMethod := range later.Methods {
+			if !slices.Contains(earlier.Methods, laterMethod) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func normalizeCredentialHeader(credential CredentialHeader) CredentialHeader {
@@ -247,15 +298,56 @@ func normalizeCredentialHeader(credential CredentialHeader) CredentialHeader {
 	return cloneCredentialHeader(credential)
 }
 
+func (p *Proxy) validateRegisteredCredential(credential Credential, allowUpdate bool) error {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var earlier []Credential
+	for _, registered := range p.credentials {
+		for _, previous := range registered {
+			if allowUpdate && previous.Match != nil && credential.Match != nil && previous.Grant == credential.Grant && strings.EqualFold(previous.Name, credential.Name) && previous.Match.Equal(*credential.Match) {
+				continue
+			}
+			earlier = append(earlier, previous)
+		}
+	}
+	for _, entries := range p.credentialResolvers {
+		for _, entry := range entries {
+			if entry.credential != nil {
+				if allowUpdate && credential.Match != nil && entry.credential.Grant == credential.Grant && strings.EqualFold(entry.credential.Name, credential.Name) && entry.match.Equal(*credential.Match) {
+					continue
+				}
+				earlier = append(earlier, *entry.credential)
+			} else if entry.match != nil {
+				earlier = append(earlier, Credential{Host: credential.Host, Match: entry.match})
+			}
+		}
+	}
+	return credential.ValidateAgainst(earlier)
+}
+
 // SetCredentialEntry registers a credential with optional request matching
 // and header transforms.
 func (p *Proxy) SetCredentialEntry(credential CredentialHeader) error {
+	return p.registerCredential(credential, false)
+}
+
+func (p *Proxy) UpdateCredentialEntry(credential CredentialHeader) error {
+	return p.registerCredential(credential, true)
+}
+
+func (p *Proxy) registerCredential(credential CredentialHeader, allowUpdate bool) error {
 	credential = normalizeCredentialHeader(credential)
 	if err := credential.ValidateRequestPolicy(); err != nil {
 		return err
 	}
+	if err := p.validateRegisteredCredential(credential, allowUpdate); err != nil {
+		return err
+	}
 	host := credential.Host
 	if credential.Resolver != nil {
+		if allowUpdate {
+			return errors.New("resolver credentials cannot be refreshed through UpdateCredentialEntry")
+		}
 		return p.SetCredentialResolverEntry(credential)
 	}
 	if credential.Match == nil {
@@ -277,6 +369,9 @@ func (p *Proxy) SetCredentialResolverEntry(credential CredentialHeader, stripHea
 	}
 	credential = normalizeCredentialHeader(credential)
 	if err := credential.ValidateRequestPolicy(); err != nil {
+		return err
+	}
+	if err := p.validateRegisteredCredential(credential, false); err != nil {
 		return err
 	}
 	credential.Resolver = resolver
@@ -328,6 +423,7 @@ func credentialResolverWithPolicy(policy CredentialHeader, resolve CredentialRes
 	}
 }
 
+// SetCredentialResolver registers a dynamic credential resolver for a host.
 // Unlike static credentials, resolvers are called per-request and may make
 // external calls (e.g., RFC 8693 token exchange). Only one resolver per host
 // is supported; calling again for the same host replaces the previous

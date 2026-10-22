@@ -220,6 +220,66 @@ func TestRunContextDataUsesCredentialMatchAndTransforms(t *testing.T) {
 	}
 }
 
+func TestCredentialRegistrationRejectsDuplicateAndCoveredMatches(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		second *RequestMatch
+		want   string
+	}{
+		{name: "identical", second: &RequestMatch{Header: "X-SELECT"}, want: "identical"},
+		{name: "covered", second: &RequestMatch{Header: "X-SELECT", Paths: []string{"/v1/messages"}}, want: "covered"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewProxy()
+			first := Credential{Host: "api.example.com", Name: "Authorization", Value: "Bearer first", Match: &RequestMatch{Header: "x-select"}}
+			if err := p.SetCredentialEntry(first); err != nil {
+				t.Fatal(err)
+			}
+			second := Credential{Host: "api.example.com", Name: "Authorization", Value: "Bearer second", Match: tc.second}
+			if err := p.SetCredentialEntry(second); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("registration error = %v, want %s-match rejection", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunContextRejectsCoveredMatchesWithoutInjection(t *testing.T) {
+	var upstreamHits int
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	p := NewProxy()
+	rc := &RunContextData{Credentials: map[string][]CredentialHeader{
+		"127.0.0.1": {
+			{Name: "Authorization", Value: "Bearer first", Match: &RequestMatch{Header: "x-select"}},
+			{Name: "Authorization", Value: "Bearer shadow", Match: &RequestMatch{Header: "X-SELECT", Paths: []string{"/v1/messages"}}},
+		},
+	}}
+	p.SetContextResolver(func(string) (*RunContextData, bool) { return rc, true })
+	var logs []RequestLogData
+	p.SetLogger(func(data RequestLogData) { logs = append(logs, data) })
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	req, _ := http.NewRequest("POST", backend.URL+"/v1/messages", nil)
+	req.Header.Set("Proxy-Authorization", "Bearer run-token")
+	req.Header.Set("x-select", "selector")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway || upstreamHits != 0 {
+		t.Fatalf("invalid RunContext status/hits = %d/%d, want 502/0", resp.StatusCode, upstreamHits)
+	}
+	if len(logs) != 1 || logs[0].Err == nil || strings.Contains(logs[0].Err.Error(), "Bearer") {
+		t.Fatalf("invalid credential was not safely logged: %+v", logs)
+	}
+}
+
 func TestSetCredentialEntryRejectsInvalidTransformHeader(t *testing.T) {
 	p := NewProxy()
 	err := p.SetCredentialEntry(Credential{Host: "api.example.com", Header: "Authorization", Value: "Bearer test", SetHeaders: map[string]string{"X Bad": "value"}})
@@ -292,11 +352,8 @@ func TestMatchedCredentialEntryRefreshReplacesInPlace(t *testing.T) {
 	if err := p.SetCredentialEntry(policy); err != nil {
 		t.Fatal(err)
 	}
-	p.SetMatchedCredentialResolver("api.example.com", *policy.Match, func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
-		return []CredentialHeader{{Name: "Authorization", Value: "Bearer later"}}, nil
-	})
 	policy.Value = "Bearer refreshed"
-	if err := p.SetCredentialEntry(policy); err != nil {
+	if err := p.UpdateCredentialEntry(policy); err != nil {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest("POST", "http://api.example.com/v1/messages", nil)

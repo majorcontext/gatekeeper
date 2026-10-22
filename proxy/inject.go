@@ -523,7 +523,27 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 	return finish(resolvedCredentials{creds: p.getCredentials(host)}), nil
 }
 
+func validateRunContextCredentialMatches(credentials map[string][]CredentialHeader) error {
+	for host, entries := range credentials {
+		var earlier []Credential
+		for _, entry := range entries {
+			entry.Host = host
+			if err := entry.ValidateRequestPolicy(); err != nil {
+				return err
+			}
+			if err := entry.ValidateAgainst(earlier); err != nil {
+				return err
+			}
+			earlier = append(earlier, entry)
+		}
+	}
+	return nil
+}
+
 func (p *Proxy) resolveRunContextCredentials(ctxReq, innerReq *http.Request, host, path string, rc *RunContextData) (resolvedCredentials, error) {
+	if err := validateRunContextCredentialMatches(rc.Credentials); err != nil {
+		return resolvedCredentials{}, err
+	}
 	entries, _, selected, skipped := selectRequestCredentialEntries(rc.Credentials, host, innerReq, path, func(credential CredentialHeader) *RequestMatch { return credential.Match })
 	if selected < 0 {
 		stripRunContextSubjectHeaders(innerReq, skipped, "")

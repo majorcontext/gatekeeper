@@ -599,7 +599,7 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 				if strings.EqualFold(header, "Authorization") {
 					val = ensureAuthScheme(val, cred.Prefix, cred.Format)
 				}
-				if err := s.setCredential(cred, header, val); err != nil {
+				if err := s.updateCredential(cred, header, val); err != nil {
 					s.log().Warn("credential refresh produced invalid policy", "host", cred.Host, "grant", cred.Grant, "error", err)
 					continue
 				}
@@ -612,8 +612,12 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 	}()
 }
 
-func (s *Server) setCredential(cred CredentialConfig, header, val string) error {
-	return s.proxy.SetCredentialEntry(credentialHeader(cred, header, val))
+func (s *Server) setCredential(cred CredentialConfig, header, value string) error {
+	return s.proxy.SetCredentialEntry(credentialHeader(cred, header, value))
+}
+
+func (s *Server) updateCredential(cred CredentialConfig, header, value string) error {
+	return s.proxy.UpdateCredentialEntry(credentialHeader(cred, header, value))
 }
 
 func credentialHeader(cred CredentialConfig, header, value string) proxy.CredentialHeader {
