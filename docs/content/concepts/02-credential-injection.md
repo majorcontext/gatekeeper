@@ -25,6 +25,8 @@ Host comparison is case-insensitive. `API.GitHub.com` matches `api.github.com`.
 
 ## Header injection
 
+The configured `header` is the credential output header. Credential-scoped `add_headers` appends comma-separated tokens to request headers, trims token edges, compares without case, and uses `, ` between additions. It cannot target the credential output header. Legacy `AddExtraHeader` still permits that collision. `remove_headers` suppresses a legacy extra header unless credential injection writes that same header.
+
 The default injection header is `Authorization`. Override it with the `header` field:
 
 ```yaml
@@ -52,7 +54,7 @@ credentials:
     header: Authorization
     match: {header: x-api-key, paths: [/v1/messages], methods: [POST]}
     remove_headers: [x-api-key]
-    set_headers:
+    add_headers:
       anthropic-beta: oauth-2025-04-20
     source:
       type: static
@@ -61,7 +63,7 @@ credentials:
 
 Gatekeeper applies its existing exact and wildcard host precedence. Within the selected host key, it tries matched credentials in registration order. The first matching credential wins, regardless of source type. If none matches, unmatched credentials follow their existing behavior. Gatekeeper removes the selecting header unless the selected credential writes that header.
 
-Gatekeeper applies `remove_headers` after credential injection and before `set_headers`. It preserves injected credential headers. `set_headers` therefore wins when a name appears in both lists. These transforms apply when Gatekeeper injects the credential that declares them.
+Gatekeeper applies `remove_headers` after credential injection and before `add_headers`. It preserves injected credential headers. `add_headers` therefore wins when a name appears in both lists. These transforms apply when Gatekeeper injects the credential that declares them.
 
 Config validation rejects identical matches and a match fully covered by an earlier match. It allows partial overlap. Two unmatched `token-exchange` credentials on one host remain invalid.
 

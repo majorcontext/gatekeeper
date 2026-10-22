@@ -529,7 +529,7 @@ func contractRows() []contractRow {
 				p.AddExtraHeader(k.h, "Anthropic-Beta", "proxy-flag")
 			},
 			headers: map[string]string{"Anthropic-Beta": "client-flag"},
-			want:    map[string]string{"Anthropic-Beta": "client-flag,proxy-flag"},
+			want:    map[string]string{"Anthropic-Beta": "client-flag, proxy-flag"},
 		},
 		{
 			name:        "run context extra headers replace proxy-level extra headers",

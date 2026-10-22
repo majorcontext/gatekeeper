@@ -198,7 +198,7 @@ func TestRunContextDataUsesCredentialMatchAndTransforms(t *testing.T) {
 	p := NewProxy()
 	ctx := context.WithValue(context.Background(), runContextKey, &RunContextData{Credentials: map[string][]CredentialHeader{
 		"api.example.com": {
-			{Name: "Authorization", Value: "Bearer first", Match: &RequestMatch{Header: "x-api-key", Paths: []string{"/v1"}}, SetHeaders: map[string]string{"anthropic-beta": "oauth-2025-04-20"}, RemoveHeaders: []string{"x-client"}},
+			{Name: "Authorization", Value: "Bearer first", Match: &RequestMatch{Header: "x-api-key", Paths: []string{"/v1"}}, AddHeaders: map[string]string{"anthropic-beta": "oauth-2025-04-20"}, RemoveHeaders: []string{"x-client"}},
 			{Name: "Authorization", Value: "Bearer second", Match: &RequestMatch{Header: "x-api-key"}},
 		},
 	}})
@@ -392,9 +392,32 @@ func TestRunContextRejectsCoveredMatchesWithoutInjection(t *testing.T) {
 
 func TestSetCredentialEntryRejectsInvalidTransformHeader(t *testing.T) {
 	p := NewProxy()
-	err := p.SetCredentialEntry(Credential{Host: "api.example.com", Header: "Authorization", Value: "Bearer test", SetHeaders: map[string]string{"X Bad": "value"}})
-	if err == nil || !strings.Contains(err.Error(), "set_headers") {
-		t.Fatalf("error = %v, want set_headers validation", err)
+	err := p.SetCredentialEntry(Credential{Host: "api.example.com", Header: "Authorization", Value: "Bearer test", AddHeaders: map[string]string{"X Bad": "value"}})
+	if err == nil || !strings.Contains(err.Error(), "add_headers") {
+		t.Fatalf("error = %v, want add_headers validation", err)
+	}
+}
+
+func TestCredentialValidationRejectsAddHeadersOnCredentialHeader(t *testing.T) {
+	tests := []struct {
+		name       string
+		credential Credential
+	}{
+		{
+			name:       "configured header",
+			credential: Credential{Host: "api.example.com", Header: "Authorization", Value: "Bearer token", AddHeaders: map[string]string{"authorization": "extra"}},
+		},
+		{
+			name:       "resolved name",
+			credential: Credential{Host: "api.example.com", Name: "Authorization", Value: "Bearer token", AddHeaders: map[string]string{"authorization": "extra"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.credential.ValidateRequestPolicy(); err == nil || !strings.Contains(err.Error(), "add_headers") {
+				t.Fatalf("ValidateRequestPolicy() error = %v, want add_headers collision", err)
+			}
+		})
 	}
 }
 
@@ -402,7 +425,7 @@ func TestCredentialResolverPolicyDoesNotMutateResolverResults(t *testing.T) {
 	shared := []CredentialHeader{{Name: "resolver-header", Value: "Bearer value", Grant: "resolver"}}
 	policy := CredentialHeader{
 		Name: "Authorization", Grant: "policy", Match: &RequestMatch{Header: "x-select"},
-		SetHeaders: map[string]string{"anthropic-beta": "oauth-2025-04-20"},
+		AddHeaders: map[string]string{"anthropic-beta": "oauth-2025-04-20"},
 	}
 	resolve := credentialResolverWithPolicy(policy, func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
 		return shared, nil
@@ -411,10 +434,10 @@ func TestCredentialResolverPolicyDoesNotMutateResolverResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if shared[0].Name != "resolver-header" || shared[0].Grant != "resolver" || shared[0].Match != nil || shared[0].SetHeaders != nil {
+	if shared[0].Name != "resolver-header" || shared[0].Grant != "resolver" || shared[0].Match != nil || shared[0].AddHeaders != nil {
 		t.Fatalf("resolver-owned result changed: %+v", shared[0])
 	}
-	if resolved[0].Name != "Authorization" || resolved[0].Grant != "policy" || resolved[0].Match != policy.Match || resolved[0].SetHeaders["anthropic-beta"] == "" {
+	if resolved[0].Name != "Authorization" || resolved[0].Grant != "policy" || resolved[0].Match != policy.Match || resolved[0].AddHeaders["anthropic-beta"] == "" {
 		t.Fatalf("credential policy not applied: %+v", resolved[0])
 	}
 }
@@ -424,7 +447,7 @@ func TestCredentialResolverEntryAppliesCredentialPolicy(t *testing.T) {
 	policy := CredentialHeader{
 		Host: "api.example.com", Header: "Authorization", Name: "Authorization", Grant: "workload",
 		Match:         &RequestMatch{Header: "x-api-key", Paths: []string{"/v1/messages"}},
-		SetHeaders:    map[string]string{"anthropic-beta": "oauth-2025-04-20"},
+		AddHeaders:    map[string]string{"anthropic-beta": "oauth-2025-04-20"},
 		RemoveHeaders: []string{"x-client"}, AllowInsecure: true,
 		Resolver: func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
 			return []CredentialHeader{{Value: "Bearer dynamic"}}, nil
@@ -485,7 +508,7 @@ func TestMatchedCredentialEntryPrecedesLaterResolver(t *testing.T) {
 	match := &RequestMatch{Header: "x-api-key", Paths: []string{"/v1/"}, Methods: []string{"POST"}}
 	if err := p.SetCredentialEntry(CredentialHeader{
 		Host: "api.example.com", Name: "Authorization", Value: "Bearer first", Match: match,
-		SetHeaders:    map[string]string{"anthropic-beta": "oauth-2025-04-20"},
+		AddHeaders:    map[string]string{"anthropic-beta": "oauth-2025-04-20"},
 		RemoveHeaders: []string{"x-client"},
 	}); err != nil {
 		t.Fatal(err)

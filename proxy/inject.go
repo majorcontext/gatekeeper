@@ -109,7 +109,7 @@ type outboundPrep struct {
 // Substitution targets out, so logs built from in keep the placeholder.
 func (p *Proxy) prepareOutbound(in, out *http.Request, o outboundPrep) credentialInjectionResult {
 	credResult := mergeCredentialInjectionResults(o.bundle, injectCredentials(out, o.creds, o.host, out.Method, o.path, o.bundle.InjectedHeaders))
-	legacyPolicy := p.legacyCredentialPolicy(in, o.lookupHost, out.Header, credResult.InjectedHeaders)
+	legacyPolicy := p.legacyCredentialPolicy(in, o.lookupHost, credResult.InjectedHeaders)
 	applyCredentialTransforms(out, legacyPolicy, credResult.InjectedHeaders)
 	for _, credential := range credResult.Injected {
 		applyCredentialTransforms(out, credential, credResult.InjectedHeaders)
@@ -134,30 +134,63 @@ func applyCredentialTransforms(req *http.Request, credential CredentialHeader, i
 			req.Header.Del(header)
 		}
 	}
-	for _, header := range sortedHeaderNames(credential.SetHeaders) {
-		req.Header.Set(header, credential.SetHeaders[header])
+	for _, header := range sortedHeaderNames(credential.AddHeaders) {
+		appendHeaderTokens(req.Header, header, credential.AddHeaders[header])
 	}
 }
 
-func (p *Proxy) legacyCredentialPolicy(r *http.Request, host string, headers http.Header, injectedHeaders map[string]bool) CredentialHeader {
+func appendHeaderTokens(headers http.Header, name, configured string) {
+	key := http.CanonicalHeaderKey(name)
+	values := headers.Values(key)
+	seen := make(map[string]bool)
+	lastNonblank := -1
+	for i, value := range values {
+		for _, token := range strings.Split(value, ",") {
+			if token = strings.TrimSpace(token); token != "" {
+				seen[strings.ToLower(token)] = true
+				lastNonblank = i
+			}
+		}
+	}
+	var additions []string
+	for _, token := range strings.Split(configured, ",") {
+		token = strings.TrimSpace(token)
+		if token == "" || seen[strings.ToLower(token)] {
+			continue
+		}
+		seen[strings.ToLower(token)] = true
+		additions = append(additions, token)
+	}
+	if len(additions) == 0 {
+		return
+	}
+	if lastNonblank < 0 {
+		headers[key] = []string{strings.Join(additions, ", ")}
+		return
+	}
+	values = values[:lastNonblank+1]
+	values[lastNonblank] = strings.TrimRight(values[lastNonblank], " \t,") + ", " + strings.Join(additions, ", ")
+	headers[key] = values
+}
+
+func (p *Proxy) legacyCredentialPolicy(r *http.Request, host string, injectedHeaders map[string]bool) CredentialHeader {
 	policy := CredentialHeader{RemoveHeaders: p.getRemoveHeadersForRequest(r, host)}
 	extraHeaders := p.getExtraHeadersForRequest(r, host)
 	if len(extraHeaders) == 0 {
 		return policy
 	}
-	merged := headers.Clone()
-	policy.SetHeaders = make(map[string]string, len(extraHeaders))
+	policy.AddHeaders = make(map[string]string, len(extraHeaders))
 	for _, header := range extraHeaders {
-		if existing := merged.Get(header.Name); existing != "" {
-			merged.Set(header.Name, existing+","+header.Value)
+		key := http.CanonicalHeaderKey(header.Name)
+		if existing, ok := policy.AddHeaders[key]; ok {
+			policy.AddHeaders[key] = existing + ", " + header.Value
 		} else {
-			merged.Set(header.Name, header.Value)
+			policy.AddHeaders[key] = header.Value
 		}
-		policy.SetHeaders[http.CanonicalHeaderKey(header.Name)] = merged.Get(header.Name)
 	}
-	for name := range policy.SetHeaders {
+	for name := range policy.AddHeaders {
 		if !injectedHeaders[strings.ToLower(name)] && slices.ContainsFunc(policy.RemoveHeaders, func(header string) bool { return strings.EqualFold(header, name) }) {
-			delete(policy.SetHeaders, name)
+			delete(policy.AddHeaders, name)
 		}
 	}
 	slog.Debug("extra headers injected",

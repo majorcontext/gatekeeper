@@ -1538,13 +1538,14 @@ func TestProxy_HostKeyedMaps_WildcardKey(t *testing.T) {
 func TestProxy_ExtraHeaders_MergesWithExisting(t *testing.T) {
 	var receivedBeta string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedBeta = r.Header.Get("anthropic-beta")
+		receivedBeta = strings.Join(r.Header.Values("anthropic-beta"), ", ")
 		w.Write([]byte("ok"))
 	}))
 	defer backend.Close()
 
 	p := NewProxy()
 	p.AddExtraHeader("127.0.0.1", "anthropic-beta", "oauth-2025-04-20")
+	p.AddExtraHeader("127.0.0.1", "anthropic-beta", "OAUTH-2025-04-20")
 
 	proxyServer := httptest.NewServer(p)
 	defer proxyServer.Close()
@@ -1556,14 +1557,15 @@ func TestProxy_ExtraHeaders_MergesWithExisting(t *testing.T) {
 	}
 
 	req, _ := http.NewRequest("GET", backend.URL, nil)
-	req.Header.Set("anthropic-beta", "prompt-caching-2024-07-31")
+	req.Header.Add("anthropic-beta", "prompt-caching-2024-07-31")
+	req.Header.Add("anthropic-beta", "structured-outputs-2025-11-13")
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
 	resp.Body.Close()
 
-	want := "prompt-caching-2024-07-31,oauth-2025-04-20"
+	want := "prompt-caching-2024-07-31, structured-outputs-2025-11-13, oauth-2025-04-20"
 	if receivedBeta != want {
 		t.Errorf("anthropic-beta = %q, want %q", receivedBeta, want)
 	}
@@ -2400,8 +2402,8 @@ func TestProxy_LegacyExtraHeaderSurvivesRemovalForCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || received != "K,extra" {
-		t.Fatalf("status/header = %d/%q, want 200/K,extra", resp.StatusCode, received)
+	if resp.StatusCode != http.StatusOK || received != "K, extra" {
+		t.Fatalf("status/header = %d/%q, want 200/K, extra", resp.StatusCode, received)
 	}
 }
 

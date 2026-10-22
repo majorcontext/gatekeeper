@@ -176,14 +176,14 @@ func cloneCredentialHeader(credential CredentialHeader) CredentialHeader {
 		match.Methods = slices.Clone(match.Methods)
 		credential.Match = &match
 	}
-	credential.SetHeaders = maps.Clone(credential.SetHeaders)
+	credential.AddHeaders = maps.Clone(credential.AddHeaders)
 	credential.RemoveHeaders = slices.Clone(credential.RemoveHeaders)
 	return credential
 }
 
 // ValidateRequestPolicy checks the credential's request matching and header transforms.
 func (credential Credential) ValidateRequestPolicy() error {
-	if credential.Postgres != nil && (credential.Match != nil || len(credential.SetHeaders) > 0 || len(credential.RemoveHeaders) > 0) {
+	if credential.Postgres != nil && (credential.Match != nil || len(credential.AddHeaders) > 0 || len(credential.RemoveHeaders) > 0) {
 		return fmt.Errorf("credentials: host %q grant %q: match and header transforms do not apply to postgres credentials", credential.Host, credential.Grant)
 	}
 	for _, header := range []string{credential.Header, credential.Name} {
@@ -209,14 +209,19 @@ func (credential Credential) ValidateRequestPolicy() error {
 			}
 		}
 	}
-	seen := make(map[string]bool, len(credential.SetHeaders))
-	for name, value := range credential.SetHeaders {
+	seen := make(map[string]bool, len(credential.AddHeaders))
+	for name, value := range credential.AddHeaders {
+		for _, credentialHeader := range []string{credential.Header, credential.Name} {
+			if credentialHeader != "" && strings.EqualFold(name, credentialHeader) {
+				return fmt.Errorf("credentials: host %q grant %q: add_headers cannot target credential header %q", credential.Host, credential.Grant, credentialHeader)
+			}
+		}
 		lower := strings.ToLower(name)
 		if !httpguts.ValidHeaderFieldName(name) || !httpguts.ValidHeaderFieldValue(value) {
-			return fmt.Errorf("credentials: host %q grant %q: set_headers contains an invalid name or value", credential.Host, credential.Grant)
+			return fmt.Errorf("credentials: host %q grant %q: add_headers contains an invalid name or value", credential.Host, credential.Grant)
 		}
 		if seen[lower] {
-			return fmt.Errorf("credentials: host %q grant %q: set_headers has duplicate header %q", credential.Host, credential.Grant, name)
+			return fmt.Errorf("credentials: host %q grant %q: add_headers has duplicate header %q", credential.Host, credential.Grant, name)
 		}
 		seen[lower] = true
 	}
@@ -449,8 +454,8 @@ func credentialResolverWithPolicy(policy CredentialHeader, resolve CredentialRes
 				resolved[i].Grant = policy.Grant
 			}
 			resolved[i].Match = policy.Match
-			if policy.SetHeaders != nil {
-				resolved[i].SetHeaders = policy.SetHeaders
+			if policy.AddHeaders != nil {
+				resolved[i].AddHeaders = policy.AddHeaders
 			}
 			if policy.RemoveHeaders != nil {
 				resolved[i].RemoveHeaders = policy.RemoveHeaders
