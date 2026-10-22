@@ -286,6 +286,17 @@ func TestMatchedCredentialUpdateDoesNotRaceWithRequestSelection(t *testing.T) {
 	updates.Wait()
 }
 
+func TestCredentialRegistrationRejectsInvalidHost(t *testing.T) {
+	p := NewProxy()
+	credential := Credential{Host: "bad host!", Name: "Authorization", Value: "Bearer value", Match: &RequestMatch{Header: "x-select"}}
+	if err := p.SetCredentialEntry(credential); err == nil || !strings.Contains(err.Error(), "host") {
+		t.Fatalf("registration error = %v, want invalid-host rejection", err)
+	}
+	if entries, _ := p.getCredentialResolverMatch(credential.Host); len(entries) != 0 {
+		t.Fatalf("invalid host registered resolver entries: %+v", entries)
+	}
+}
+
 func TestCredentialRegistrationAllowsSameMatchOnDifferentHosts(t *testing.T) {
 	p := NewProxy()
 	match := RequestMatch{Header: "x-select"}

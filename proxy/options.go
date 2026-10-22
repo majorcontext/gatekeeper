@@ -378,6 +378,9 @@ func (p *Proxy) registerCredential(credential CredentialHeader, allowUpdate bool
 }
 
 func (p *Proxy) registerMatchedCredential(credential CredentialHeader, resolver CredentialResolver, stripHeaders []string, allowUpdate bool) error {
+	if !isValidHost(credential.Host) {
+		return fmt.Errorf("credential host %q is invalid", credential.Host)
+	}
 	match := *credential.Match
 	entry := credentialResolverEntry{resolve: resolver, stripHeaders: slices.Clone(stripHeaders), declared: true, match: &match, credential: &credential}
 	p.mu.Lock()
