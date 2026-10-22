@@ -143,10 +143,12 @@ func appendHeaderTokens(headers http.Header, name, configured string) {
 	key := http.CanonicalHeaderKey(name)
 	values := headers.Values(key)
 	seen := make(map[string]bool)
-	for _, value := range values {
+	lastNonblank := -1
+	for i, value := range values {
 		for _, token := range strings.Split(value, ",") {
 			if token = strings.TrimSpace(token); token != "" {
 				seen[strings.ToLower(token)] = true
+				lastNonblank = i
 			}
 		}
 	}
@@ -162,11 +164,12 @@ func appendHeaderTokens(headers http.Header, name, configured string) {
 	if len(additions) == 0 {
 		return
 	}
-	if len(values) == 0 {
+	if lastNonblank < 0 {
 		headers[key] = []string{strings.Join(additions, ", ")}
 		return
 	}
-	values[len(values)-1] += ", " + strings.Join(additions, ", ")
+	values = values[:lastNonblank+1]
+	values[lastNonblank] = strings.TrimRight(values[lastNonblank], " \t,") + ", " + strings.Join(additions, ", ")
 	headers[key] = values
 }
 

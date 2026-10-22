@@ -741,6 +741,69 @@ func TestYAMLAndLibraryMatchedCredentialsForwardEquivalentHeaders(t *testing.T) 
 	}
 }
 
+func TestYAMLAndLibraryAddHeadersMatchForBlankAndTrailingValues(t *testing.T) {
+	var received []string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = r.Header.Values("anthropic-beta")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	backendURL, _ := url.Parse(backend.URL)
+	host, port, _ := net.SplitHostPort(backendURL.Host)
+	tests := []struct {
+		name   string
+		values []string
+		want   string
+	}{
+		{name: "empty header", want: "oauth-beta"},
+		{name: "empty line", values: []string{""}, want: "oauth-beta"},
+		{name: "whitespace line", values: []string{"  "}, want: "oauth-beta"},
+		{name: "trailing blank line", values: []string{"a", ""}, want: "a, oauth-beta"},
+		{name: "trailing delimiter", values: []string{"a,"}, want: "a, oauth-beta"},
+	}
+	forward := func(t *testing.T, handler http.Handler, values []string) string {
+		t.Helper()
+		req := httptest.NewRequest("GET", "http://"+net.JoinHostPort(host, port)+"/", nil)
+		for _, value := range values {
+			req.Header.Add("anthropic-beta", value)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		return strings.Join(received, ", ")
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := ParseConfig([]byte(fmt.Sprintf(`credentials:
+  - host: %s
+    header: Authorization
+    allow_insecure: true
+    add_headers: {anthropic-beta: oauth-beta}
+    source: {type: static, value: token}
+`, host)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			server, err := New(context.Background(), cfg, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = server.Stop(context.Background()) })
+			direct := proxy.NewProxy()
+			if err := direct.SetCredentialEntry(proxy.Credential{Host: host, Header: "Authorization", Value: "Bearer token", AllowInsecure: true, AddHeaders: map[string]string{"anthropic-beta": "oauth-beta"}}); err != nil {
+				t.Fatal(err)
+			}
+			gotYAML := forward(t, server.proxy, tt.values)
+			gotLibrary := forward(t, direct, tt.values)
+			if gotYAML != gotLibrary || gotYAML != tt.want {
+				t.Fatalf("YAML = %q, library = %q, want %q", gotYAML, gotLibrary, tt.want)
+			}
+		})
+	}
+}
+
 func TestYAMLMatchedCredentialOrderIncludesTokenExchange(t *testing.T) {
 	var received http.Header
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -806,7 +869,9 @@ func TestConfig_MatchValidation(t *testing.T) {
 	invalidRemoveHeader := static
 	invalidRemoveHeader.RemoveHeaders = []string{"X Bad"}
 	duplicateAddHeaders := static
-	duplicateAddHeaders.AddHeaders = map[string]string{"X-Api-Key": "one", "x-api-key": "two"}
+	duplicateAddHeaders.AddHeaders = map[string]string{"X-Trace": "one", "x-trace": "two"}
+	credentialHeaderCollision := static
+	credentialHeaderCollision.AddHeaders = map[string]string{"X-API-KEY": "extra"}
 	postgresTransform := static
 	postgresTransform.Postgres = &PostgresCredentialConfig{Resolver: "static"}
 	postgresTransform.AddHeaders = map[string]string{"X-Trace": "value"}
@@ -821,6 +886,7 @@ func TestConfig_MatchValidation(t *testing.T) {
 		{"invalid set header value", []CredentialConfig{invalidSetValue}, "add_headers"},
 		{"invalid remove header name", []CredentialConfig{invalidRemoveHeader}, "remove_headers"},
 		{"case-insensitive set header duplicate", []CredentialConfig{duplicateAddHeaders}, "duplicate"},
+		{"add header collides with credential header", []CredentialConfig{credentialHeaderCollision}, "add_headers"},
 		{"transforms on a Postgres credential", []CredentialConfig{postgresTransform}, "postgres"},
 		{"empty match header", []CredentialConfig{te("g1", &MatchConfig{Paths: []string{"/v1/"}})}, "header"},
 		{"header with a space", []CredentialConfig{te("g1", &MatchConfig{Header: "X Tenant"})}, "header"},

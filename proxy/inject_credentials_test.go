@@ -36,6 +36,33 @@ func newInjectReq(t *testing.T, clientHeaders map[string]string) *http.Request {
 	return req
 }
 
+func TestAppendHeaderTokensRepairsBlankAndTrailingValues(t *testing.T) {
+	tests := []struct {
+		name   string
+		values []string
+		want   []string
+	}{
+		{name: "no header", want: []string{"oauth-beta"}},
+		{name: "empty line", values: []string{""}, want: []string{"oauth-beta"}},
+		{name: "whitespace line", values: []string{"  \t"}, want: []string{"oauth-beta"}},
+		{name: "trailing blank line", values: []string{"a", ""}, want: []string{"a, oauth-beta"}},
+		{name: "trailing delimiter", values: []string{"a,"}, want: []string{"a, oauth-beta"}},
+		{name: "trailing delimiter and blank line", values: []string{"a,", "  "}, want: []string{"a, oauth-beta"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			headers := make(http.Header)
+			if len(tt.values) > 0 {
+				headers[http.CanonicalHeaderKey("anthropic-beta")] = slices.Clone(tt.values)
+			}
+			appendHeaderTokens(headers, "anthropic-beta", "oauth-beta")
+			if got := headers.Values("anthropic-beta"); !slices.Equal(got, tt.want) {
+				t.Fatalf("header values = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // When several credentials share a header name and the client sends a
 // placeholder for it, exactly one credential may be injected. The "claude"
 // grant wins the placeholder path: it is OAuth, and per injectCredentials'

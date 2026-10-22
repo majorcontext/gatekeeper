@@ -23,7 +23,9 @@ A `host` pattern cannot contain a port — `credentials[].host` is validated and
 
 Host comparison is case-insensitive. `API.GitHub.com` matches `api.github.com`.
 
-Gatekeeper injects credentials by replacing the client-supplied placeholder in the configured credential header, or by adding the header when no placeholder is present. `add_headers` is separate: it appends configured comma-separated tokens without replacing client values. Existing and configured tokens are trimmed and compared case-insensitively to avoid duplicates.
+## Header injection
+
+The configured `header` is the credential output header. Credential-scoped `add_headers` appends comma-separated tokens to request headers, trims token edges, compares without case, and uses `, ` between additions. It cannot target the credential output header. Legacy `AddExtraHeader` still permits that collision. `remove_headers` suppresses a legacy extra header unless credential injection writes that same header.
 
 The default injection header is `Authorization`. Override it with the `header` field:
 

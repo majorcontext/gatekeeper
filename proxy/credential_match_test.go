@@ -398,6 +398,29 @@ func TestSetCredentialEntryRejectsInvalidTransformHeader(t *testing.T) {
 	}
 }
 
+func TestCredentialValidationRejectsAddHeadersOnCredentialHeader(t *testing.T) {
+	tests := []struct {
+		name       string
+		credential Credential
+	}{
+		{
+			name:       "configured header",
+			credential: Credential{Host: "api.example.com", Header: "Authorization", Value: "Bearer token", AddHeaders: map[string]string{"authorization": "extra"}},
+		},
+		{
+			name:       "resolved name",
+			credential: Credential{Host: "api.example.com", Name: "Authorization", Value: "Bearer token", AddHeaders: map[string]string{"authorization": "extra"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.credential.ValidateRequestPolicy(); err == nil || !strings.Contains(err.Error(), "add_headers") {
+				t.Fatalf("ValidateRequestPolicy() error = %v, want add_headers collision", err)
+			}
+		})
+	}
+}
+
 func TestCredentialResolverPolicyDoesNotMutateResolverResults(t *testing.T) {
 	shared := []CredentialHeader{{Name: "resolver-header", Value: "Bearer value", Grant: "resolver"}}
 	policy := CredentialHeader{

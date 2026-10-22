@@ -411,7 +411,7 @@ Gatekeeper applies the existing exact and wildcard host precedence. Within the s
 
 ### credentials[].add_headers
 
-Appends configured comma-separated tokens to a request header after credential injection and header removal. Gatekeeper preserves existing values and their order, trims tokens, and skips configured tokens that already appear case-insensitively. It does not replace existing values. If a name appears in both `add_headers` and `remove_headers`, addition wins. The former `set_headers` key is not accepted.
+Appends configured comma-separated tokens to a request header after credential injection and header removal. Gatekeeper preserves existing values and their order, trims tokens, skips configured tokens that already appear case-insensitively, and uses a comma-space separator when it appends. It does not replace existing values. Credential-scoped `add_headers` cannot target that credential's output header. If a name appears in both credential-scoped `add_headers` and `remove_headers`, addition wins. Legacy `AddExtraHeader` entries remain subject to the existing removal exception. The former `set_headers` key is not accepted.
 
 ```yaml
 credentials:

@@ -211,6 +211,11 @@ func (credential Credential) ValidateRequestPolicy() error {
 	}
 	seen := make(map[string]bool, len(credential.AddHeaders))
 	for name, value := range credential.AddHeaders {
+		for _, credentialHeader := range []string{credential.Header, credential.Name} {
+			if credentialHeader != "" && strings.EqualFold(name, credentialHeader) {
+				return fmt.Errorf("credentials: host %q grant %q: add_headers cannot target credential header %q", credential.Host, credential.Grant, credentialHeader)
+			}
+		}
 		lower := strings.ToLower(name)
 		if !httpguts.ValidHeaderFieldName(name) || !httpguts.ValidHeaderFieldValue(value) {
 			return fmt.Errorf("credentials: host %q grant %q: add_headers contains an invalid name or value", credential.Host, credential.Grant)
