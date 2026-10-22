@@ -5,12 +5,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -218,6 +220,70 @@ func TestRunContextDataUsesCredentialMatchAndTransforms(t *testing.T) {
 	if got := out.Header.Get("anthropic-beta"); got != "oauth-2025-04-20" {
 		t.Errorf("set header = %q, want configured value", got)
 	}
+}
+
+func TestUpdateCredentialEntryDoesNotReplaceResolver(t *testing.T) {
+	p := NewProxy()
+	credential := Credential{Host: "api.example.com", Name: "Authorization", Grant: "workload", Match: &RequestMatch{Header: "x-select"}, Resolver: func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
+		return []CredentialHeader{{Name: "Authorization", Value: "Bearer dynamic", Grant: "workload"}}, nil
+	}}
+	if err := p.SetCredentialResolverEntry(credential); err != nil {
+		t.Fatal(err)
+	}
+	credential.Resolver = nil
+	credential.Value = "Bearer static"
+	if err := p.UpdateCredentialEntry(credential); err == nil || !strings.Contains(err.Error(), "resolver") {
+		t.Fatalf("update error = %v, want resolver-backed entry rejection", err)
+	}
+	req := httptest.NewRequest("POST", "http://api.example.com/v1", nil)
+	req.Header.Set("x-select", "selector")
+	resolved, err := p.getCredentialsForRequest(req, req, "api.example.com", "/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved.creds) != 1 || resolved.creds[0].Value != "Bearer dynamic" {
+		t.Fatalf("credentials after rejected update = %+v", resolved.creds)
+	}
+}
+
+func TestMatchedCredentialUpdateDoesNotRaceWithRequestSelection(t *testing.T) {
+	p := NewProxy()
+	credential := CredentialHeader{Host: "api.example.com", Name: "Authorization", Value: "Bearer initial", Grant: "refresh", Match: &RequestMatch{Header: "x-select"}}
+	if err := p.SetCredentialEntry(credential); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	var requests, updates sync.WaitGroup
+	requests.Add(8)
+	updates.Add(1)
+	for range 8 {
+		go func() {
+			defer requests.Done()
+			<-start
+			for range 128 {
+				req := httptest.NewRequest("POST", "http://api.example.com/v1/messages", nil)
+				req.Header.Set("x-select", "selector")
+				entries, _, selected, _ := p.getCredentialResolverEntriesForRequest("api.example.com", req, req.URL.Path)
+				if selected < 0 || entries[selected].credential.Value == "" {
+					t.Error("credential selection returned no value")
+				}
+			}
+		}()
+	}
+	go func() {
+		defer updates.Done()
+		<-start
+		for i := range 128 {
+			credential.Value = fmt.Sprintf("Bearer refresh-%d", i)
+			if err := p.UpdateCredentialEntry(credential); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	close(start)
+	requests.Wait()
+	updates.Wait()
 }
 
 func TestCredentialRegistrationAllowsSameMatchOnDifferentHosts(t *testing.T) {
