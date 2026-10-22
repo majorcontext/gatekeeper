@@ -409,14 +409,14 @@ credentials:
 
 Gatekeeper applies the existing exact and wildcard host precedence. Within the selected host key, it tries matched credentials in registration order. The first match wins across all source types. If no match wins, unmatched credentials keep their existing behavior. `match` is not valid on a credential with a `postgres` block. Gatekeeper rejects a match that is identical to or fully covered by an earlier match on the same host. A partial overlap is valid. Two unmatched `token-exchange` credentials on one host remain invalid.
 
-### credentials[].set_headers
+### credentials[].add_headers
 
-Sets additional request headers after credential injection and header removal. If a name appears in both `set_headers` and `remove_headers`, the set value wins.
+Appends configured comma-separated tokens to a request header after credential injection and header removal. Gatekeeper preserves existing values and their order, trims tokens, and skips configured tokens that already appear case-insensitively. It does not replace existing values. If a name appears in both `add_headers` and `remove_headers`, addition wins. The former `set_headers` key is not accepted.
 
 ```yaml
 credentials:
   - host: api.anthropic.com
-    set_headers:
+    add_headers:
       anthropic-beta: oauth-2025-04-20
 ```
 
@@ -425,7 +425,7 @@ credentials:
 
 ### credentials[].remove_headers
 
-Removes request headers after credential injection. Gatekeeper preserves headers injected as credentials. Gatekeeper applies `set_headers` after this list.
+Removes request headers after credential injection. Gatekeeper preserves headers injected as credentials. Gatekeeper applies `add_headers` after this list.
 
 ```yaml
 credentials:

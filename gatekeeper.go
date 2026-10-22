@@ -625,7 +625,7 @@ func credentialHeader(cred CredentialConfig, header, value string) proxy.Credent
 		Host: cred.Host, Header: cred.Header, Name: header, Value: value,
 		Prefix: cred.Prefix, Format: cred.Format, Source: cred.Source, Postgres: cred.Postgres,
 		Grant: cred.Grant, AllowInsecure: cred.AllowInsecure,
-		SetHeaders: cred.SetHeaders, RemoveHeaders: cred.RemoveHeaders,
+		AddHeaders: cred.AddHeaders, RemoveHeaders: cred.RemoveHeaders,
 	}
 	if cred.Match != nil {
 		match := proxy.RequestMatch(*cred.Match)

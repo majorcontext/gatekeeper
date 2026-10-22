@@ -105,7 +105,7 @@ if err := p.SetCredentialEntry(proxy.Credential{
 	Value: "Bearer test-token",
 	Grant: "workload",
 	Match: &proxy.RequestMatch{Header: "x-api-key", Paths: []string{"/v1/messages"}, Methods: []string{"POST"}},
-	SetHeaders: map[string]string{"anthropic-beta": "oauth-2025-04-20"},
+	AddHeaders: map[string]string{"anthropic-beta": "oauth-2025-04-20"},
 	RemoveHeaders: []string{"x-api-key"},
 }); err != nil {
 	log.Fatal(err)

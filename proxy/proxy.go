@@ -190,8 +190,8 @@ type Credential struct {
 	Postgres *PostgresCredentialConfig `yaml:"postgres,omitempty"`
 	// Match selects the credential by request header presence, path prefixes, and methods.
 	Match *RequestMatch `yaml:"match,omitempty"`
-	// SetHeaders are applied after RemoveHeaders when this credential is injected.
-	SetHeaders map[string]string `yaml:"set_headers,omitempty"`
+	// AddHeaders append tokens after RemoveHeaders when this credential is injected.
+	AddHeaders map[string]string `yaml:"add_headers,omitempty"`
 	// RemoveHeaders are removed when this credential is injected unless credentials write them.
 	RemoveHeaders []string `yaml:"remove_headers,omitempty"`
 	// AllowInsecure permits injection into plain HTTP requests.

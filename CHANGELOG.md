@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.33.3 — 2026-10-22
+
+### Fixed
+
+- **Credential extra headers append without losing client beta values** (`proxy/`, `config.go`, `gatekeeper.go`) — `set_headers` is renamed to `add_headers` with no alias, and `Credential.SetHeaders` is renamed to `Credential.AddHeaders`. This is a breaking pre-1.0 YAML and Go model change; no consumer used `set_headers`. Extra headers from YAML, `AddExtraHeader`, resolver registration, and run contexts use one append path. Gatekeeper preserves existing header values and lines, appends only missing comma-separated tokens in configured order, and compares trimmed tokens case-insensitively. Credential-owned `Header` values still replace client placeholders. `remove_headers` runs before `add_headers`, so addition wins when both name a header. The existing token substitution, selector stripping, Proxy-Authorization/Proxy-Connection removal, header-capture stripping, and credential-bundle replacement behavior is unchanged.
+
 ## v0.33.2 — 2026-10-22
 
 ### Added

@@ -650,6 +650,29 @@ func TestConfig_RejectsTwoTokenExchangeRulesOnOneHost(t *testing.T) {
 	})
 }
 
+func TestParseConfigRejectsSetHeaders(t *testing.T) {
+	_, err := ParseConfig([]byte(`credentials:
+  - host: api.example.com
+    set_headers: {anthropic-beta: oauth-2025-04-20}
+    source: {type: static, value: token}
+`))
+	if err == nil || !strings.Contains(err.Error(), "set_headers") {
+		t.Fatalf("ParseConfig() error = %v, want unknown set_headers field", err)
+	}
+}
+
+func TestParseConfigAcceptsAddHeaders(t *testing.T) {
+	_, err := ParseConfig([]byte(`credentials:
+  - host: api.example.com
+    add_headers:
+      anthropic-beta: oauth-2025-04-20, OAUTH-2025-04-20
+    source: {type: static, value: token}
+`))
+	if err != nil {
+		t.Fatalf("ParseConfig() rejected add_headers: %v", err)
+	}
+}
+
 func TestYAMLAndLibraryMatchedCredentialsForwardEquivalentHeaders(t *testing.T) {
 	var received http.Header
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -667,8 +690,8 @@ func TestYAMLAndLibraryMatchedCredentialsForwardEquivalentHeaders(t *testing.T) 
       header: x-api-key
       paths: [/v1/]
       methods: [POST]
-    set_headers:
-      anthropic-beta: oauth-2025-04-20
+    add_headers:
+      anthropic-beta: oauth-2025-04-20, OAUTH-2025-04-20
     remove_headers: [x-client]
     source:
       type: static
@@ -686,7 +709,7 @@ func TestYAMLAndLibraryMatchedCredentialsForwardEquivalentHeaders(t *testing.T) 
 	credential := proxy.CredentialHeader{
 		Host: host, Name: "Authorization", Value: "Bearer test-token", AllowInsecure: true,
 		Match:         &proxy.RequestMatch{Header: "x-api-key", Paths: []string{"/v1/"}, Methods: []string{"POST"}},
-		SetHeaders:    map[string]string{"anthropic-beta": "oauth-2025-04-20"},
+		AddHeaders:    map[string]string{"anthropic-beta": "oauth-2025-04-20, OAUTH-2025-04-20"},
 		RemoveHeaders: []string{"x-client"},
 	}
 	direct := proxy.NewProxy()
@@ -696,6 +719,8 @@ func TestYAMLAndLibraryMatchedCredentialsForwardEquivalentHeaders(t *testing.T) 
 	run := func(handler http.Handler) http.Header {
 		req := httptest.NewRequest("POST", "http://"+net.JoinHostPort(host, port)+"/v1/messages", nil)
 		req.Header.Set("x-api-key", "placeholder")
+		req.Header.Add("anthropic-beta", "structured-outputs-2025-11-13")
+		req.Header.Add("anthropic-beta", "prompt-caching-2024-07-31")
 		req.Header.Set("x-client", "remove")
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
@@ -711,7 +736,7 @@ func TestYAMLAndLibraryMatchedCredentialsForwardEquivalentHeaders(t *testing.T) 
 			t.Errorf("%s: YAML = %q, library = %q", name, got, want)
 		}
 	}
-	if fromYAML.Get("Authorization") != "Bearer test-token" || fromYAML.Get("x-api-key") != "" || fromYAML.Get("x-client") != "" || fromYAML.Get("anthropic-beta") != "oauth-2025-04-20" {
+	if fromYAML.Get("Authorization") != "Bearer test-token" || fromYAML.Get("x-api-key") != "" || fromYAML.Get("x-client") != "" || strings.Join(fromYAML.Values("anthropic-beta"), ", ") != "structured-outputs-2025-11-13, prompt-caching-2024-07-31, oauth-2025-04-20" {
 		t.Errorf("forwarded headers = %v", fromYAML)
 	}
 }
@@ -775,16 +800,16 @@ func TestConfig_MatchValidation(t *testing.T) {
 	postgresMatched := staticMatched
 	postgresMatched.Postgres = &PostgresCredentialConfig{Resolver: "static"}
 	invalidSetHeader := static
-	invalidSetHeader.SetHeaders = map[string]string{"X Bad": "value"}
+	invalidSetHeader.AddHeaders = map[string]string{"X Bad": "value"}
 	invalidSetValue := static
-	invalidSetValue.SetHeaders = map[string]string{"X-Trace": "bad\r\nvalue"}
+	invalidSetValue.AddHeaders = map[string]string{"X-Trace": "bad\r\nvalue"}
 	invalidRemoveHeader := static
 	invalidRemoveHeader.RemoveHeaders = []string{"X Bad"}
-	duplicateSetHeaders := static
-	duplicateSetHeaders.SetHeaders = map[string]string{"X-Api-Key": "one", "x-api-key": "two"}
+	duplicateAddHeaders := static
+	duplicateAddHeaders.AddHeaders = map[string]string{"X-Api-Key": "one", "x-api-key": "two"}
 	postgresTransform := static
 	postgresTransform.Postgres = &PostgresCredentialConfig{Resolver: "static"}
-	postgresTransform.SetHeaders = map[string]string{"X-Trace": "value"}
+	postgresTransform.AddHeaders = map[string]string{"X-Trace": "value"}
 	tests := []struct {
 		name    string
 		creds   []CredentialConfig
@@ -792,10 +817,10 @@ func TestConfig_MatchValidation(t *testing.T) {
 	}{
 		{"match on a static source", []CredentialConfig{staticMatched}, ""},
 		{"match on a Postgres credential", []CredentialConfig{postgresMatched}, "postgres"},
-		{"invalid set header name", []CredentialConfig{invalidSetHeader}, "set_headers"},
-		{"invalid set header value", []CredentialConfig{invalidSetValue}, "set_headers"},
+		{"invalid set header name", []CredentialConfig{invalidSetHeader}, "add_headers"},
+		{"invalid set header value", []CredentialConfig{invalidSetValue}, "add_headers"},
 		{"invalid remove header name", []CredentialConfig{invalidRemoveHeader}, "remove_headers"},
-		{"case-insensitive set header duplicate", []CredentialConfig{duplicateSetHeaders}, "duplicate"},
+		{"case-insensitive set header duplicate", []CredentialConfig{duplicateAddHeaders}, "duplicate"},
 		{"transforms on a Postgres credential", []CredentialConfig{postgresTransform}, "postgres"},
 		{"empty match header", []CredentialConfig{te("g1", &MatchConfig{Paths: []string{"/v1/"}})}, "header"},
 		{"header with a space", []CredentialConfig{te("g1", &MatchConfig{Header: "X Tenant"})}, "header"},

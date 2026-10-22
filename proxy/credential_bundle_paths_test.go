@@ -676,7 +676,7 @@ func TestMoatRunContextCompatibility(t *testing.T) {
 	if got.path != "/bot-replacement-token" || got.auth != "Bearer replacement-token" || got.body != `{"token":"replacement-token"}` {
 		t.Errorf("token substitution output = %+v", got)
 	}
-	if got.credential != "test-credential" || got.extra != "client,extra" || got.removed != "" {
+	if got.credential != "test-credential" || got.extra != "client, extra" || got.removed != "" {
 		t.Errorf("per-run header output = %+v", got)
 	}
 	second := httptest.NewRequest(http.MethodPost, backend.URL+"/backend-api/codex/responses", nil)
