@@ -482,6 +482,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	p.logExit(r, logBase, start, resp.StatusCode, func(d *RequestLogData) {
 		d.Err = copyErr
 		d.ResponseSize = written
+		d.ResponseHeaders = resp.Header.Clone()
 		d.InjectedHeaders = injectedHeaders
 		d.Grants = grants
 	})

@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+
+	"golang.org/x/net/http/httpguts"
 )
 
 // SetAuthToken sets the required authentication token for proxy access.
@@ -179,9 +181,65 @@ func cloneCredentialHeader(credential CredentialHeader) CredentialHeader {
 	return credential
 }
 
+// ValidateRequestPolicy checks the credential's request matching and header transforms.
+func (credential Credential) ValidateRequestPolicy() error {
+	if credential.Postgres != nil && (credential.Match != nil || len(credential.SetHeaders) > 0 || len(credential.RemoveHeaders) > 0) {
+		return fmt.Errorf("credentials: host %q grant %q: match and header transforms do not apply to postgres credentials", credential.Host, credential.Grant)
+	}
+	for _, header := range []string{credential.Header, credential.Name} {
+		if header != "" && !httpguts.ValidHeaderFieldName(header) {
+			return fmt.Errorf("credentials: host %q grant %q: invalid header name %q", credential.Host, credential.Grant, header)
+		}
+	}
+	if credential.Match != nil {
+		if credential.Match.Header == "" {
+			return fmt.Errorf("credentials: host %q grant %q: match.header is required", credential.Host, credential.Grant)
+		}
+		if !httpguts.ValidHeaderFieldName(credential.Match.Header) {
+			return fmt.Errorf("credentials: host %q grant %q: match.header %q is not a valid HTTP header name", credential.Host, credential.Grant, credential.Match.Header)
+		}
+		for _, path := range credential.Match.Paths {
+			if !strings.HasPrefix(path, "/") {
+				return fmt.Errorf("credentials: host %q grant %q: match.paths entry %q must start with \"/\"", credential.Host, credential.Grant, path)
+			}
+		}
+		for _, method := range credential.Match.Methods {
+			if method == "" || strings.IndexFunc(method, func(r rune) bool { return r < 'A' || r > 'Z' }) >= 0 {
+				return fmt.Errorf("credentials: host %q grant %q: match.methods entry %q must be upper-case letters", credential.Host, credential.Grant, method)
+			}
+		}
+	}
+	seen := make(map[string]bool, len(credential.SetHeaders))
+	for name, value := range credential.SetHeaders {
+		lower := strings.ToLower(name)
+		if !httpguts.ValidHeaderFieldName(name) || !httpguts.ValidHeaderFieldValue(value) {
+			return fmt.Errorf("credentials: host %q grant %q: set_headers contains an invalid name or value", credential.Host, credential.Grant)
+		}
+		if seen[lower] {
+			return fmt.Errorf("credentials: host %q grant %q: set_headers has duplicate header %q", credential.Host, credential.Grant, name)
+		}
+		seen[lower] = true
+	}
+	seen = make(map[string]bool, len(credential.RemoveHeaders))
+	for _, name := range credential.RemoveHeaders {
+		lower := strings.ToLower(name)
+		if !httpguts.ValidHeaderFieldName(name) {
+			return fmt.Errorf("credentials: host %q grant %q: remove_headers has invalid header %q", credential.Host, credential.Grant, name)
+		}
+		if seen[lower] {
+			return fmt.Errorf("credentials: host %q grant %q: remove_headers has duplicate header %q", credential.Host, credential.Grant, name)
+		}
+		seen[lower] = true
+	}
+	return nil
+}
+
 func normalizeCredentialHeader(credential CredentialHeader) CredentialHeader {
 	if credential.Name == "" {
 		credential.Name = credential.Header
+		if credential.Name == "" {
+			credential.Name = "Authorization"
+		}
 	}
 	if credential.Header == "" {
 		credential.Header = credential.Name
@@ -191,37 +249,58 @@ func normalizeCredentialHeader(credential CredentialHeader) CredentialHeader {
 
 // SetCredentialEntry registers a credential with optional request matching
 // and header transforms.
-func (p *Proxy) SetCredentialEntry(credential CredentialHeader) {
+func (p *Proxy) SetCredentialEntry(credential CredentialHeader) error {
 	credential = normalizeCredentialHeader(credential)
+	if err := credential.ValidateRequestPolicy(); err != nil {
+		return err
+	}
 	host := credential.Host
 	if credential.Resolver != nil {
-		p.SetCredentialResolverEntry(credential)
-		return
+		return p.SetCredentialResolverEntry(credential)
 	}
 	if credential.Match == nil {
 		p.setCredential(host, credential)
-		return
+		return nil
 	}
 	resolver := func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
 		return []CredentialHeader{credential}, nil
 	}
 	p.addMatchedCredentialResolver(host, *credential.Match, resolver, nil, &credential)
+	return nil
 }
 
 // SetCredentialResolverEntry registers Credential.Resolver with the request policy.
-func (p *Proxy) SetCredentialResolverEntry(credential CredentialHeader, stripHeaders ...string) {
+func (p *Proxy) SetCredentialResolverEntry(credential CredentialHeader, stripHeaders ...string) error {
 	resolver := credential.Resolver
 	if resolver == nil {
-		return
+		return errors.New("credential resolver is required")
 	}
 	credential = normalizeCredentialHeader(credential)
+	if err := credential.ValidateRequestPolicy(); err != nil {
+		return err
+	}
 	credential.Resolver = resolver
-	policy := credential
+	resolver = credentialResolverWithPolicy(credential, resolver)
 	host := credential.Host
-	original := resolver
-	resolver = func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]CredentialHeader, error) {
-		resolved, err := original(ctx, proxyReq, innerReq, host)
+	if credential.Match == nil {
+		p.SetCredentialResolverWithStripHeaders(host, resolver, stripHeaders...)
+		return nil
+	}
+	p.addMatchedCredentialResolver(host, *credential.Match, resolver, stripHeaders, &credential)
+	return nil
+}
+
+func credentialResolverWithPolicy(policy CredentialHeader, resolve CredentialResolver) CredentialResolver {
+	return func(ctx context.Context, proxyReq, innerReq *http.Request, host string) ([]CredentialHeader, error) {
+		resolved, err := resolve(ctx, proxyReq, innerReq, host)
+		resolved = slices.Clone(resolved)
 		for i := range resolved {
+			if resolved[i].Name == "" {
+				resolved[i].Name = resolved[i].Header
+			}
+			if resolved[i].Header == "" {
+				resolved[i].Header = resolved[i].Name
+			}
 			if policy.Name != "" {
 				resolved[i].Name = policy.Name
 			}
@@ -241,17 +320,14 @@ func (p *Proxy) SetCredentialResolverEntry(credential CredentialHeader, stripHea
 			if policy.AllowInsecure {
 				resolved[i].AllowInsecure = true
 			}
+			if err := resolved[i].ValidateRequestPolicy(); err != nil {
+				return nil, err
+			}
 		}
 		return resolved, err
 	}
-	if credential.Match == nil {
-		p.SetCredentialResolverWithStripHeaders(host, resolver, stripHeaders...)
-		return
-	}
-	p.addMatchedCredentialResolver(host, *credential.Match, resolver, stripHeaders, &credential)
 }
 
-// SetCredentialResolver registers a dynamic credential resolver for a host.
 // Unlike static credentials, resolvers are called per-request and may make
 // external calls (e.g., RFC 8693 token exchange). Only one resolver per host
 // is supported; calling again for the same host replaces the previous

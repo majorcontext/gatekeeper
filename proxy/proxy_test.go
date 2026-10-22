@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -2368,6 +2369,42 @@ func TestProxy_PerContextRemoveHeaders(t *testing.T) {
 	}
 }
 
+func TestProxy_LegacyExtraHeaderSurvivesRemovalForCredential(t *testing.T) {
+	var received string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = r.Header.Get("x-api-key")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	host := mustParseURL(backend.URL).Hostname()
+	p := NewProxy()
+	p.SetContextResolver(func(token string) (*RunContextData, bool) {
+		if token != "moat-token" {
+			return nil, false
+		}
+		return &RunContextData{
+			Policy:        "permissive",
+			Credentials:   map[string][]CredentialHeader{host: {{Name: "x-api-key", Value: "K", Grant: "api", AllowInsecure: true}}},
+			ExtraHeaders:  map[string][]ExtraHeader{host: {{Name: "x-api-key", Value: "extra"}}},
+			RemoveHeaders: map[string][]string{host: {"x-api-key"}},
+		}, true
+	})
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+	proxyURL := mustParseURL(proxyServer.URL)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	req, _ := http.NewRequest("GET", backend.URL, nil)
+	req.Header.Set("Proxy-Authorization", "Bearer moat-token")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || received != "K,extra" {
+		t.Fatalf("status/header = %d/%q, want 200/K,extra", resp.StatusCode, received)
+	}
+}
+
 // TestProxy_RemoveHeaderSkipsInjectedCredential verifies that RemoveRequestHeader
 // does not strip the credential header the proxy just injected. This prevents a
 // conflict when both "claude" (OAuth, removes x-api-key) and "anthropic" (API key,
@@ -3982,6 +4019,29 @@ func TestProxy_CanonicalLogLine_UserID_BearerNoUsername(t *testing.T) {
 
 	if logged.UserID != "" {
 		t.Errorf("UserID = %q, want empty (Bearer has no username)", logged.UserID)
+	}
+}
+
+func TestProxy_CaptureResponseHeadersInRequestLog(t *testing.T) {
+	p := NewProxy()
+	if err := p.SetCaptureResponseHeaders([]string{"X-Response-Trace"}); err != nil {
+		t.Fatal(err)
+	}
+	var logged RequestLogData
+	p.SetLogger(func(data RequestLogData) { logged = data })
+	responseHeaders := http.Header{
+		"X-Response-Trace": {"first", "second"},
+		"X-Other":          {"unselected"},
+	}
+	p.logRequest(nil, RequestLogData{ResponseHeaders: responseHeaders})
+	if got := logged.CapturedResponseHeaders.Values("X-Response-Trace"); !slices.Equal(got, []string{"first", "second"}) {
+		t.Errorf("captured response values = %v", got)
+	}
+	if got := logged.CapturedResponseHeaders.Get("X-Other"); got != "" {
+		t.Errorf("unselected response header = %q, want empty", got)
+	}
+	if got := responseHeaders.Values("X-Response-Trace"); !slices.Equal(got, []string{"first", "second"}) {
+		t.Errorf("response headers mutated = %v", got)
 	}
 }
 

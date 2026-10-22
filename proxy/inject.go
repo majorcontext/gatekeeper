@@ -109,7 +109,7 @@ type outboundPrep struct {
 // Substitution targets out, so logs built from in keep the placeholder.
 func (p *Proxy) prepareOutbound(in, out *http.Request, o outboundPrep) credentialInjectionResult {
 	credResult := mergeCredentialInjectionResults(o.bundle, injectCredentials(out, o.creds, o.host, out.Method, o.path, o.bundle.InjectedHeaders))
-	legacyPolicy := p.legacyCredentialPolicy(in, o.lookupHost, out.Header)
+	legacyPolicy := p.legacyCredentialPolicy(in, o.lookupHost, out.Header, credResult.InjectedHeaders)
 	applyCredentialTransforms(out, legacyPolicy, credResult.InjectedHeaders)
 	for _, credential := range credResult.Injected {
 		applyCredentialTransforms(out, credential, credResult.InjectedHeaders)
@@ -139,7 +139,7 @@ func applyCredentialTransforms(req *http.Request, credential CredentialHeader, i
 	}
 }
 
-func (p *Proxy) legacyCredentialPolicy(r *http.Request, host string, headers http.Header) CredentialHeader {
+func (p *Proxy) legacyCredentialPolicy(r *http.Request, host string, headers http.Header, injectedHeaders map[string]bool) CredentialHeader {
 	policy := CredentialHeader{RemoveHeaders: p.getRemoveHeadersForRequest(r, host)}
 	extraHeaders := p.getExtraHeadersForRequest(r, host)
 	if len(extraHeaders) == 0 {
@@ -156,7 +156,7 @@ func (p *Proxy) legacyCredentialPolicy(r *http.Request, host string, headers htt
 		policy.SetHeaders[http.CanonicalHeaderKey(header.Name)] = merged.Get(header.Name)
 	}
 	for name := range policy.SetHeaders {
-		if slices.ContainsFunc(policy.RemoveHeaders, func(header string) bool { return strings.EqualFold(header, name) }) {
+		if !injectedHeaders[strings.ToLower(name)] && slices.ContainsFunc(policy.RemoveHeaders, func(header string) bool { return strings.EqualFold(header, name) }) {
 			delete(policy.SetHeaders, name)
 		}
 	}
@@ -241,19 +241,10 @@ func (p *Proxy) getCredentialResolverMatch(host string) ([]credentialResolverEnt
 	return lookupHostKeyed(p.credentialResolvers, host, presenceUsable)
 }
 
-// chooseResolverEntry returns the first entry that applies to req, or the
-// zero entry when none does.
-func chooseResolverEntry(entries []credentialResolverEntry, req *http.Request, path string) credentialResolverEntry {
-	selected := firstMatchingRequestMatch(req, path, len(entries), func(i int) *RequestMatch { return entries[i].match })
-	if selected >= 0 {
-		return entries[selected]
-	}
-	for _, entry := range entries {
-		if entry.match == nil {
-			return entry
-		}
-	}
-	return credentialResolverEntry{}
+func (p *Proxy) getCredentialResolverEntriesForRequest(host string, req *http.Request, path string) ([]credentialResolverEntry, hostMatch, int, []credentialResolverEntry) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return selectRequestCredentialEntries(p.credentialResolvers, host, req, path, func(entry credentialResolverEntry) *RequestMatch { return entry.match })
 }
 
 // credentialInjectionResult holds the outcome of credential injection.
@@ -444,16 +435,18 @@ func getRunContext(r *http.Request) *RunContextData {
 // removed, so the selecting placeholder never reaches upstream.
 func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, path string) (resolvedCredentials, error) {
 	if rc := getRunContext(ctxReq); rc != nil {
-		creds, _ := lookupHostKeyed(rc.Credentials, host, nonEmptySlice)
-		creds = selectRunContextCredentials(creds, innerReq, path)
-		return resolvedCredentials{creds: creds}, nil
+		return p.resolveRunContextCredentials(ctxReq, innerReq, host, path, rc)
 	}
-	entries, resolverMatch := p.getCredentialResolverMatch(host)
-	entry := chooseResolverEntry(entries, innerReq, path)
+	entries, resolverMatch, selected, skipped := p.getCredentialResolverEntriesForRequest(host, innerReq, path)
+	allEntries := append(skipped, entries...)
+	entry := credentialResolverEntry{}
+	if selected >= 0 {
+		entry = entries[selected]
+	}
 	if entry.resolve == nil {
 		// No rule applies, so no resolver runs; the headers every declared
 		// rule consumes must still not reach upstream.
-		stripDeclared(innerReq, entries, nil)
+		stripDeclared(innerReq, allEntries, nil)
 		return resolvedCredentials{creds: p.getCredentials(host)}, nil
 	}
 	// Whichever rule is chosen, the subject headers of every rule on the host
@@ -461,7 +454,7 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 	// The chosen entry's own headers are left to its resolver: it may set one
 	// itself, and the proxy removes only what the client sent.
 	finish := func(res resolvedCredentials) resolvedCredentials {
-		stripDeclared(innerReq, entries, entry.stripHeaders)
+		stripDeclared(innerReq, allEntries, entry.stripHeaders)
 		return entry.stripSelector(innerReq, res)
 	}
 	if staticCreds, staticMatch := p.getCredentialsMatch(host); staticMatch.outranks(resolverMatch) {
@@ -470,7 +463,7 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 			// the resolver's external round trip must not stall it. The
 			// resolver is skipped; the request headers declared at
 			// registration are removed here so they never leak upstream.
-			stripDeclared(innerReq, entries, nil)
+			stripDeclared(innerReq, allEntries, nil)
 			return entry.stripSelector(innerReq, resolvedCredentials{creds: staticCreds}), nil
 		}
 		// A legacy registration made no declaration, so the resolver may
@@ -522,33 +515,147 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 		}
 		// Read static credentials after the resolver has run, not before: a
 		// token refresh landing while a slow resolver was out must be seen.
+		if entry.credential != nil {
+			return finish(resolvedCredentials{creds: resolved}), nil
+		}
 		return finish(resolvedCredentials{creds: withRequestedStatics(sentBefore, innerReq, resolved, p.getCredentials(host))}), nil
 	}
 	return finish(resolvedCredentials{creds: p.getCredentials(host)}), nil
 }
 
-func selectRunContextCredentials(creds []CredentialHeader, req *http.Request, path string) []CredentialHeader {
-	selected := firstMatchingRequestMatch(req, path, len(creds), func(i int) *RequestMatch { return creds[i].Match })
-	if selected >= 0 {
-		credential := creds[selected]
-		if credential.Name == "" {
-			credential.Name = credential.Header
-		}
-		if !strings.EqualFold(credential.Name, credential.Match.Header) {
-			req.Header.Del(credential.Match.Header)
-		}
-		return []CredentialHeader{credential}
+func (p *Proxy) resolveRunContextCredentials(ctxReq, innerReq *http.Request, host, path string, rc *RunContextData) (resolvedCredentials, error) {
+	entries, _, selected, skipped := selectRequestCredentialEntries(rc.Credentials, host, innerReq, path, func(credential CredentialHeader) *RequestMatch { return credential.Match })
+	if selected < 0 {
+		stripRunContextSubjectHeaders(innerReq, skipped, "")
+		return resolvedCredentials{}, nil
 	}
-	var unmatched []CredentialHeader
-	for _, credential := range creds {
-		if credential.Match == nil {
+	credential := entries[selected]
+	if credential.Name == "" {
+		credential.Name = credential.Header
+		if credential.Name == "" {
+			credential.Name = "Authorization"
+		}
+	}
+	if credential.Header == "" {
+		credential.Header = credential.Name
+	}
+	matched := credential.Match != nil
+	if matched {
+		if err := credential.ValidateRequestPolicy(); err != nil {
+			return resolvedCredentials{}, err
+		}
+	} else {
+		for _, entry := range entries {
+			if entry.Match == nil {
+				if err := entry.ValidateRequestPolicy(); err != nil {
+					return resolvedCredentials{}, err
+				}
+			}
+		}
+	}
+	subjectEntries := append(skipped, entries...)
+	finish := func(result resolvedCredentials) resolvedCredentials {
+		keep := ""
+		if credential.Resolver != nil {
+			keep = credential.Source.SubjectHeader
+		}
+		stripRunContextSubjectHeaders(innerReq, subjectEntries, keep)
+		if matched {
+			stripCredentialSelector(innerReq, credential, result.creds)
+		}
+		return result
+	}
+	statics := unmatchedRunContextCredentials(rc.Credentials, host)
+	if !matched {
+		statics = staticRunContextCredentials(entries)
+	}
+	if credential.Resolver == nil {
+		if matched {
+			return finish(resolvedCredentials{creds: []CredentialHeader{credential}}), nil
+		}
+		return finish(resolvedCredentials{creds: statics}), nil
+	}
+	sentBefore := sentHeaders(innerReq)
+	resolver := credentialResolverWithPolicy(credential, credential.Resolver)
+	resolved, err := resolver(innerReq.Context(), ctxReq, innerReq, host)
+	var declined *ResolverDeclined
+	if errors.As(err, &declined) {
+		fallback, fallbackErr := runContextCredentialFallback(innerReq, credential, statics, sentBefore, declined)
+		return finish(fallback), fallbackErr
+	}
+	if err != nil {
+		return resolvedCredentials{}, err
+	}
+	if len(resolved) == 0 {
+		if credential.Source.StaticFallback == "explicit" {
+			declined = &ResolverDeclined{ExplicitOnly: true, Grant: credential.Grant}
+			fallback, fallbackErr := runContextCredentialFallback(innerReq, credential, statics, sentBefore, declined)
+			return finish(fallback), fallbackErr
+		}
+		return finish(resolvedCredentials{creds: statics}), nil
+	}
+	if matched {
+		return finish(resolvedCredentials{creds: resolved}), nil
+	}
+	return finish(resolvedCredentials{creds: withRequestedStatics(sentBefore, innerReq, resolved, statics)}), nil
+}
+
+func runContextCredentialFallback(req *http.Request, credential CredentialHeader, statics []CredentialHeader, sentBefore map[string]bool, declined *ResolverDeclined) (resolvedCredentials, error) {
+	if declined.ExplicitOnly {
+		statics = namedByClient(sentBefore, req, statics)
+		if len(statics) == 0 {
+			return resolvedCredentials{}, &CredentialRequiredError{Grant: declined.Grant, Host: credential.Host, Reason: declined.Reason}
+		}
+	}
+	return resolvedCredentials{creds: statics, declined: declined}, nil
+}
+
+func unmatchedRunContextCredentials(credentials map[string][]CredentialHeader, host string) []CredentialHeader {
+	entries, _ := lookupHostKeyed(credentials, host, func(entries []CredentialHeader) bool {
+		return len(staticRunContextCredentials(entries)) > 0
+	})
+	return staticRunContextCredentials(entries)
+}
+
+func staticRunContextCredentials(entries []CredentialHeader) []CredentialHeader {
+	var statics []CredentialHeader
+	for _, credential := range entries {
+		if credential.Match == nil && credential.Resolver == nil {
 			if credential.Name == "" {
 				credential.Name = credential.Header
+				if credential.Name == "" {
+					credential.Name = "Authorization"
+				}
 			}
-			unmatched = append(unmatched, credential)
+			statics = append(statics, credential)
 		}
 	}
-	return unmatched
+	return statics
+}
+
+func stripRunContextSubjectHeaders(req *http.Request, credentials []CredentialHeader, keep string) {
+	for _, credential := range credentials {
+		header := credential.Source.SubjectHeader
+		if credential.Source.Type == "token-exchange" && header != "" && !strings.EqualFold(header, keep) {
+			req.Header.Del(header)
+		}
+	}
+}
+
+func sentHeaders(req *http.Request) map[string]bool {
+	sent := make(map[string]bool, len(req.Header))
+	for name := range req.Header {
+		if req.Header.Get(name) != "" {
+			sent[strings.ToLower(name)] = true
+		}
+	}
+	return sent
+}
+
+func stripCredentialSelector(req *http.Request, credential CredentialHeader, resolved []CredentialHeader) {
+	if credential.Match != nil && !answersHeader(resolved, credential.Match.Header) {
+		req.Header.Del(credential.Match.Header)
+	}
 }
 
 // stripDeclared removes the request headers every entry declared for removal,
@@ -590,7 +697,8 @@ func answersHeader(creds []CredentialHeader, name string) bool {
 // nothing to look up here.
 func (p *Proxy) getCredentialBundlesForRequest(ctxReq *http.Request) []credentialBundle {
 	if rc := getRunContext(ctxReq); rc != nil {
-		return rc.credentialBundles
+		bundles := append([]credentialBundle(nil), rc.credentialBundles...)
+		return append(bundles, rc.CredentialBundles...)
 	}
 	return nil
 }

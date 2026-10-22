@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -158,7 +159,21 @@ func (p *Proxy) logRequest(ctxReq *http.Request, data RequestLogData) {
 		}
 	}
 	data.AuthInjected = len(data.InjectedHeaders) > 0
+	data.CapturedResponseHeaders = captureHeaderValues(data.ResponseHeaders, p.captureResponseHeaders)
 	p.logger(data)
+}
+
+func captureHeaderValues(headers http.Header, names []string) http.Header {
+	if headers == nil || len(names) == 0 {
+		return nil
+	}
+	captured := make(http.Header, len(names))
+	for _, name := range names {
+		if values := headers.Values(name); len(values) > 0 {
+			captured[http.CanonicalHeaderKey(name)] = slices.Clone(values)
+		}
+	}
+	return captured
 }
 
 // logExit emits the canonical log line for a handler exit path. It copies
@@ -203,9 +218,18 @@ func (p *Proxy) logPolicy(ctxReq *http.Request, scope, operation, rule, message 
 
 // sensitiveHeaders are headers that must never be captured, even if configured.
 var sensitiveHeaders = map[string]bool{
-	"authorization":       true,
-	"proxy-authorization": true,
-	"cookie":              true,
+	"authorization":        true,
+	"proxy-authorization":  true,
+	"www-authenticate":     true,
+	"proxy-authenticate":   true,
+	"cookie":               true,
+	"set-cookie":           true,
+	"api-key":              true,
+	"x-api-key":            true,
+	"x-auth-token":         true,
+	"x-access-token":       true,
+	"x-goog-api-key":       true,
+	"x-amz-security-token": true,
 }
 
 // ValidateCaptureRequestHeaders checks a request-header capture list.

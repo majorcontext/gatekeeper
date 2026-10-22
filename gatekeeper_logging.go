@@ -86,14 +86,14 @@ func (s *Server) installRequestLogger() {
 			headers      http.Header
 		}{
 			{name: "request", prefix: "http.request.header.", headers: data.RequestHeaders},
-			{name: "response", prefix: "http.response.header.", headers: data.ResponseHeaders},
+			{name: "response", prefix: "http.response.header.", headers: data.CapturedResponseHeaders},
 		} {
 			configured := s.cfg.Log.CaptureRequestHeaders
 			if capture.name == "response" {
 				configured = s.cfg.Log.CaptureResponseHeaders
 			}
 			for _, header := range configured {
-				values := capture.headers.Values(header)
+				values := slices.Clone(capture.headers.Values(header))
 				for i := range values {
 					values[i] = proxy.SanitizeLogValue(values[i])
 				}

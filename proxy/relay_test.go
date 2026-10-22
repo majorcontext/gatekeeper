@@ -283,6 +283,11 @@ func TestRelay_CopiesResponseHeaders(t *testing.T) {
 	if err := p.AddRelay("anthropic", backend.URL); err != nil {
 		t.Fatalf("AddRelay: %v", err)
 	}
+	if err := p.SetCaptureResponseHeaders([]string{"X-Custom-Header"}); err != nil {
+		t.Fatal(err)
+	}
+	var logged RequestLogData
+	p.SetLogger(func(data RequestLogData) { logged = data })
 
 	req := httptest.NewRequest("POST", "/relay/anthropic/v1/messages", nil)
 	rec := httptest.NewRecorder()
@@ -293,6 +298,9 @@ func TestRelay_CopiesResponseHeaders(t *testing.T) {
 	}
 	if rec.Header().Get("X-Custom-Header") != "test-value" {
 		t.Errorf("X-Custom-Header = %q, want %q", rec.Header().Get("X-Custom-Header"), "test-value")
+	}
+	if got := logged.CapturedResponseHeaders.Get("X-Custom-Header"); got != "test-value" {
+		t.Errorf("captured X-Custom-Header = %q, want test-value", got)
 	}
 }
 

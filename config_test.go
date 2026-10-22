@@ -330,7 +330,18 @@ func TestValidateCaptureResponseHeaders(t *testing.T) {
 		want    string
 	}{
 		{name: "limit", headers: tooMany, want: "max 10"},
-		{name: "sensitive", headers: []string{"Authorization"}, want: "sensitive"},
+		{name: "sensitive authorization", headers: []string{"Authorization"}, want: "sensitive"},
+		{name: "sensitive proxy authorization", headers: []string{"Proxy-Authorization"}, want: "sensitive"},
+		{name: "sensitive www authenticate", headers: []string{"WWW-Authenticate"}, want: "sensitive"},
+		{name: "sensitive proxy authenticate", headers: []string{"Proxy-Authenticate"}, want: "sensitive"},
+		{name: "sensitive cookie", headers: []string{"Cookie"}, want: "sensitive"},
+		{name: "sensitive set-cookie", headers: []string{"Set-Cookie"}, want: "sensitive"},
+		{name: "sensitive mixed-case API key", headers: []string{"X-aPi-KeY"}, want: "sensitive"},
+		{name: "sensitive API key", headers: []string{"api-key"}, want: "sensitive"},
+		{name: "sensitive auth token", headers: []string{"X-Auth-Token"}, want: "sensitive"},
+		{name: "sensitive access token", headers: []string{"X-Access-Token"}, want: "sensitive"},
+		{name: "sensitive Google API key", headers: []string{"X-Goog-Api-Key"}, want: "sensitive"},
+		{name: "sensitive AWS security token", headers: []string{"X-Amz-Security-Token"}, want: "sensitive"},
 		{name: "case insensitive duplicate", headers: []string{"X-Trace", "x-trace"}, want: "duplicate"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -357,7 +368,7 @@ func TestValidateCaptureRequestHeaders_MaxExceeded(t *testing.T) {
 }
 
 func TestValidateCaptureRequestHeaders_SensitiveRejected(t *testing.T) {
-	tests := []string{"Authorization", "proxy-authorization", "Cookie"}
+	tests := []string{"Authorization", "proxy-authorization", "Cookie", "Set-Cookie", "Proxy-Authenticate", "WWW-Authenticate", "X-Api-Key", "api-key", "X-Auth-Token", "X-Access-Token", "X-Goog-Api-Key", "X-Amz-Security-Token"}
 	for _, h := range tests {
 		t.Run(h, func(t *testing.T) {
 			err := proxy.ValidateCaptureRequestHeaders([]string{h})
@@ -679,7 +690,9 @@ func TestYAMLAndLibraryMatchedCredentialsForwardEquivalentHeaders(t *testing.T) 
 		RemoveHeaders: []string{"x-client"},
 	}
 	direct := proxy.NewProxy()
-	direct.SetCredentialEntry(credential)
+	if err := direct.SetCredentialEntry(credential); err != nil {
+		t.Fatal(err)
+	}
 	run := func(handler http.Handler) http.Header {
 		req := httptest.NewRequest("POST", "http://"+net.JoinHostPort(host, port)+"/v1/messages", nil)
 		req.Header.Set("x-api-key", "placeholder")
@@ -761,6 +774,17 @@ func TestConfig_MatchValidation(t *testing.T) {
 	staticMatched.Match = &MatchConfig{Header: "x-api-key"}
 	postgresMatched := staticMatched
 	postgresMatched.Postgres = &PostgresCredentialConfig{Resolver: "static"}
+	invalidSetHeader := static
+	invalidSetHeader.SetHeaders = map[string]string{"X Bad": "value"}
+	invalidSetValue := static
+	invalidSetValue.SetHeaders = map[string]string{"X-Trace": "bad\r\nvalue"}
+	invalidRemoveHeader := static
+	invalidRemoveHeader.RemoveHeaders = []string{"X Bad"}
+	duplicateSetHeaders := static
+	duplicateSetHeaders.SetHeaders = map[string]string{"X-Api-Key": "one", "x-api-key": "two"}
+	postgresTransform := static
+	postgresTransform.Postgres = &PostgresCredentialConfig{Resolver: "static"}
+	postgresTransform.SetHeaders = map[string]string{"X-Trace": "value"}
 	tests := []struct {
 		name    string
 		creds   []CredentialConfig
@@ -768,13 +792,18 @@ func TestConfig_MatchValidation(t *testing.T) {
 	}{
 		{"match on a static source", []CredentialConfig{staticMatched}, ""},
 		{"match on a Postgres credential", []CredentialConfig{postgresMatched}, "postgres"},
+		{"invalid set header name", []CredentialConfig{invalidSetHeader}, "set_headers"},
+		{"invalid set header value", []CredentialConfig{invalidSetValue}, "set_headers"},
+		{"invalid remove header name", []CredentialConfig{invalidRemoveHeader}, "remove_headers"},
+		{"case-insensitive set header duplicate", []CredentialConfig{duplicateSetHeaders}, "duplicate"},
+		{"transforms on a Postgres credential", []CredentialConfig{postgresTransform}, "postgres"},
 		{"empty match header", []CredentialConfig{te("g1", &MatchConfig{Paths: []string{"/v1/"}})}, "header"},
 		{"header with a space", []CredentialConfig{te("g1", &MatchConfig{Header: "X Tenant"})}, "header"},
 		{"header with a colon", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api:key"})}, "header"},
 		{"path without a leading slash", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key", Paths: []string{"v1/"}})}, "path"},
 		{"lower-case method", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key", Methods: []string{"get"}})}, "method"},
 		{"unmatched rule beside a matched one", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key"}), te("g2", nil)}, ""},
-		{"selector equals another rule's subject header", []CredentialConfig{te("g1", &MatchConfig{Header: "x-subject"}), te("g2", &MatchConfig{Header: "x-api-key"})}, ""},
+		{"selector equals another rule's subject header", []CredentialConfig{te("g1", &MatchConfig{Header: "x-subject"}), te("g2", &MatchConfig{Header: "x-api-key"})}, "subject header"},
 		{"identical match blocks", []CredentialConfig{te("g1", &MatchConfig{Header: "x-api-key", Methods: []string{"GET"}}), te("g2", &MatchConfig{Header: "x-api-key", Methods: []string{"GET"}})}, "identical"},
 		{"covered match", []CredentialConfig{
 			te("early", &MatchConfig{Header: "x-api-key", Paths: []string{"/v1/", "/v2/"}, Methods: []string{"GET", "POST"}}),

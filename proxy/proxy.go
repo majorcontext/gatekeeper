@@ -108,31 +108,33 @@ const maxPolicyBodySize = 10 << 20
 // RequestLogData contains all data for a logged request.
 // Designed for canonical log lines: one wide structured entry per request.
 type RequestLogData struct {
-	RequestID        string // Unique request identifier (from X-Request-Id or generated)
-	Method           string
-	URL              string
-	Host             string // Target hostname (extracted from URL or CONNECT)
-	Path             string // Request path (empty for CONNECT tunnel-level logs)
-	RequestType      string // "http", "connect", "mcp", "relay", "postgres"
-	StatusCode       int
-	Duration         time.Duration
-	Err              error
-	RequestHeaders   http.Header
-	ResponseHeaders  http.Header
-	RequestBody      []byte
-	ResponseBody     []byte
-	RequestSize      int64           // Content-Length of the request body, -1 if unknown. Always -1 for postgres connections (see RequestMessages).
-	ResponseSize     int64           // For the streaming relay/MCP paths, the actual bytes delivered to the client; for other paths, the response Content-Length (-1 if unknown). Always -1 for postgres connections (see ResponseMessages).
-	RequestMessages  int64           // Postgres protocol messages relayed client→upstream; 0 for non-postgres connections.
-	ResponseMessages int64           // Postgres protocol messages relayed upstream→client; 0 for non-postgres connections.
-	AuthInjected     bool            // True if any credential header was injected for this host
-	InjectedHeaders  map[string]bool // Lower-cased header names that were injected
-	Grants           []string        // Credential grant names that were injected
-	Denied           bool            // True if request was denied by network/keep policy
-	DenyReason       string          // Why the request was denied (e.g., "network_policy", "keep_policy")
-	RunID            string          // Run ID from per-run context (daemon mode)
-	UserID           string          // User ID from proxy auth username. For postgres connections this carries the Postgres role, not the proxy auth user.
-	Ctx              context.Context // Request context (for OTel span extraction, may be nil)
+	RequestID       string // Unique request identifier (from X-Request-Id or generated)
+	Method          string
+	URL             string
+	Host            string // Target hostname (extracted from URL or CONNECT)
+	Path            string // Request path (empty for CONNECT tunnel-level logs)
+	RequestType     string // "http", "connect", "mcp", "relay", "postgres"
+	StatusCode      int
+	Duration        time.Duration
+	Err             error
+	RequestHeaders  http.Header
+	ResponseHeaders http.Header
+	// CapturedResponseHeaders contains configured response headers for logs.
+	CapturedResponseHeaders http.Header
+	RequestBody             []byte
+	ResponseBody            []byte
+	RequestSize             int64           // Content-Length of the request body, -1 if unknown. Always -1 for postgres connections (see RequestMessages).
+	ResponseSize            int64           // For the streaming relay/MCP paths, the actual bytes delivered to the client; for other paths, the response Content-Length (-1 if unknown). Always -1 for postgres connections (see ResponseMessages).
+	RequestMessages         int64           // Postgres protocol messages relayed client→upstream; 0 for non-postgres connections.
+	ResponseMessages        int64           // Postgres protocol messages relayed upstream→client; 0 for non-postgres connections.
+	AuthInjected            bool            // True if any credential header was injected for this host
+	InjectedHeaders         map[string]bool // Lower-cased header names that were injected
+	Grants                  []string        // Credential grant names that were injected
+	Denied                  bool            // True if request was denied by network/keep policy
+	DenyReason              string          // Why the request was denied (e.g., "network_policy", "keep_policy")
+	RunID                   string          // Run ID from per-run context (daemon mode)
+	UserID                  string          // User ID from proxy auth username. For postgres connections this carries the Postgres role, not the proxy auth user.
+	Ctx                     context.Context // Request context (for OTel span extraction, may be nil)
 
 	// ClientAddr is the client's network address ("ip:port") as seen by the
 	// listener. For intercepted CONNECT traffic it is the address of the
@@ -286,6 +288,7 @@ func MatchesHostPattern(pattern HostPattern, host string, port int) bool {
 type RunContextData struct {
 	RunID                string
 	Credentials          map[string][]CredentialHeader
+	CredentialBundles    []CredentialBundle
 	credentialBundles    []credentialBundle
 	ExtraHeaders         map[string][]ExtraHeader
 	RemoveHeaders        map[string][]string

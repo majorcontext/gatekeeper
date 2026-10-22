@@ -591,7 +591,7 @@ log:
 - **Required:** No
 - **Default:** `[]`
 
-Gatekeeper logs configured request values under `http.request.header.<lowercase-name>` and as OpenTelemetry string-array attributes. It strips the headers before forwarding. Values are sanitized and limited to 256 bytes. Configure at most 10 unique headers. Gatekeeper rejects `Authorization`, `Proxy-Authorization`, and `Cookie`.
+Gatekeeper logs configured request values under `http.request.header.<lowercase-name>` and as OpenTelemetry string-array attributes. It strips the headers before forwarding. Values are sanitized and limited to 256 bytes. Configure at most 10 unique headers. Gatekeeper rejects `Authorization`, `Proxy-Authorization`, `WWW-Authenticate`, `Proxy-Authenticate`, `Cookie`, `Set-Cookie`, and API-key or token headers such as `X-Api-Key`, `X-Auth-Token`, `X-Access-Token`, `X-Goog-Api-Key`, and `X-Amz-Security-Token`.
 
 This replaces `log.capture_headers`. The old key is not accepted.
 
@@ -608,4 +608,4 @@ log:
 - **Required:** No
 - **Default:** `[]`
 
-Gatekeeper logs configured response values under `http.response.header.<lowercase-name>` and as OpenTelemetry string-array attributes. Values are sanitized and limited to 256 bytes. Configure at most 10 unique headers. Gatekeeper rejects `Authorization`, `Proxy-Authorization`, and `Cookie`.
+Gatekeeper logs configured response values under `http.response.header.<lowercase-name>` and as OpenTelemetry string-array attributes. Values are sanitized and limited to 256 bytes. Configure at most 10 unique headers. Gatekeeper rejects `Authorization`, `Proxy-Authorization`, `WWW-Authenticate`, `Proxy-Authenticate`, `Cookie`, `Set-Cookie`, and API-key or token headers such as `X-Api-Key`, `X-Auth-Token`, `X-Access-Token`, `X-Goog-Api-Key`, and `X-Amz-Security-Token`.

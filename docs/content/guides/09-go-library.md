@@ -98,7 +98,7 @@ _ = p.CloseConnections(ctx)
 `proxy.Credential` is the shared model for YAML, static registration, resolver registration, and `RunContextData.Credentials`. `proxy.CredentialHeader` is an alias for the same type. A credential can select and transform a request:
 
 ```go
-p.SetCredentialEntry(proxy.Credential{
+if err := p.SetCredentialEntry(proxy.Credential{
 	Host: "api.anthropic.com",
 	Header: "Authorization",
 	Value: "Bearer test-token",
@@ -106,7 +106,9 @@ p.SetCredentialEntry(proxy.Credential{
 	Match: &proxy.RequestMatch{Header: "x-api-key", Paths: []string{"/v1/messages"}, Methods: []string{"POST"}},
 	SetHeaders: map[string]string{"anthropic-beta": "oauth-2025-04-20"},
 	RemoveHeaders: []string{"x-api-key"},
-})
+}); err != nil {
+	log.Fatal(err)
+}
 ```
 
 Use `SetCredentialResolverEntry` for a per-request resolver. Set its callback on `Credential.Resolver` before registration. The first matching credential wins in registration order. `SetMatchedCredentialResolver` remains available with its existing resolver-ranking behavior.
@@ -145,6 +147,27 @@ p.SetContextResolver(func(token string) (*proxy.RunContextData, bool) {
 ```
 
 Each caller authenticates via `Proxy-Authorization` (or the username/password in `HTTP_PROXY`). The resolver returns per-caller credentials, network policy, and MCP server configuration.
+
+## Atomic credential bundles
+
+Use `CredentialBundle` when one credential spans multiple headers. The proxy checks the bundle scope and all required placeholders before it replaces any header.
+
+```go
+runCtx := &proxy.RunContextData{
+	CredentialBundles: []proxy.CredentialBundle{{
+	ID: "codex-subscription",
+	Grant: "codex",
+	RequireAll: true,
+	Scope: proxy.CredentialScope{RequireTLS: true, Origins: []string{"https://chatgpt.com"}, Methods: []string{"POST"}, PathPrefixes: []string{"/backend-api/codex"}},
+	Replacements: []proxy.HeaderReplacement{
+		{Name: "Authorization", Placeholder: "Bearer fake", Value: "Bearer test-token"},
+		{Name: "ChatGPT-Account-ID", Placeholder: "fake-account", Value: "test-account"},
+	},
+}}
+}
+```
+
+`RunContextData.CredentialBundles` accepts these values. The bundle scope limits the origin, methods, and paths that receive replacements.
 
 ## How Moat uses Gatekeeper
 

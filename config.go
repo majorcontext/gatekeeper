@@ -6,12 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/majorcontext/gatekeeper/proxy"
-	"golang.org/x/net/http/httpguts"
 	"gopkg.in/yaml.v3"
 )
 
@@ -176,7 +174,7 @@ func (c *Config) validate() error {
 func (c *Config) validateCredentialMatches() error {
 	rules := map[string][]CredentialConfig{}
 	for _, cred := range c.Credentials {
-		if err := validateCredentialMatch(cred); err != nil {
+		if err := cred.ValidateRequestPolicy(); err != nil {
 			return err
 		}
 		for _, prev := range rules[cred.Host] {
@@ -189,6 +187,12 @@ func (c *Config) validateCredentialMatches() error {
 				}
 				if matchCovers(*prev.Match, *cred.Match) {
 					return fmt.Errorf("credentials: host %q grant %q has a match covered by earlier grant %q", cred.Host, cred.Grant, prev.Grant)
+				}
+				for _, pair := range [][2]CredentialConfig{{prev, cred}, {cred, prev}} {
+					selected, other := pair[0], pair[1]
+					if selected.Match != nil && other.Source.Type == "token-exchange" && other.Source.SubjectHeader != "" && strings.EqualFold(selected.Match.Header, other.Source.SubjectHeader) {
+						return fmt.Errorf("credentials: host %q grant %q: match.header %q is the subject header of grant %q", cred.Host, selected.Grant, selected.Match.Header, other.Grant)
+					}
 				}
 			}
 		}
@@ -223,35 +227,6 @@ func matchCovers(earlier, later MatchConfig) bool {
 	}
 	return true
 }
-
-func validateCredentialMatch(c CredentialConfig) error {
-	m := c.Match
-	if m == nil {
-		return nil
-	}
-	if c.Postgres != nil {
-		return fmt.Errorf("credentials: host %q grant %q: match is not valid for postgres credentials", c.Host, c.Grant)
-	}
-	if m.Header == "" {
-		return fmt.Errorf("credentials: host %q grant %q: match.header is required", c.Host, c.Grant)
-	}
-	if !httpguts.ValidHeaderFieldName(m.Header) {
-		return fmt.Errorf("credentials: host %q grant %q: match.header %q is not a valid HTTP header name", c.Host, c.Grant, m.Header)
-	}
-	for _, p := range m.Paths {
-		if !strings.HasPrefix(p, "/") {
-			return fmt.Errorf("credentials: host %q grant %q: match.paths entry %q must start with \"/\"", c.Host, c.Grant, p)
-		}
-	}
-	for _, method := range m.Methods {
-		if !upperMethod.MatchString(method) {
-			return fmt.Errorf("credentials: host %q grant %q: match.methods entry %q must be upper-case letters", c.Host, c.Grant, method)
-		}
-	}
-	return nil
-}
-
-var upperMethod = regexp.MustCompile(`^[A-Z]+$`)
 
 func (n NetworkConfig) validate() error {
 	switch n.Policy {

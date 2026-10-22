@@ -334,7 +334,7 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 			header = "Authorization"
 		}
 
-		if err := validateCredentialMatch(cred); err != nil {
+		if err := cred.ValidateRequestPolicy(); err != nil {
 			return err
 		}
 
@@ -357,7 +357,9 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 			}
 			policy := credentialHeader(cred, header, "")
 			policy.Resolver = resolver
-			s.proxy.SetCredentialResolverEntry(policy, tokenExchangeStripHeaders(cred)...)
+			if err := s.proxy.SetCredentialResolverEntry(policy, tokenExchangeStripHeaders(cred)...); err != nil {
+				return fmt.Errorf("credential for %s: %w", cred.Host, err)
+			}
 			continue
 		}
 
@@ -424,7 +426,9 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 		if e.resolver != nil {
 			policy := credentialHeader(e.cred, e.header, "")
 			policy.Resolver = e.resolver
-			s.proxy.SetCredentialResolverEntry(policy, e.stripHeaders...)
+			if err := s.proxy.SetCredentialResolverEntry(policy, e.stripHeaders...); err != nil {
+				return fmt.Errorf("credential for %s: %w", e.cred.Host, err)
+			}
 			continue
 		}
 
@@ -436,7 +440,9 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 		if strings.EqualFold(e.header, "Authorization") {
 			val = ensureAuthScheme(val, e.cred.Prefix, e.cred.Format)
 		}
-		s.setCredential(e.cred, e.header, val)
+		if err := s.setCredential(e.cred, e.header, val); err != nil {
+			return fmt.Errorf("credential for %s: %w", e.cred.Host, err)
+		}
 
 		if rs, ok := e.source.src.(credentialsource.RefreshingSource); ok {
 			if pr, ok := refreshMap[e.source]; ok {
@@ -593,7 +599,10 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 				if strings.EqualFold(header, "Authorization") {
 					val = ensureAuthScheme(val, cred.Prefix, cred.Format)
 				}
-				s.setCredential(cred, header, val)
+				if err := s.setCredential(cred, header, val); err != nil {
+					s.log().Warn("credential refresh produced invalid policy", "host", cred.Host, "grant", cred.Grant, "error", err)
+					continue
+				}
 				s.log().Debug("credential refreshed",
 					"host", cred.Host,
 					"grant", cred.Grant,
@@ -603,8 +612,8 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 	}()
 }
 
-func (s *Server) setCredential(cred CredentialConfig, header, val string) {
-	s.proxy.SetCredentialEntry(credentialHeader(cred, header, val))
+func (s *Server) setCredential(cred CredentialConfig, header, val string) error {
+	return s.proxy.SetCredentialEntry(credentialHeader(cred, header, val))
 }
 
 func credentialHeader(cred CredentialConfig, header, value string) proxy.CredentialHeader {
