@@ -34,6 +34,9 @@ proxy/              Core TLS-intercepting proxy engine
   gateway.go          Host gateway rewriting, per-request policy lookups, /_aws/ and MCP relay routes
   httppolicy.go       Content-type checks, Keep HTTP policy call, duplicate JSON key detection
   logging.go          Request/policy logging, body capture, header filtering and sanitizing
+  exchange.go         Model-exchange log: host allowlist, body tees, queue, GenAI event
+  exchange_genai.go   Path classification and response summary (id, ending, usage)
+  exchange_ws.go      Model-exchange tap for WebSocket calls
   ca.go              CA certificate loading and per-host cert generation (LRU-bounded cache)
   conntrack.go       Hijacked CONNECT/intercepted connection set, closed on shutdown
   branding.go        Client-visible wording of blocked responses and errors (neutral defaults, embedder override)

@@ -170,6 +170,8 @@ type interceptPreInjHeadersKey struct{}
 
 type interceptReqBodyKey struct{}
 
+type interceptExchangeKey struct{}
+
 func reqStartFromContext(ctx context.Context) time.Time {
 	if t, ok := ctx.Value(interceptReqStartKey{}).(time.Time); ok {
 		return t

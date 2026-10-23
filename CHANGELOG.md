@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.34.0 — 2026-10-23
+
+### Added
+
+- **Model exchange log** (`proxy/exchange*.go`, `config.go`) — `log.model_exchange` (library: `Proxy.SetExchangeLog(logger, hosts)`) logs each OpenAI Responses and Anthropic Messages request to the listed hosts as the OpenTelemetry GenAI event `gen_ai.client.inference.operation.details`, with the raw request and response bodies, the response ID and ending, the `Session_id` header as the conversation ID, and the trace of the request's `traceparent`. It covers CONNECT interception (a WebSocket call is one event), plain HTTP, and `/relay/`. It is off by default and writes no header. Injected credential values are replaced with `[REDACTED]` in the response, the error, and the path.
+
 ## v0.33.3 — 2026-10-22
 
 ### Fixed

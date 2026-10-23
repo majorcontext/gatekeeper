@@ -70,6 +70,42 @@ Gatekeeper emits one wide structured log entry per request at completion. Each l
 
 Log level is determined by outcome: `ERROR` for server errors or transport failures, `WARN` for policy denials or client errors, `INFO` for successful requests.
 
+## Model exchange log
+
+`log.model_exchange` logs each inference request to a listed host as one OpenTelemetry GenAI event, `gen_ai.client.inference.operation.details` (conventions status Development). It is off by default. Only OpenAI Responses (`.../responses`) and Anthropic Messages (`.../v1/messages`) requests are logged, on the CONNECT interception, plain HTTP, and `/relay/` paths. On a WebSocket upgrade, each call (a client message and the server events up to its terminal event) is one event.
+
+The metadata uses `gen_ai.*` names. The bodies are the raw wire bytes under `gatekeeper.*` keys, not the normalized `gen_ai.input.messages` and `gen_ai.output.messages`: gatekeeper sees provider JSON and logs it exactly.
+
+| Field | Source |
+|---|---|
+| `gen_ai.operation.name` | `chat` |
+| `gen_ai.provider.name` | `openai` or `anthropic`, from the path |
+| `gen_ai.request.model` | `model` of the request body |
+| `gen_ai.response.id` | the response object; set on every event, including each WebSocket call |
+| `gen_ai.response.finish_reasons` | the incomplete reason, the Anthropic `stop_reason`, `stop` for a completed call, or `error` for a failure or HTTP 400 and up |
+| `gen_ai.conversation.id` | the `Session_id` request header; absent when the request has none |
+| `server.address`, `url.path`, `http.request.method`, `http.response.status_code`, `error.type` | the request and response |
+| `span.trace_id`, `span.span_id` | the `traceparent` and `tracestate` of the request; the event joins that trace |
+| `gatekeeper.exchange.id` | the `X-Request-Id`, which is `request_id` of the canonical log line |
+| `gatekeeper.request.body`, `gatekeeper.response.body` | the bodies |
+| `gatekeeper.usage` | the raw usage JSON of the response; a stream gives the first and the last usage |
+| `gatekeeper.terminal.type` | type of the terminal event |
+| `gatekeeper.ttfb_ms`, `gatekeeper.duration_ms` | request start to response headers, and to body close |
+| `gatekeeper.transport`, `gatekeeper.conn_id`, `gatekeeper.msg_seq` | WebSocket calls |
+| `gatekeeper.user_id` | the proxy-auth user |
+| `gatekeeper.request.truncated`, `gatekeeper.response.truncated` | a body held back at the 32 MiB capture limit |
+| `gatekeeper.error` | transport or body-read error |
+
+A body over 16 KiB is split into `gatekeeper.exchange.body` events with `gatekeeper.exchange.id`, `gatekeeper.exchange.part`, `gatekeeper.exchange.chunk_index` from 1, and `gatekeeper.exchange.chunk_count`; the main event then has no body, and `gatekeeper.request.parts` or `gatekeeper.response.parts` gives the count. Join the chunks in `chunk_index` order.
+
+### Credentials
+
+Gatekeeper logs no request or response header. The request body is copied from the client before credential injection and token substitution. Gatekeeper replaces each injected credential value with `[REDACTED]` in the response body, the error, and the path. A client or tool that puts a secret in a body, or an upstream that returns one in another spelling, is not redacted.
+
+### Cost
+
+The proxy copies the bytes it forwards and forwards them without delay. One goroutine writes the events. A full queue (256 exchanges) or 256 MiB of held bodies skips the exchange and increments `proxy.exchange_log.dropped`. With the log off, a request costs one nil check.
+
 ## Client IP attribution behind a load balancer
 
 By default, `client_ip` comes from the raw TCP peer address of the accepted connection. That's accurate for a directly-exposed listener, but not for one that sits behind a TCP-terminating load balancer (e.g. GCP's global TCP Proxy load balancer) — every connection appears to originate from the load balancer's own front-end range (`35.191.0.0/16` for GCP), not the real client.

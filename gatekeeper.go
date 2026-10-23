@@ -213,6 +213,11 @@ func (s *Server) configurePolicy(cfg *Config) error {
 			return fmt.Errorf("network: %w", err)
 		}
 	}
+	if cfg.Log.ModelExchange.Enabled {
+		if err := s.proxy.SetExchangeLog(s.log(), cfg.Log.ModelExchange.Hosts); err != nil {
+			return fmt.Errorf("log.model_exchange: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -881,6 +886,7 @@ func (s *Server) Start(ctx context.Context) error {
 func (s *Server) Stop(ctx context.Context) error {
 	if s.proxy != nil {
 		defer s.proxy.CloseIdleConnections()
+		defer s.proxy.CloseExchangeLog(ctx)
 	}
 	s.mu.Lock()
 	s.stopping = true
