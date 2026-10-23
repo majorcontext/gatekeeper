@@ -234,6 +234,12 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				path:       pr.Out.URL.Path,
 			})
 
+			if p.exchangeLog != nil {
+				if ex, _ := pr.Out.Context().Value(interceptExchangeKey{}).(*exchange); ex != nil {
+					ex.noteOutbound(pr.Out, credResult, p.getTokenSubstitutionForRequest(r, r.Host))
+				}
+			}
+
 			// Store credential result and pre-injection headers in context.
 			ctx := pr.Out.Context()
 			if rc := getRunContext(r); rc != nil {
@@ -320,6 +326,12 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 				ClientAddr:      r.RemoteAddr,
 			}
 			reqStart := reqStartFromContext(req.Context())
+			if p.exchangeLog != nil {
+				defer func() {
+					ex, _ := req.Context().Value(interceptExchangeKey{}).(*exchange)
+					ex.wrapResponse(resp)
+				}()
+			}
 
 			// For text responses (SSE, ndjson, chunked JSON, …) defer the canonical
 			// log line until the body is read and closed, capturing a bounded sample
@@ -348,6 +360,10 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		},
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
 			rw.WriteHeader(http.StatusBadGateway)
+			if p.exchangeLog != nil {
+				ex, _ := req.Context().Value(interceptExchangeKey{}).(*exchange)
+				ex.fail(err, http.StatusBadGateway)
+			}
 			credResult, _ := req.Context().Value(interceptCredResultKey{}).(credentialInjectionResult)
 			logURL, _ := req.Context().Value(interceptLogURLKey{}).(string)
 			if logURL == "" {
@@ -551,6 +567,13 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		// Propagate request ID so Rewrite preserves it (instead of generating a new one).
 		req.Header.Set("X-Request-Id", innerReqID)
 
+		ex := p.beginExchange(r, req, r.Host, req.URL.Path, reqStart)
+		if ex != nil {
+			ex.upgrades = true
+			ex.wrapRequest(req)
+			defer ex.finish()
+		}
+
 		// Pass resolved credentials, start time, and captured body to Rewrite via context.
 		ctx := req.Context()
 		ctx = context.WithValue(ctx, interceptReqStartKey{}, reqStart)
@@ -558,6 +581,9 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		ctx = context.WithValue(ctx, interceptBundleResultKey{}, bundleResult.credentialInjectionResult)
 		ctx = context.WithValue(ctx, interceptPreInjHeadersKey{}, preBundleHeaders)
 		ctx = context.WithValue(ctx, interceptReqBodyKey{}, reqBody)
+		if ex != nil {
+			ctx = context.WithValue(ctx, interceptExchangeKey{}, ex)
+		}
 		reverseProxy.ServeHTTP(w, req.WithContext(ctx))
 	})
 
