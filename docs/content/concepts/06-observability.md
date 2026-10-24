@@ -100,7 +100,7 @@ A body over 16 KiB is split into `gatekeeper.exchange.body` events with `gatekee
 
 ### Credentials
 
-Gatekeeper logs no request or response header. The request body is copied from the client before credential injection and token substitution. Gatekeeper replaces each injected credential value with `[REDACTED]` in the response body, the error, and the path. A client or tool that puts a secret in a body, or an upstream that returns one in another spelling, is not redacted.
+Gatekeeper logs no request or response header. The request body is copied from the client before credential injection and token substitution. Gatekeeper replaces each injected credential value with `[REDACTED]` in the response body, the error, and the path. When an injected value is under 8 bytes, gatekeeper cannot redact it safely and replaces the response body, the error, and the path with a placeholder. When a body is cut at the capture limit, gatekeeper also drops the last bytes the longest injected value could span. A client or tool that puts a secret in a body, or an upstream that returns one in another spelling, is not redacted.
 
 ### Cost
 

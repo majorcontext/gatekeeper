@@ -375,6 +375,14 @@ func (l *exchangeLog) emit(ex *exchange) {
 	reqText, reqCut := decodeBody(reqEnc, reqBytes)
 	respText, respCut := decodeBody(respEnc, respBytes)
 	respText = scrub(respText)
+	if respTrunc || respCut {
+		// a cut can leave a prefix of a secret, which scrub cannot match
+		longest := 0
+		for _, sec := range secrets {
+			longest = max(longest, len(sec))
+		}
+		respText = respText[:max(len(respText)-longest+1, 0)]
+	}
 	if withhold {
 		respCut = false
 	}
