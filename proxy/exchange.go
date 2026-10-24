@@ -122,6 +122,7 @@ type capBuf struct {
 	buf       bytes.Buffer
 	total     int64
 	truncated bool
+	cut       bool // a WebSocket message lost its tail; later messages still log
 }
 
 // exchange is the state of one request until its response body closes.
@@ -366,6 +367,7 @@ func (l *exchangeLog) emit(ex *exchange) {
 		reqBytes, respBytes = ex.req.buf.Bytes(), ex.resp.buf.Bytes()
 		reqTrunc, respTrunc = ex.req.truncated, ex.resp.truncated
 		reqEnc, respEnc     = ex.reqEnc, ex.respEnc
+		respMsgCut          = ex.resp.cut
 	)
 	ex.mu.Unlock() // the log handler may stall; a finishing request must not wait for it
 	withhold := slices.ContainsFunc(secrets, func(sec string) bool { return len(sec) < exchangeMinSecretLen })
@@ -432,7 +434,7 @@ func (l *exchangeLog) emit(ex *exchange) {
 	if reqTrunc || reqCut {
 		a = append(a, slog.Bool("gatekeeper.request.truncated", true))
 	}
-	if respTrunc || respCut {
+	if respTrunc || respCut || respMsgCut {
 		a = append(a, slog.Bool("gatekeeper.response.truncated", true))
 	}
 	reqBody, reqChunks := chunkBody(reqText)

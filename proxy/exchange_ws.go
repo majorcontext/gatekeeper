@@ -100,7 +100,7 @@ func (t *wsTap) feed(fromClient bool, b []byte) {
 		}
 		if truncated {
 			msg = []byte(dropSecretTail(string(msg), ex.secrets))
-			ex.resp.truncated = true
+			ex.resp.cut = true
 		}
 		ex.write(&ex.resp, msg)
 		ex.write(&ex.resp, []byte("\n"))

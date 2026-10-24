@@ -571,3 +571,20 @@ type cancelOnWrite struct {
 }
 
 func (c cancelOnWrite) Write(b []byte) (int, error) { c.cancel(); return 0, io.ErrClosedPipe }
+
+func TestExchangeLog_CutWebSocketMessageKeepsTheTerminalEvent(t *testing.T) {
+	p, h := newExchangeProxy(t, "127.0.0.1")
+	req := httptest.NewRequest("GET", "http://127.0.0.1/v1/responses", nil)
+	ex := p.beginExchange(req, req, "127.0.0.1:80", "/v1/responses", time.Now())
+	ex.secrets = []string{"sk-injected-secret-value"}
+	tap := &wsTap{base: ex, client: wsParser{log: p.exchangeLog}, server: wsParser{log: p.exchangeLog}}
+	p.exchangeLog.held.Store(exchangeBudget - 250)
+	tap.feed(true, wsFrame(1, []byte(`{"type":"response.create"}`), false, true))
+	delta := `{"type":"response.output_text.delta","delta":"` + strings.Repeat("x", 250) + `sk-injected-secret-value"}`
+	tap.feed(false, wsFrame(1, []byte(delta), false, true))
+	tap.feed(false, wsFrame(1, []byte(`{"type":"response.completed","response":{"id":"resp_9"}}`), false, true))
+	ev := h.wait(t, 1)[0]
+	if b := fmt.Sprint(ev["gatekeeper.response.body"]); strings.Contains(b, "sk-inject") || ev["gen_ai.response.id"] != "resp_9" || ev["gatekeeper.response.truncated"] != true {
+		t.Errorf("event = %v", ev)
+	}
+}
