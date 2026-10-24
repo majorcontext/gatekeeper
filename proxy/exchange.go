@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -360,13 +361,13 @@ func (l *exchangeLog) emit(ex *exchange) {
 		reqEnc, respEnc     = ex.reqEnc, ex.respEnc
 	)
 	ex.mu.Unlock() // the log handler may stall; a finishing request must not wait for it
-	withhold := false
+	withhold := slices.ContainsFunc(secrets, func(sec string) bool { return len(sec) < exchangeMinSecretLen })
+	const withheld = "[WITHHELD: injected value too short to redact]"
 	scrub := func(s string) string {
+		if withhold && s != "" {
+			return withheld
+		}
 		for _, sec := range secrets {
-			if len(sec) < exchangeMinSecretLen {
-				withhold = true
-				continue
-			}
 			s = strings.ReplaceAll(s, sec, "[REDACTED]")
 		}
 		return s
@@ -375,7 +376,7 @@ func (l *exchangeLog) emit(ex *exchange) {
 	respText, respCut := decodeBody(respEnc, respBytes)
 	respText = scrub(respText)
 	if withhold {
-		respText, respCut = "[WITHHELD: injected value too short to redact]", false
+		respCut = false
 	}
 	sum := summarize(respText)
 	failed := status >= 400 || errText != ""
