@@ -512,3 +512,20 @@ func TestExchangeLog_PortPinnedHostPattern(t *testing.T) {
 		})
 	}
 }
+
+func TestExchangeLog_CutBodyWithoutInjectedValuesLogsWhole(t *testing.T) {
+	p, h := newExchangeProxy(t, "127.0.0.1")
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Encoding", "br")
+		io.WriteString(w, openAIIncomplete)
+	}))
+	t.Cleanup(backend.Close)
+	if err := p.AddRelay("up", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(p)
+	t.Cleanup(srv.Close)
+	post(t, srv.URL+"/relay/up/responses", `{"model":"m"}`, nil)
+	h.wait(t, 1)
+}

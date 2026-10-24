@@ -374,15 +374,15 @@ func (l *exchangeLog) emit(ex *exchange) {
 	}
 	reqText, reqCut := decodeBody(reqEnc, reqBytes)
 	respText, respCut := decodeBody(respEnc, respBytes)
-	respText = scrub(respText)
-	if respTrunc || respCut {
+	if (respTrunc || respCut || errText != "") && !strings.HasPrefix(respText, "[gatekeeper: ") {
 		// a cut can leave a prefix of a secret, which scrub cannot match
 		longest := 0
 		for _, sec := range secrets {
 			longest = max(longest, len(sec))
 		}
-		respText = respText[:max(len(respText)-longest+1, 0)]
+		respText = respText[:max(len(respText)-max(longest-1, 0), 0)]
 	}
+	respText = scrub(respText)
 	if withhold {
 		respCut = false
 	}
