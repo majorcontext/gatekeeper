@@ -325,12 +325,14 @@ func (t *teeBody) Read(p []byte) (int, error) {
 func (t *teeBody) Close() error { return t.rc.Close() }
 
 type teeResponse struct {
-	rc io.ReadCloser
-	ex *exchange
+	rc  io.ReadCloser
+	ex  *exchange
+	eof bool
 }
 
 func (t *teeResponse) Read(p []byte) (int, error) {
 	n, err := t.rc.Read(p)
+	t.eof = t.eof || err == io.EOF
 	if n > 0 || (err != nil && err != io.EOF) {
 		t.ex.mu.Lock()
 		t.ex.write(&t.ex.resp, p[:n])
@@ -344,6 +346,11 @@ func (t *teeResponse) Read(p []byte) (int, error) {
 
 func (t *teeResponse) Close() error {
 	err := t.rc.Close()
+	if !t.eof {
+		t.ex.mu.Lock()
+		t.ex.resp.truncated = true
+		t.ex.mu.Unlock()
+	}
 	t.ex.finish()
 	return err
 }

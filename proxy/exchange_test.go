@@ -529,3 +529,18 @@ func TestExchangeLog_CutBodyWithoutInjectedValuesLogsWhole(t *testing.T) {
 	post(t, srv.URL+"/relay/up/responses", `{"model":"m"}`, nil)
 	h.wait(t, 1)
 }
+
+func TestExchangeLog_BodyClosedBeforeEOFDropsASecretPrefix(t *testing.T) {
+	p, h := newExchangeProxy(t, "127.0.0.1")
+	req := httptest.NewRequest("POST", "http://127.0.0.1/v1/messages", strings.NewReader(`{}`))
+	ex := p.beginExchange(req, req, "127.0.0.1:80", "/v1/messages", time.Now())
+	ex.secrets = []string{"sk-injected-secret-value"}
+	resp := &http.Response{StatusCode: 400, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"error":"bad key sk-injected-secret-value"}`))}
+	ex.wrapResponse(resp)
+	resp.Body.Read(make([]byte, 30))
+	resp.Body.Close()
+	ev := h.wait(t, 1)[0]
+	if b := fmt.Sprint(ev["gatekeeper.response.body"]); strings.Contains(b, "sk-injected") || ev["gatekeeper.response.truncated"] != true {
+		t.Errorf("body = %q, truncated = %v", b, ev["gatekeeper.response.truncated"])
+	}
+}
