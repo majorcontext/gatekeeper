@@ -72,7 +72,7 @@ Log level is determined by outcome: `ERROR` for server errors or transport failu
 
 ## Model exchange log
 
-`log.model_exchange` logs each inference request to a listed host as one OpenTelemetry GenAI event, `gen_ai.client.inference.operation.details` (conventions status Development). It is off by default. Only OpenAI Responses (`.../responses`) and Anthropic Messages (`.../v1/messages`) requests are logged, on the CONNECT interception, plain HTTP, and `/relay/` paths. On a WebSocket upgrade, each call (a client message and the server events up to its terminal event) is one event.
+`log.model_exchange` logs each inference request to a listed host as one OpenTelemetry GenAI event, `gen_ai.client.inference.operation.details` (conventions status Development). It is off by default. Only OpenAI Responses (`.../responses`) and Anthropic Messages (`.../v1/messages`) requests are logged, on the CONNECT interception, plain HTTP, and `/relay/` paths. On a WebSocket upgrade, each call (a client message and the server events up to its terminal event) is one event. A WebSocket that negotiates an extension (`Sec-WebSocket-Extensions`) is not logged.
 
 The metadata uses `gen_ai.*` names. The bodies are the raw wire bytes under `gatekeeper.*` keys, not the normalized `gen_ai.input.messages` and `gen_ai.output.messages`: gatekeeper sees provider JSON and logs it exactly.
 
@@ -93,7 +93,7 @@ The metadata uses `gen_ai.*` names. The bodies are the raw wire bytes under `gat
 | `gatekeeper.ttfb_ms`, `gatekeeper.duration_ms` | request start to response headers, and to body close |
 | `gatekeeper.transport`, `gatekeeper.conn_id`, `gatekeeper.msg_seq` | WebSocket calls |
 | `gatekeeper.user_id` | the proxy-auth user |
-| `gatekeeper.request.truncated`, `gatekeeper.response.truncated` | a body held back at the 32 MiB capture limit |
+| `gatekeeper.request.truncated`, `gatekeeper.response.truncated` | a cut body: held back at the 32 MiB capture limit, closed before its end, or not decodable |
 | `gatekeeper.error` | transport or body-read error |
 
 A body over 16 KiB is split into `gatekeeper.exchange.body` events with `gatekeeper.exchange.id`, `gatekeeper.exchange.part`, `gatekeeper.exchange.chunk_index` from 1, and `gatekeeper.exchange.chunk_count`; the main event then has no body, and `gatekeeper.request.parts` or `gatekeeper.response.parts` gives the count. Join the chunks in `chunk_index` order.

@@ -72,7 +72,7 @@ func newOTelInstruments(opts OTelOptions, scope otelScope) (*otelInstruments, er
 	if scope == scopeRecord {
 		in.credInjections = counter("proxy.credential.injections", "Total number of credential injections")
 		in.policyDenials = counter("proxy.policy.denials", "Total number of policy denials")
-		in.exchangeDrops = counter("proxy.exchange_log.dropped", "Model exchanges dropped because the log queue was full")
+		in.exchangeDrops = counter("proxy.exchange_log.dropped", "Model exchanges dropped because the log queue or the body budget was full")
 		return in, errors.Join(errs...)
 	}
 	h, err := meter.Float64Histogram("proxy.request.duration",
