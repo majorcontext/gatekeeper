@@ -582,9 +582,9 @@ func TestExchangeLog_CutWebSocketMessageKeepsTheTerminalEvent(t *testing.T) {
 	tap.feed(true, wsFrame(1, []byte(`{"type":"response.create"}`), false, true))
 	delta := `{"type":"response.output_text.delta","delta":"` + strings.Repeat("x", 250) + `sk-injected-secret-value"}`
 	tap.feed(false, wsFrame(1, []byte(delta), false, true))
-	tap.feed(false, wsFrame(1, []byte(`{"type":"response.completed","response":{"id":"resp_9"}}`), false, true))
+	tap.feed(false, wsFrame(1, []byte(`{"type":"response.completed","response":{"id":"resp_9","usage":{"output_tokens":7}}}`), false, true))
 	ev := h.wait(t, 1)[0]
-	if b := fmt.Sprint(ev["gatekeeper.response.body"]); strings.Contains(b, "sk-inject") || ev["gen_ai.response.id"] != "resp_9" || ev["gatekeeper.response.truncated"] != true {
+	if b := fmt.Sprint(ev["gatekeeper.response.body"]); strings.Contains(b, "sk-inject") || ev["gen_ai.response.id"] != "resp_9" || !strings.Contains(fmt.Sprint(ev["gatekeeper.usage"]), `"output_tokens":7`) || ev["gatekeeper.response.truncated"] != true {
 		t.Errorf("event = %v", ev)
 	}
 }
