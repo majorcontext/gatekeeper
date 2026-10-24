@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -33,6 +34,7 @@ type otelInstruments struct {
 	requestCount    metric.Int64Counter
 	credInjections  metric.Int64Counter
 	policyDenials   metric.Int64Counter
+	exchangeDrops   metric.Int64Counter
 }
 
 // otelScope selects which instruments newOTelInstruments creates.
@@ -70,6 +72,7 @@ func newOTelInstruments(opts OTelOptions, scope otelScope) (*otelInstruments, er
 	if scope == scopeRecord {
 		in.credInjections = counter("proxy.credential.injections", "Total number of credential injections")
 		in.policyDenials = counter("proxy.policy.denials", "Total number of policy denials")
+		in.exchangeDrops = counter("proxy.exchange_log.dropped", "Model exchanges dropped because the log queue or the body budget was full, or the log was closed")
 		return in, errors.Join(errs...)
 	}
 	h, err := meter.Float64Histogram("proxy.request.duration",
@@ -264,4 +267,20 @@ func (in *otelInstruments) handler(next http.Handler) http.Handler {
 		in.requestDuration.Record(ctx, duration, attrs)
 		in.requestCount.Add(ctx, 1, attrs)
 	})
+}
+
+// RecordExchangeDrop counts a model exchange the log skipped.
+func RecordExchangeDrop(ctx context.Context) {
+	globalInstruments().exchangeDrops.Add(ctx, 1)
+}
+
+// exchangeTraceContext returns a context that carries the remote span context
+// of a W3C traceparent and tracestate, and that span context.
+func exchangeTraceContext(traceparent, tracestate string) (context.Context, trace.SpanContext) {
+	if traceparent == "" {
+		return context.Background(), trace.SpanContext{}
+	}
+	carrier := propagation.MapCarrier{"traceparent": traceparent, "tracestate": tracestate}
+	ctx := propagation.TraceContext{}.Extract(context.Background(), carrier)
+	return ctx, trace.SpanContextFromContext(ctx)
 }

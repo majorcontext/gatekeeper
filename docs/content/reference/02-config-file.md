@@ -609,3 +609,20 @@ log:
 - **Default:** `[]`
 
 Gatekeeper logs configured response values under `http.response.header.<lowercase-name>` and as OpenTelemetry string-array attributes. Values are sanitized and limited to 256 bytes. Configure at most 10 unique headers. Gatekeeper rejects `Authorization`, `Proxy-Authorization`, `WWW-Authenticate`, `Proxy-Authenticate`, `Cookie`, `Set-Cookie`, and API-key or token headers such as `X-Api-Key`, `X-Auth-Token`, `X-Access-Token`, `X-Goog-Api-Key`, and `X-Amz-Security-Token`.
+
+### log.model_exchange
+
+Logs the request and response bodies of inference requests to the listed hosts as a GenAI event.
+
+```yaml
+log:
+  model_exchange:
+    enabled: true
+    hosts: [api.anthropic.com, "*.openai.com"]
+```
+
+- **Type:** object with `enabled` (bool) and `hosts` (`[]string` of host patterns; required when enabled)
+- **Default:** off
+
+A pattern without a port matches any port. Traffic to any other host is never captured. See [Model exchange log](../concepts/06-observability.md#model-exchange-log).
+

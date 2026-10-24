@@ -295,9 +295,13 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		outURL = rewriteURLHost(outURL, rc.HostGatewayIP)
 	}
 
+	ex := p.beginExchange(r, r, lookupHost, r.URL.Path, start)
+	ex.wrapRequest(r)
+
 	// Create outgoing request
 	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, outURL, r.Body)
 	if err != nil {
+		ex.fail(err, http.StatusBadGateway)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -327,6 +331,9 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if outReq.Header.Get("X-Request-Id") == "" {
 		outReq.Header.Set("X-Request-Id", RequestIDFromContext(r.Context()))
 	}
+	if ex != nil {
+		ex.noteOutbound(outReq, credResult, p.getTokenSubstitutionForRequest(r, lookupHost))
+	}
 
 	// Forward request
 	resp, err := p.httpTransportFor(getRunContext(r)).RoundTrip(outReq)
@@ -352,12 +359,16 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		logData.Duration = time.Since(start)
 		logData.Err = err
 		p.logRequest(r, logData)
+		ex.fail(err, http.StatusBadGateway)
 		http.Error(w, p.errorPrefix()+": upstream request failed", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
 	settleUpstreamResponse(resp, credResult.Injected, resolved.declined)
+	ex.wrapResponse(resp)
+	defer ex.finish()
+	defer func() { resp.Body.Close() }() // the exchange wrapper, closed before finish
 
 	logData.StatusCode = resp.StatusCode
 	logData.ResponseHeaders = resp.Header.Clone()

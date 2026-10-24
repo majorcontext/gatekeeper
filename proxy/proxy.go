@@ -352,6 +352,7 @@ type Proxy struct {
 	mu                   sync.RWMutex
 	ca                   *CA                                                   // Optional CA for TLS interception
 	logger               func(data RequestLogData)                             // Optional request logger
+	exchangeLog          *exchangeLog                                          // Optional model-exchange log
 	authToken            string                                                // Optional auth token required for proxy access
 	delegateAuth         bool                                                  // When authToken is empty, require some non-empty password and delegate its validation to credential resolvers
 	policy               string                                                // "permissive" or "strict"

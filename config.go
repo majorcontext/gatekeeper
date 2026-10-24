@@ -101,11 +101,18 @@ type NetworkConfig struct {
 
 // LogConfig configures logging.
 type LogConfig struct {
-	Level                  string   `yaml:"level"`  // Log level (e.g., "debug", "info", "warn", "error")
-	Format                 string   `yaml:"format"` // Output format ("json" or "text")
-	Output                 string   `yaml:"output"` // Destination ("stderr", "stdout", or a file path; default: stderr)
-	CaptureRequestHeaders  []string `yaml:"capture_request_headers,omitempty"`
-	CaptureResponseHeaders []string `yaml:"capture_response_headers,omitempty"`
+	Level                  string              `yaml:"level"`  // Log level (e.g., "debug", "info", "warn", "error")
+	Format                 string              `yaml:"format"` // Output format ("json" or "text")
+	Output                 string              `yaml:"output"` // Destination ("stderr", "stdout", or a file path; default: stderr)
+	CaptureRequestHeaders  []string            `yaml:"capture_request_headers,omitempty"`
+	CaptureResponseHeaders []string            `yaml:"capture_response_headers,omitempty"`
+	ModelExchange          ModelExchangeConfig `yaml:"model_exchange,omitempty"`
+}
+
+// ModelExchangeConfig turns on the model-exchange log for the listed hosts.
+type ModelExchangeConfig struct {
+	Enabled bool     `yaml:"enabled"`
+	Hosts   []string `yaml:"hosts,omitempty"`
 }
 
 // resolveProxyAuthToken resolves the effective proxy auth token from

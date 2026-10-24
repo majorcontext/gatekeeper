@@ -97,6 +97,8 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 		ClientAddr:   r.RemoteAddr,
 	}
 
+	var exch *exchange
+
 	// Look up relay target
 	p.mu.RLock()
 	target, ok := p.relays[name]
@@ -164,6 +166,12 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if ex := p.beginExchange(r, r, host, targetURL.Path, start); ex != nil {
+		ex.wrapRequest(r)
+		proxyReq.Body = r.Body
+		exch = ex
+	}
+
 	for key, values := range r.Header {
 		if key == "Proxy-Authorization" || key == "Proxy-Connection" {
 			continue
@@ -188,6 +196,9 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	if proxyReq.Header.Get("X-Request-Id") == "" {
 		proxyReq.Header.Set("X-Request-Id", RequestIDFromContext(r.Context()))
 	}
+	if exch != nil {
+		exch.noteOutbound(proxyReq, credResult, p.getTokenSubstitutionForRequest(r, host))
+	}
 
 	// Forward to target
 	resp, err := relayClient.Do(proxyReq)
@@ -203,12 +214,16 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 			d.InjectedHeaders = credResult.InjectedHeaders
 			d.Grants = credResult.Grants
 		})
+		exch.fail(err, http.StatusBadGateway)
 		http.Error(w, p.errorPrefix()+": Relay '"+name+"' connection failed", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
 	settleUpstreamResponse(resp, credResult.Injected, resolved.declined)
+	exch.wrapResponse(resp)
+	defer exch.finish()
+	defer func() { resp.Body.Close() }() // the exchange wrapper, closed before finish
 
 	written, streamErr := forwardStreaming(r.Context(), w, resp)
 

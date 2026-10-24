@@ -79,6 +79,7 @@ func (s *Server) Port() string {
 func (s *Server) Stop(ctx context.Context) error {
 	if s.proxy != nil {
 		defer s.proxy.CloseIdleConnections()
+		defer s.proxy.CloseExchangeLog(ctx)
 	}
 	var connsErr error
 	connsDone := make(chan struct{})
