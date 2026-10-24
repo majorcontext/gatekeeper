@@ -93,7 +93,7 @@ The metadata uses `gen_ai.*` names. The bodies are the raw wire bytes under `gat
 | `gatekeeper.ttfb_ms`, `gatekeeper.duration_ms` | request start to response headers, and to body close |
 | `gatekeeper.transport`, `gatekeeper.conn_id`, `gatekeeper.msg_seq` | WebSocket calls |
 | `gatekeeper.user_id` | the proxy-auth user |
-| `gatekeeper.request.truncated`, `gatekeeper.response.truncated` | a cut body: held back at the 32 MiB capture limit, closed before its end, or not decodable |
+| `gatekeeper.request.truncated`, `gatekeeper.response.truncated` | a cut body: held back at the 32 MiB capture limit or by the 256 MiB body budget, or not decodable; for the response, also a body closed before its end |
 | `gatekeeper.error` | transport or body-read error |
 
 A body over 16 KiB is split into `gatekeeper.exchange.body` events with `gatekeeper.exchange.id`, `gatekeeper.exchange.part`, `gatekeeper.exchange.chunk_index` from 1, and `gatekeeper.exchange.chunk_count`; the main event then has no body, and `gatekeeper.request.parts` or `gatekeeper.response.parts` gives the count. Join the chunks in `chunk_index` order.
@@ -104,7 +104,7 @@ Gatekeeper logs no request or response header. The request body is copied from t
 
 ### Cost
 
-The proxy copies the bytes it forwards and forwards them without delay. One goroutine writes the events. A full queue (256 exchanges) or 256 MiB of held bodies skips the exchange and increments `proxy.exchange_log.dropped`. With the log off, a request costs one nil check.
+The proxy copies the bytes it forwards and forwards them without delay. One goroutine writes the events. A full queue (256 exchanges), 256 MiB of held bodies when the exchange starts, or a closed log skips the exchange and increments `proxy.exchange_log.dropped`. A budget that fills during a capture cuts the body instead. With the log off, a request costs one nil check.
 
 ## Client IP attribution behind a load balancer
 
