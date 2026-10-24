@@ -368,6 +368,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	settleUpstreamResponse(resp, credResult.Injected, resolved.declined)
 	ex.wrapResponse(resp)
 	defer ex.finish()
+	defer func() { resp.Body.Close() }() // the exchange wrapper, closed before finish
 
 	logData.StatusCode = resp.StatusCode
 	logData.ResponseHeaders = resp.Header.Clone()

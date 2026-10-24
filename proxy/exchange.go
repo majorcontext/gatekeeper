@@ -382,12 +382,7 @@ func (l *exchangeLog) emit(ex *exchange) {
 	reqText, reqCut := decodeBody(reqEnc, reqBytes)
 	respText, respCut := decodeBody(respEnc, respBytes)
 	if (respTrunc || respCut || errText != "") && !strings.HasPrefix(respText, "[gatekeeper: ") {
-		// a cut can leave a prefix of a secret, which scrub cannot match
-		longest := 0
-		for _, sec := range secrets {
-			longest = max(longest, len(sec))
-		}
-		respText = respText[:max(len(respText)-max(longest-1, 0), 0)]
+		respText = dropSecretTail(respText, secrets)
 	}
 	respText = scrub(respText)
 	if withhold {
@@ -503,4 +498,14 @@ func decodeBody(encoding string, b []byte) (text string, cut bool) {
 		return string(out), err != nil
 	}
 	return fmt.Sprintf("[gatekeeper: body encoded %q not logged]", encoding), true
+}
+
+// dropSecretTail removes the last bytes of a cut text, where a prefix of a
+// secret may sit that scrub cannot match.
+func dropSecretTail(s string, secrets []string) string {
+	longest := 0
+	for _, sec := range secrets {
+		longest = max(longest, len(sec))
+	}
+	return s[:max(len(s)-max(longest-1, 0), 0)]
 }

@@ -98,6 +98,10 @@ func (t *wsTap) feed(fromClient bool, b []byte) {
 		if ex.ttfb == 0 {
 			ex.ttfb = time.Since(ex.start)
 		}
+		if truncated {
+			msg = []byte(dropSecretTail(string(msg), ex.secrets))
+			ex.resp.truncated = true
+		}
 		ex.write(&ex.resp, msg)
 		ex.write(&ex.resp, []byte("\n"))
 		ex.mu.Unlock()

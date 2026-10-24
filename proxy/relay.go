@@ -223,6 +223,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	settleUpstreamResponse(resp, credResult.Injected, resolved.declined)
 	exch.wrapResponse(resp)
 	defer exch.finish()
+	defer func() { resp.Body.Close() }() // the exchange wrapper, closed before finish
 
 	written, streamErr := forwardStreaming(r.Context(), w, resp)
 

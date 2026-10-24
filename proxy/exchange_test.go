@@ -544,3 +544,30 @@ func TestExchangeLog_BodyClosedBeforeEOFDropsASecretPrefix(t *testing.T) {
 		t.Errorf("body = %q, truncated = %v", b, ev["gatekeeper.response.truncated"])
 	}
 }
+
+func TestExchangeLog_RelayClientDisconnectDropsASecretPrefix(t *testing.T) {
+	p, h := newExchangeProxy(t, "127.0.0.1")
+	release := make(chan struct{})
+	srv := relayServer(t, p, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"error":"bad key sk-injected-secret`)
+		w.(http.Flusher).Flush()
+		<-release
+	})
+	t.Cleanup(func() { close(release) })
+	req := httptest.NewRequest("POST", srv.URL+"/relay/up/v1/messages", strings.NewReader(`{}`))
+	req.URL.Scheme, req.URL.Host = "", ""
+	ctx, cancel := context.WithCancel(req.Context())
+	p.ServeHTTP(cancelOnWrite{httptest.NewRecorder(), cancel}, req.WithContext(ctx))
+	ev := h.wait(t, 1)[0]
+	if b := fmt.Sprint(ev["gatekeeper.response.body"]); strings.Contains(b, "sk-inject") || ev["gatekeeper.response.truncated"] != true {
+		t.Errorf("body = %q, truncated = %v", b, ev["gatekeeper.response.truncated"])
+	}
+}
+
+type cancelOnWrite struct {
+	http.ResponseWriter
+	cancel context.CancelFunc
+}
+
+func (c cancelOnWrite) Write(b []byte) (int, error) { c.cancel(); return 0, io.ErrClosedPipe }
