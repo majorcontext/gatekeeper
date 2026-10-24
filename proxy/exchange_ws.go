@@ -244,12 +244,15 @@ func (p *wsParser) payload(b []byte) {
 	} else {
 		p.held += n
 	}
-	for _, c := range b[:n] {
-		if p.frameMask {
-			c ^= p.key[p.keyPos&3]
+	start := len(p.msg)
+	p.msg = append(p.msg, b[:n]...)
+	if p.frameMask {
+		for i := start; i < len(p.msg); i++ {
+			p.msg[i] ^= p.key[p.keyPos&3]
+			p.keyPos++
 		}
-		p.keyPos++
-		p.msg = append(p.msg, c)
+	} else {
+		p.keyPos += n
 	}
 	p.keyPos += len(b) - n
 }

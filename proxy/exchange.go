@@ -21,6 +21,7 @@ const (
 	exchangeBudget       = 256 << 20 // all bodies in flight and queued
 	exchangeQueueLen     = 256
 	exchangeChunkBytes   = 16 << 10
+	exchangeMinSecretLen = 8 // shorter values cannot be scrubbed without mangling the body
 )
 
 // ExchangeEventName is the OpenTelemetry GenAI event written for each exchange.
@@ -359,8 +360,13 @@ func (l *exchangeLog) emit(ex *exchange) {
 		reqEnc, respEnc     = ex.reqEnc, ex.respEnc
 	)
 	ex.mu.Unlock() // the log handler may stall; a finishing request must not wait for it
+	withhold := false
 	scrub := func(s string) string {
 		for _, sec := range secrets {
+			if len(sec) < exchangeMinSecretLen {
+				withhold = true
+				continue
+			}
 			s = strings.ReplaceAll(s, sec, "[REDACTED]")
 		}
 		return s
@@ -368,6 +374,9 @@ func (l *exchangeLog) emit(ex *exchange) {
 	reqText, reqCut := decodeBody(reqEnc, reqBytes)
 	respText, respCut := decodeBody(respEnc, respBytes)
 	respText = scrub(respText)
+	if withhold {
+		respText, respCut = "[WITHHELD: injected value too short to redact]", false
+	}
 	sum := summarize(respText)
 	failed := status >= 400 || errText != ""
 	if failed && sum.FinishReason == "" {

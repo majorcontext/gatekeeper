@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -567,7 +568,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 		// Propagate request ID so Rewrite preserves it (instead of generating a new one).
 		req.Header.Set("X-Request-Id", innerReqID)
 
-		ex := p.beginExchange(r, req, r.Host, req.URL.Path, reqStart)
+		ex := p.beginExchange(r, req, net.JoinHostPort(host, strconv.Itoa(connectPort)), req.URL.Path, reqStart)
 		if ex != nil {
 			ex.upgrades = true
 			ex.wrapRequest(req)

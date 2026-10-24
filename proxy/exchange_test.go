@@ -458,3 +458,57 @@ func TestSetExchangeLog_Validation(t *testing.T) {
 		}
 	}
 }
+
+// A 3-byte injected value cannot be scrubbed without mangling the body, so the
+// response body is withheld instead.
+func TestExchangeLog_WithholdsResponseWhenAnInjectedValueIsTooShortToScrub(t *testing.T) {
+	p, h := newExchangeProxy(t, "127.0.0.1")
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"type\":\"message_stop\",\"id\":\"abc-1\"}\n\n")
+	}))
+	t.Cleanup(backend.Close)
+	if err := p.AddRelay("up", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	p.SetInsecureCredentialWithGrant("127.0.0.1", "Authorization", "Bearer abc", "g")
+	srv := httptest.NewServer(p)
+	t.Cleanup(srv.Close)
+	post(t, srv.URL+"/relay/up/v1/messages", `{"model":"m-1"}`, nil)
+	ev := h.wait(t, 1)[0]
+	if body := fmt.Sprint(ev["gatekeeper.response.body"]); strings.Contains(body, "abc") || strings.Contains(body, "message_stop") {
+		t.Errorf("response body = %q, want it withheld", body)
+	}
+	if ev["gatekeeper.request.body"] != `{"model":"m-1"}` {
+		t.Errorf("request body = %v", ev["gatekeeper.request.body"])
+	}
+}
+
+func TestExchangeLog_PortPinnedHostPattern(t *testing.T) {
+	for name, want := range map[string]int{"connect port": 1, "other port": 0} {
+		t.Run(name, func(t *testing.T) {
+			s := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				io.WriteString(w, openAIIncomplete)
+			}))
+			_, port, _ := net.SplitHostPort(strings.TrimPrefix(s.Backend.URL, "https://"))
+			if want == 0 {
+				port = "1"
+			}
+			h := &captureHandler{}
+			if err := s.Proxy.SetExchangeLog(slog.New(h), []string{s.BackendHost + ":" + port}); err != nil {
+				t.Fatal(err)
+			}
+			resp, err := s.Client.Post(s.Backend.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"m"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			time.Sleep(100 * time.Millisecond)
+			if got := h.count(); got != want {
+				t.Errorf("events = %d, want %d", got, want)
+			}
+		})
+	}
+}
