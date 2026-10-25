@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 )
@@ -381,13 +382,20 @@ func lookupHostKeyedExcluding[V any](m map[string]V, host string, usable func(V)
 		}
 	}
 	bare := bareHost(host)
+	hostAddr, hostPort, hostIsIP := splitIPKey(host)
+	if bare != host && hostIsIP {
+		// A key pinned to this address and port outranks the portless bare
+		// key, however either is spelled (see lookupHostKeyed).
+		if v, key, ok := pinnedIPKey(m, hostAddr, hostPort, usable, excluded); ok {
+			return v, hostMatch{hostMatchExactFold, key}
+		}
+	}
 	if bare != host && !excluded[bare] {
 		if v, ok := m[bare]; ok && usable(v) {
 			return v, hostMatch{hostMatchExact, bare}
 		}
 	}
 	lowerHost, lowerBare := lowerASCII(host), lowerASCII(bare)
-	hostAddr, hostPort, hostIsIP := splitIPKey(host)
 	var best V
 	var bestKey string
 	tier := hostMatchNone
@@ -426,6 +434,21 @@ func lookupHostKeyedExcluding[V any](m map[string]V, host string, usable func(V)
 		}
 	}
 	return best, hostMatch{tier, bestKey}
+}
+
+// pinnedIPKey returns the entry of the smallest key (so the pick never depends
+// on map iteration order) that is an IP key naming hostAddr and pinned to
+// hostPort, among the usable, non-excluded entries of m.
+func pinnedIPKey[V any](m map[string]V, hostAddr netip.Addr, hostPort string, usable func(V) bool, excluded map[string]bool) (best V, bestKey string, found bool) {
+	for key, v := range m {
+		if excluded[key] || !usable(v) {
+			continue
+		}
+		if match, pinned := ipKeyMatches(key, hostAddr, hostPort); match && pinned && (!found || key < bestKey) {
+			best, bestKey, found = v, key, true
+		}
+	}
+	return best, bestKey, found
 }
 
 // Usable predicates for lookupHostKeyed. Credentials use nonEmptySlice,

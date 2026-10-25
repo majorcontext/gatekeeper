@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -538,4 +539,38 @@ func TestHostKeyedHeaders_IPKeysCompareByAddress(t *testing.T) {
 			t.Errorf("X-Remove = %q, want it removed", got)
 		}
 	})
+}
+
+// Among keys that name the target address, a key pinned to the target port
+// outranks a portless key, whichever way the target or the keys spell the
+// address, as an exact-name key pinned to host:port outranks a bare one.
+func TestLookupHostKeyed_PortPinnedIPKeyOutranksPortlessKey(t *testing.T) {
+	removal := []string{"X-Subject-Token"}
+	tests := []struct {
+		name string
+		keys map[string][]string
+		host string
+		want []string
+	}{
+		{"IPv4 target, mapped pinned key",
+			map[string][]string{"127.0.0.1": nil, "[::ffff:127.0.0.1]:8080": removal}, "127.0.0.1:8080", removal},
+		{"mapped target, mapped pinned key",
+			map[string][]string{"127.0.0.1": nil, "[::ffff:127.0.0.1]:8080": removal}, "[::ffff:127.0.0.1]:8080", removal},
+		{"IPv6 target, spelled-out pinned key",
+			map[string][]string{"::1": nil, "[0:0:0:0:0:0:0:1]:8080": removal}, "[::1]:8080", removal},
+		{"spelled-out target, compressed pinned key",
+			map[string][]string{"0:0:0:0:0:0:0:1": nil, "[::1]:8080": removal}, "[0:0:0:0:0:0:0:1]:8080", removal},
+		{"pinned key for another port loses to the portless key",
+			map[string][]string{"127.0.0.1": nil, "[::ffff:127.0.0.1]:9090": removal}, "127.0.0.1:8080", nil},
+		{"portless key alone",
+			map[string][]string{"[::ffff:127.0.0.1]": removal}, "127.0.0.1:8080", removal},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := lookupHostKeyed(tt.keys, tt.host, presenceUsable)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("lookupHostKeyed(%q) = %v, want %v", tt.host, got, tt.want)
+			}
+		})
+	}
 }
