@@ -46,7 +46,51 @@ func canonicalTargetHost(host string) (string, error) {
 	if hasEmptyLabel(host) {
 		return "", fmt.Errorf("host %q has an empty label", host)
 	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return addr.String(), nil
+	}
+	if endsInNumber(host) {
+		return "", fmt.Errorf("host %q ends in a number but is not a dotted-quad IPv4 address", host)
+	}
 	return host, nil
+}
+
+// endsInNumber reports whether the last label of host is a decimal or
+// 0x-hexadecimal number. No DNS name ends in one (a top-level domain is never
+// numeric), but libc's inet_aton, which the cgo resolver follows, reads such a
+// name as an IPv4 address in a form Go's parser rejects: "0177.0.0.1",
+// "127.1", "0x7f.1", "2130706433" all mean 127.0.0.1. A host that ends in a
+// number is therefore either a canonical dotted quad or refused.
+func endsInNumber(host string) bool {
+	label := host[strings.LastIndexByte(host, '.')+1:]
+	if rest, ok := strings.CutPrefix(strings.ToLower(label), "0x"); ok {
+		return strings.Trim(rest, "0123456789abcdef") == ""
+	}
+	return label != "" && strings.Trim(label, "0123456789") == ""
+}
+
+// isIPv4Literal reports whether host is a canonical dotted-quad IPv4 address.
+func isIPv4Literal(host string) bool {
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.Is4()
+}
+
+// ipKeyMatches reports whether key is an IP literal key (see splitIPKey) that
+// names hostAddr, and whether the key is pinned to a port that equals
+// hostPort. An address compares after Unmap, so "127.0.0.1" and
+// "::ffff:127.0.0.1" are one address, and a port compares as a number. A key
+// with a port that differs from hostPort does not match.
+func ipKeyMatches(key string, hostAddr netip.Addr, hostPort string) (match, pinned bool) {
+	addr, port, ok := splitIPKey(key)
+	if !ok || addr.WithZone("").Unmap() != hostAddr.WithZone("").Unmap() {
+		return false, false
+	}
+	if port == "" {
+		return true, false
+	}
+	want, err1 := strconv.Atoi(port)
+	got, err2 := strconv.Atoi(hostPort)
+	return err1 == nil && err2 == nil && want == got, true
 }
 
 // isIPLiteral reports whether host, bare or in brackets, with or without a

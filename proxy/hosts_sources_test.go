@@ -337,7 +337,7 @@ func TestHostKeyedSetters_AcceptExactIPKeys(t *testing.T) {
 			}
 		})
 	}
-	for _, key := range []string{"fe80::1%eth0", "[fe80::1%25eth0]:80", "[::1%x.example.com]", "[::1]:0", "::zz", "[::1", "1.2.3.4:99999"} {
+	for _, key := range []string{"fe80::1%eth0", "[fe80::1%25eth0]:80", "[::1%x.example.com]", "[::1]:0", "::zz", "[::1", "1.2.3.4:99999", "[999.0.0.1]", "[999.0.0.1]:80", "[example.com]", "[example.com]:80"} {
 		p := NewProxy()
 		p.RemoveRequestHeader(key, "Authorization")
 		p.SetTokenSubstitution(key, "PLACEHOLDER", "secret")
@@ -388,4 +388,154 @@ func TestHostKeyedSetters_IPKeysActOnIPTargets(t *testing.T) {
 			}
 		})
 	}
+}
+
+// libc's inet_aton reads these as IPv4 addresses (octal, hex, fewer than four
+// parts, a single 32-bit number), and the cgo resolver that Go uses on many
+// systems follows it, so "0177.0.0.1" connects to 127.0.0.1. Go's own parser
+// does not accept them, so they must not pass as DNS names.
+var legacyNumericIPv4 = []string{
+	"0177.0.0.1", "127.1", "0x7f.1", "017700000001", "2130706433", "0x7f000001",
+	"127.000.000.001", "0x7f.0.0.0x1", "1.2.3.4.5",
+}
+
+func TestProxy_LegacyNumericIPv4TargetsAreRefused(t *testing.T) {
+	for _, host := range legacyNumericIPv4 {
+		t.Run("absolute-form "+host, func(t *testing.T) {
+			rt := useRecordingTransport(t)
+			p := NewProxy()
+			p.SetInsecureCredentialWithGrant("*.0.0.1", "Authorization", "Bearer wildcard", "wildcard")
+			srv := httptest.NewServer(p)
+			defer srv.Close()
+
+			raw := "GET http://" + host + "/ HTTP/1.1\r\nHost: ignored\r\nConnection: close\r\n\r\n"
+			if got := serveRaw(t, srv.Listener.Addr().String(), raw); got != 400 {
+				t.Errorf("status = %d, want 400", got)
+			}
+			if len(rt.reqs) != 0 {
+				t.Errorf("forwarded to %q with Authorization %q", rt.reqs[0].URL.Host, rt.reqs[0].Header.Get("Authorization"))
+			}
+		})
+		t.Run("CONNECT "+host, func(t *testing.T) {
+			ca, err := generateCA()
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := NewProxy()
+			p.SetCA(ca)
+			srv := httptest.NewServer(p)
+			defer srv.Close()
+
+			raw := "CONNECT " + host + ":443 HTTP/1.1\r\nHost: " + host + ":443\r\n\r\n"
+			if got := serveRaw(t, srv.Listener.Addr().String(), raw); got != 400 {
+				t.Errorf("status = %d, want 400", got)
+			}
+		})
+	}
+	// A canonical dotted quad is an IP address and passes.
+	rt := useRecordingTransport(t)
+	p := NewProxy()
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+	raw := "GET http://127.0.0.1./ HTTP/1.1\r\nHost: ignored\r\nConnection: close\r\n\r\n"
+	if got := serveRaw(t, srv.Listener.Addr().String(), raw); got != 200 || len(rt.reqs) != 1 || rt.reqs[0].URL.Host != "127.0.0.1" {
+		t.Errorf("canonical dotted quad: status %d, forwarded %d", got, len(rt.reqs))
+	}
+}
+
+func TestValidateHostPattern_NumericAndBracketedHosts(t *testing.T) {
+	tests := []struct {
+		pattern string
+		valid   bool
+	}{
+		{"192.0.2.1", true},
+		{"192.0.2.1:8443", true},
+		{"example.com", true},
+		{"pr-*.example.com", true},
+		{"0177.0.0.1", false},
+		{"127.1", false},
+		{"0x7f.1", false},
+		{"2130706433", false},
+		{"017700000001", false},
+		{"*.0.0.1", false},
+		{"19*.0.2.1", false},
+		{"[999.0.0.1]", false},
+		{"[::1]", false},
+		{"[example.com]:443", false},
+	}
+	for _, tt := range tests {
+		if err := ValidateHostPattern(tt.pattern); (err == nil) != tt.valid {
+			t.Errorf("ValidateHostPattern(%q) = %v, want valid=%v", tt.pattern, err, tt.valid)
+		}
+	}
+}
+
+// An IP key names an address, so it matches the same address however the
+// target or the key spells it, with the port compared as a number.
+func TestLookupHostKeyed_IPKeysCompareByAddress(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		host string // the lookup host a request carries: host:port
+		want bool
+	}{
+		{"spelled-out key, compressed target", "[0:0:0:0:0:0:0:1]:8080", "[::1]:8080", true},
+		{"bare spelled-out key", "0:0:0:0:0:0:0:1", "[::1]:8080", true},
+		{"compressed key, spelled-out target", "[::1]:8080", "[0:0:0:0:0:0:0:1]:8080", true},
+		{"IPv4 key, IPv4-mapped target", "127.0.0.1", "[::ffff:127.0.0.1]:8080", true},
+		{"IPv4 key with port, IPv4-mapped target", "127.0.0.1:8080", "[::ffff:127.0.0.1]:8080", true},
+		{"IPv4-mapped key, IPv4 target", "::ffff:127.0.0.1", "127.0.0.1:8080", true},
+		{"bracketed key without port", "[::1]", "[::1]:8080", true},
+		{"other port", "[::1]:9090", "[::1]:8080", false},
+		{"other address", "[::2]:8080", "[::1]:8080", false},
+		{"IPv4 key, other IPv4", "127.0.0.2", "127.0.0.1:8080", false},
+		{"IPv4 key does not match a name", "127.0.0.1", "localhost:8080", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := lookupHostKeyed(map[string][]string{tt.key: {"found"}}, tt.host, nonEmptySlice)
+			if (len(got) > 0) != tt.want {
+				t.Errorf("lookupHostKeyed(key %q, host %q) found = %v, want %v", tt.key, tt.host, len(got) > 0, tt.want)
+			}
+		})
+	}
+}
+
+// The same through requests: an embedder-built RunContextData map keyed on a
+// spelled-out IPv6 address, and a setter key in IPv4 form against an
+// IPv4-mapped target.
+func TestHostKeyedHeaders_IPKeysCompareByAddress(t *testing.T) {
+	t.Run("embedder map, spelled-out IPv6 key", func(t *testing.T) {
+		rt := useRecordingTransport(t)
+		p := NewProxy()
+		p.SetContextResolver(func(string) (*RunContextData, bool) {
+			return &RunContextData{
+				Policy:        "permissive",
+				RemoveHeaders: map[string][]string{"[0:0:0:0:0:0:0:1]:8080": {"X-Remove"}},
+			}, true
+		})
+		srv := httptest.NewServer(p)
+		defer srv.Close()
+		raw := "GET http://[0:0:0:0:0:0:0:1]:8080/ HTTP/1.1\r\nHost: ignored\r\nProxy-Authorization: Basic cnVuOnRvaw==\r\nX-Remove: 1\r\nConnection: close\r\n\r\n"
+		if got := serveRaw(t, srv.Listener.Addr().String(), raw); got != 200 || len(rt.reqs) != 1 {
+			t.Fatalf("status %d, forwarded %d", got, len(rt.reqs))
+		}
+		if got := rt.reqs[0].Header.Get("X-Remove"); got != "" {
+			t.Errorf("X-Remove = %q, want it removed", got)
+		}
+	})
+	t.Run("setter key 127.0.0.1, IPv4-mapped target", func(t *testing.T) {
+		rt := useRecordingTransport(t)
+		p := NewProxy()
+		p.RemoveRequestHeader("127.0.0.1", "X-Remove")
+		srv := httptest.NewServer(p)
+		defer srv.Close()
+		raw := "GET http://[::ffff:127.0.0.1]:8080/ HTTP/1.1\r\nHost: ignored\r\nX-Remove: 1\r\nConnection: close\r\n\r\n"
+		if got := serveRaw(t, srv.Listener.Addr().String(), raw); got != 200 || len(rt.reqs) != 1 {
+			t.Fatalf("status %d, forwarded %d", got, len(rt.reqs))
+		}
+		if got := rt.reqs[0].Header.Get("X-Remove"); got != "" {
+			t.Errorf("X-Remove = %q, want it removed", got)
+		}
+	})
 }

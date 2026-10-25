@@ -31,6 +31,8 @@ Before it matches, gatekeeper puts the host of a proxy request (the CONNECT targ
 - A non-ASCII host is mapped to its ASCII (`xn--`) form with the IDNA lookup mapping that `net/http` applies when it dials. `pr-1。evil.example.com` (U+3002) becomes `pr-1.evil.example.com` and so does not match `pr-*.example.com`.
 - One trailing dot is dropped, so `api.github.com.` matches the same patterns as `api.github.com`.
 - A host with an empty label (`a..example.com`, `.example.com`) or a name IDNA rejects is refused with `400`.
+- A host that ends in a number but is not a canonical dotted-quad IPv4 address (`0177.0.0.1`, `127.1`, `0x7f.1`, `2130706433`) is refused with `400`: libc reads each as an IPv4 address, so it must not pass as a DNS name. Host patterns with that shape are rejected, as are bracketed patterns that are not IP literals.
+- An IP key (`::1`, `[::1]:8080`, `127.0.0.1`) matches by parsed address and port, so `127.0.0.1` also matches `[::ffff:127.0.0.1]` and `[0:0:0:0:0:0:0:1]` matches `[::1]`.
 - An IP literal is an address, not a name. A `*.` or prefix pattern never matches one (a `*.0.2.1` pattern does not match `192.0.2.1`); only an exact IP host key does. An IPv6 literal is put in its canonical text form, and one with a zone (`[::1%25eth0]`) is refused with `400`: a zone is free text that the dial ignores for an IPv4-mapped address, so `[::ffff:192.0.2.1%25x.example.com]` would otherwise look like a host under `example.com`.
 
 Host patterns follow the same rules: write an internationalized name in its `xn--` form, and do not end a pattern with a dot or leave an empty label. Config load rejects both, and so does `ValidateHostPattern`.

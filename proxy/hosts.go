@@ -57,12 +57,16 @@ func parseHostPatternChecked(s string) (HostPattern, error) {
 	switch {
 	case host == "":
 		err = fmt.Errorf("host pattern %q has no host", orig)
+	case strings.ContainsAny(host, "[]"):
+		err = fmt.Errorf("host pattern %q has brackets; an IPv6 literal is not a host pattern", orig)
 	case !isASCII(host):
 		// Requests are matched on their ASCII (A-label) form, so a Unicode
 		// pattern would never match; ask for the "xn--" form instead.
 		err = fmt.Errorf("host pattern %q is not ASCII; write internationalized names in their xn-- form", orig)
 	case hasEmptyLabel(host):
 		err = fmt.Errorf("host pattern %q has an empty label or a trailing dot", orig)
+	case endsInNumber(host) && (p.isWildcard || strings.Contains(host, "*") || !isIPv4Literal(host)):
+		err = fmt.Errorf("host pattern %q ends in a number; write an IPv4 address as an exact dotted quad", orig)
 	case p.isWildcard && strings.Contains(host, "*"):
 		err = fmt.Errorf("host pattern %q has a * after its leading \"*.\"", orig)
 	case strings.Contains(host, "*"):
@@ -383,6 +387,7 @@ func lookupHostKeyedExcluding[V any](m map[string]V, host string, usable func(V)
 		}
 	}
 	lowerHost, lowerBare := lowerASCII(host), lowerASCII(bare)
+	hostAddr, hostPort, hostIsIP := splitIPKey(host)
 	var best V
 	var bestKey string
 	tier := hostMatchNone
@@ -398,7 +403,13 @@ func lookupHostKeyedExcluding[V any](m map[string]V, host string, usable func(V)
 		// (lowerASCII) in every tier, so no key folds onto a host that the
 		// transport would dial as a different name.
 		lowerKey := lowerASCII(key)
-		if foldsHost := host != bare && lowerKey == lowerHost; foldsHost || lowerKey == lowerBare {
+		// An IP key names an address: it matches by parsed address (and port)
+		// whatever its spelling, not by text.
+		var ipMatch, ipPinned bool
+		if hostIsIP {
+			ipMatch, ipPinned = ipKeyMatches(key, hostAddr, hostPort)
+		}
+		if foldsHost := (host != bare && lowerKey == lowerHost) || (ipMatch && ipPinned); foldsHost || lowerKey == lowerBare || ipMatch {
 			if tier != hostMatchExactFold ||
 				(foldsHost && !bestFoldsHost) ||
 				(foldsHost == bestFoldsHost && key < bestKey) {
