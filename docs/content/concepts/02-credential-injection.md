@@ -26,6 +26,14 @@ A `host` pattern cannot contain a port — `credentials[].host` is validated and
 
 Host comparison is case-insensitive. `API.GitHub.com` matches `api.github.com`.
 
+Before it matches, gatekeeper puts the host of a proxy request (the CONNECT target, or the host of an absolute-form URL) in the form the upstream connection dials, so that matching and dialing use one name:
+
+- A non-ASCII host is mapped to its ASCII (`xn--`) form with the IDNA lookup mapping that `net/http` applies when it dials. `pr-1。evil.example.com` (U+3002) becomes `pr-1.evil.example.com` and so does not match `pr-*.example.com`.
+- One trailing dot is dropped, so `api.github.com.` matches the same patterns as `api.github.com`.
+- A host with an empty label (`a..example.com`, `.example.com`) or a name IDNA rejects is refused with `400`.
+
+Host patterns follow the same rules: write an internationalized name in its `xn--` form, and do not end a pattern with a dot or leave an empty label. Config load rejects both, and so does `ValidateHostPattern`.
+
 ## Header injection
 
 The configured `header` is the credential output header. Credential-scoped `add_headers` appends comma-separated tokens to request headers, trims token edges, compares without case, and uses `, ` between additions. It cannot target the credential output header. Legacy `AddExtraHeader` still permits that collision. `remove_headers` suppresses a legacy extra header unless credential injection writes that same header.

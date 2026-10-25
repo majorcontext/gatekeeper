@@ -36,7 +36,7 @@ The allow list is a set of host patterns. Each pattern follows the same matching
 - **Prefix wildcard.** `pr-*.example.com` matches `pr-6301.example.com`: one label that starts with `pr-` and has at least one more character, then exactly `.example.com`. It does not match `pr-.example.com`, `pr-1.x.example.com`, `xpr-1.example.com`, or `example.com`.
 - **Port-specific.** `api.example.com:8080` matches only that port. Patterns without a port match only ports 80 and 443.
 
-When a client sends a CONNECT request, gatekeeper extracts the host and port and checks them against the allow list. If no pattern matches, the tunnel is refused.
+When a client sends a CONNECT request, gatekeeper extracts the host and port and checks them against the allow list. If no pattern matches, the tunnel is refused. Hosts are matched in the form the upstream connection dials: IDNA-mapped to ASCII, without one trailing dot. See [Host matching](./02-credential-injection.md#host-matching). A request inside an intercepted tunnel for a host other than the CONNECT target is refused with `421`.
 
 ## Grant hosts are auto-allowed
 

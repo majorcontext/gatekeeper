@@ -129,6 +129,7 @@ Each denial also, when a trace context is present, adds a `policy.denial` span e
 | `llm-policy` | `llm-gateway` scope | `400` |
 | `mcp-policy` | `mcp-<server-name>` scope | `403` |
 | `cleartext-credential` | Credential injection over plain HTTP refused | `403` |
+| `host-mismatch` | Request inside a CONNECT tunnel for a host other than the CONNECT target | `421` |
 
 ## Next steps
 

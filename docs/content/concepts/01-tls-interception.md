@@ -22,7 +22,7 @@ When a client sends an HTTPS request through gatekeeper, the flow has five stage
 2. **Network policy check.** Gatekeeper evaluates the target host against allow/deny rules. If denied, a `407` response is returned immediately.
 3. **Tunnel establishment.** Gatekeeper responds with `HTTP/1.1 200 Connection Established` and hijacks the raw TCP connection.
 4. **TLS handshake with the client.** Gatekeeper generates a certificate for `api.github.com` signed by its CA, then performs a TLS handshake as the server. The client validates the certificate against the CA it trusts.
-5. **Request interception.** Gatekeeper reads the plaintext HTTP request, injects credential headers, opens a separate TLS connection to the real `api.github.com`, and forwards the request.
+5. **Request interception.** Gatekeeper reads the plaintext HTTP request, injects credential headers, opens a separate TLS connection to the real `api.github.com`, and forwards the request. A request whose `Host` header (or absolute-form URL host) is not the CONNECT target is refused with `421`, `X-Gatekeeper-Blocked: host-mismatch`, before any credential is resolved or any upstream is dialed. The names compare without regard to case, after the host mapping described under [Host matching](./02-credential-injection.md#host-matching); a `Host` header without a port, or with the CONNECT port, matches.
 
 ```text
 Client                    Gatekeeper                   api.github.com

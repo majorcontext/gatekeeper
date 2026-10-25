@@ -54,12 +54,19 @@ func parseHostPatternChecked(s string) (HostPattern, error) {
 	p.host = strings.ToLower(host)
 
 	var err error
-	if host == "" {
+	switch {
+	case host == "":
 		err = fmt.Errorf("host pattern %q has no host", orig)
-	} else if strings.Contains(host, "*") {
-		if p.isWildcard {
-			err = fmt.Errorf("host pattern %q has a * after its leading \"*.\"", orig)
-		} else if prefix, rest, ok := splitPrefixWildcard(host); ok {
+	case !isASCII(host):
+		// Requests are matched on their ASCII (A-label) form, so a Unicode
+		// pattern would never match; ask for the "xn--" form instead.
+		err = fmt.Errorf("host pattern %q is not ASCII; write internationalized names in their xn-- form", orig)
+	case hasEmptyLabel(host):
+		err = fmt.Errorf("host pattern %q has an empty label or a trailing dot", orig)
+	case p.isWildcard && strings.Contains(host, "*"):
+		err = fmt.Errorf("host pattern %q has a * after its leading \"*.\"", orig)
+	case strings.Contains(host, "*"):
+		if prefix, rest, ok := splitPrefixWildcard(host); ok {
 			p.prefix, p.host = prefix, rest
 		} else {
 			err = fmt.Errorf("host pattern %q: * must be the whole first label (*.example.com) or end it (pr-*.example.com)", orig)
@@ -81,14 +88,15 @@ func parseHostPatternChecked(s string) (HostPattern, error) {
 // "pr-*.example.com[:port]" into its lowercase prefix ("pr-") and the rest
 // after the first dot ("example.com[:port]"). The prefix is non-empty and has
 // no "." or "*", the "*" ends the first label, and the rest has no "*" and at
-// least two labels, so "pr-*.com" and "pr-*" are not prefix wildcards.
+// least two non-empty labels, so "pr-*.com", "pr-*.com." and "pr-*..com" are
+// not prefix wildcards.
 func splitPrefixWildcard(s string) (prefix, rest string, ok bool) {
 	label, rest, found := strings.Cut(s, ".")
 	if !found || len(label) < 2 || !strings.HasSuffix(label, "*") || strings.Contains(label[:len(label)-1], "*") {
 		return "", "", false
 	}
 	domain, _, _ := strings.Cut(rest, ":")
-	if strings.Contains(rest, "*") || !strings.Contains(domain, ".") {
+	if strings.Contains(rest, "*") || !strings.Contains(domain, ".") || hasEmptyLabel(domain) {
 		return "", "", false
 	}
 	return strings.ToLower(label[:len(label)-1]), strings.ToLower(rest), true
