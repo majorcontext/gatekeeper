@@ -12,19 +12,14 @@ import (
 	"golang.org/x/net/idna"
 )
 
-// canonicalTargetHost returns the name the upstream transport dials for a
-// request to host, so that policy and credential matching decide on the same
-// name the connection goes to.
-//
-// A non-ASCII host is mapped to its ASCII (A-label) form with the IDNA Lookup
-// profile, the mapping net/http applies before it dials. That mapping turns
-// U+3002, U+FF0E and U+FF61 into "." and U+0130 into a different label from
-// "i", differences a byte-wise match on the raw host cannot see. One trailing
-// root dot is dropped, so "api.example.com." is the host "api.example.com"
-// for exact, "*." and prefix patterns alike. An IP literal is returned in its
-// canonical text form. It returns an error for a host that has no dialable
-// form: an empty label, a name IDNA rejects, or an IPv6 literal with a zone
-// (the zone is free text, and the dial ignores it for an IPv4-mapped address).
+// canonicalTargetHost returns the name the upstream transport dials for host,
+// so policy and credential matching decide on the name the connection goes to.
+// A non-ASCII host is mapped to ASCII with the IDNA Lookup profile, as net/http
+// does before it dials: that turns U+3002, U+FF0E and U+FF61 into "." and
+// U+0130 into a label unlike "i". One trailing dot is dropped. An IP literal
+// comes back in canonical text form. It errors on an empty label, a name IDNA
+// rejects, an IPv6 zone (free text that the dial ignores for IPv4-mapped
+// addresses), and a name that ends in a number (see endsInNumber).
 func canonicalTargetHost(host string) (string, error) {
 	if addr, err := netip.ParseAddr(host); err == nil {
 		if addr.Zone() != "" {
@@ -56,11 +51,9 @@ func canonicalTargetHost(host string) (string, error) {
 }
 
 // endsInNumber reports whether the last label of host is a decimal or
-// 0x-hexadecimal number. No DNS name ends in one (a top-level domain is never
-// numeric), but libc's inet_aton, which the cgo resolver follows, reads such a
-// name as an IPv4 address in a form Go's parser rejects: "0177.0.0.1",
-// "127.1", "0x7f.1", "2130706433" all mean 127.0.0.1. A host that ends in a
-// number is therefore either a canonical dotted quad or refused.
+// 0x-hexadecimal number. No DNS name ends in one, but libc's inet_aton, which
+// the cgo resolver follows, reads "0177.0.0.1", "127.1" and "2130706433" as
+// 127.0.0.1. Such a host must be a canonical dotted quad or be refused.
 func endsInNumber(host string) bool {
 	label := host[strings.LastIndexByte(host, '.')+1:]
 	if rest, ok := strings.CutPrefix(strings.ToLower(label), "0x"); ok {
@@ -69,45 +62,41 @@ func endsInNumber(host string) bool {
 	return label != "" && strings.Trim(label, "0123456789") == ""
 }
 
-// isIPv4Literal reports whether host is a canonical dotted-quad IPv4 address.
+// isIPv4Literal reports whether host is a canonical dotted-quad address.
 func isIPv4Literal(host string) bool {
 	addr, err := netip.ParseAddr(host)
 	return err == nil && addr.Is4()
 }
 
-// ipKeyMatches reports whether key is an IP literal key (see splitIPKey) that
-// names hostAddr, and whether the key is pinned to a port that equals
-// hostPort. An address compares after Unmap, so "127.0.0.1" and
-// "::ffff:127.0.0.1" are one address, and a port compares as a number. A key
-// with a port that differs from hostPort does not match.
+// ipKeyMatches reports whether key is an IP key (see splitIPKey) for hostAddr,
+// and whether it is pinned to hostPort. Addresses compare after Unmap, ports as
+// numbers; a key pinned to another port does not match.
 func ipKeyMatches(key string, hostAddr netip.Addr, hostPort string) (match, pinned bool) {
 	addr, port, ok := splitIPKey(key)
-	if !ok || addr.WithZone("").Unmap() != hostAddr.WithZone("").Unmap() {
+	if !ok || addr.Unmap() != hostAddr.Unmap() {
 		return false, false
 	}
-	if port == "" {
-		return true, false
-	}
-	want, err1 := strconv.Atoi(port)
-	got, err2 := strconv.Atoi(hostPort)
-	return err1 == nil && err2 == nil && want == got, true
+	return port == "" || samePort(port, hostPort), port != ""
 }
 
-// isIPLiteral reports whether host, bare or in brackets, with or without a
-// zone, is an IP address. An address is never a DNS name: a "*." or prefix
-// pattern must not match one, however its text ends (a zone is free text, and
-// "192.0.2.1" ends in ".0.2.1").
+func samePort(a, b string) bool {
+	x, err1 := strconv.Atoi(a)
+	y, err2 := strconv.Atoi(b)
+	return err1 == nil && err2 == nil && x == y
+}
+
+// isIPLiteral reports whether host is an IP address (bare or bracketed, with
+// or without zone or port). A DNS pattern must never match one: a zone is free
+// text, and "192.0.2.1" ends in ".0.2.1".
 func isIPLiteral(host string) bool {
-	_, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(host, "["), "]"))
-	return err == nil
+	_, _, ok := splitIPKey(host)
+	return ok
 }
 
-// hostKey validates and normalizes the key of a host-keyed setter that takes
-// a port-pinned key: a host pattern (ValidateHostPattern), or an exact IP
-// literal, IPv4 or IPv6, bare or in brackets, with an optional port
-// ("::1", "[::1]:8080", "127.0.0.1:8080"). An IP key is returned in the form
-// a request's lookup host takes, which is the canonical address, bracketed
-// when it has a port. A zone is refused: it is never part of a request host.
+// hostKey validates the key of a host-keyed setter that takes a port-pinned
+// key: a host pattern, or an exact IP literal (bare or bracketed, optional
+// port). An IP key is returned in the form a request's lookup host takes. A
+// zone is refused, since it is never part of a request host.
 func hostKey(key string) (string, error) {
 	addr, port, isIP := splitIPKey(key)
 	if !isIP {
@@ -125,7 +114,7 @@ func hostKey(key string) (string, error) {
 	return net.JoinHostPort(addr.String(), port), nil
 }
 
-// splitIPKey splits an IP literal key into its address and port.
+// splitIPKey splits an IP literal, with an optional port, into address and port.
 func splitIPKey(key string) (addr netip.Addr, port string, ok bool) {
 	if a, err := netip.ParseAddr(key); err == nil {
 		return a, "", true
@@ -143,23 +132,23 @@ func splitIPKey(key string) (addr netip.Addr, port string, ok bool) {
 	return netip.Addr{}, "", false
 }
 
-// lowerASCII lowercases the ASCII letters of s and nothing else. DNS folds
-// case for ASCII only: Unicode lowercasing would match hosts the transport
-// dials as different names (U+0130 lowercases to "i", but IDNA maps it to a
-// different label), so every host comparison folds with this.
+// lowerASCII lowercases ASCII letters only. DNS folds case for ASCII alone;
+// Unicode lowercasing would match hosts the transport dials as different names
+// (U+0130 lowercases to "i", but IDNA maps it to another label).
 func lowerASCII(s string) string {
+	var b []byte
 	for i := 0; i < len(s); i++ {
 		if c := s[i]; 'A' <= c && c <= 'Z' {
-			b := []byte(s)
-			for j := i; j < len(b); j++ {
-				if 'A' <= b[j] && b[j] <= 'Z' {
-					b[j] += 'a' - 'A'
-				}
+			if b == nil {
+				b = []byte(s)
 			}
-			return string(b)
+			b[i] = c + 'a' - 'A'
 		}
 	}
-	return s
+	if b == nil {
+		return s
+	}
+	return string(b)
 }
 
 // hasEmptyLabel reports whether a dotted name is empty or has an empty label.
@@ -176,54 +165,32 @@ func isASCII(s string) bool {
 	return true
 }
 
-// canonicalizeTarget returns r with the host of its target in canonical form
-// (see canonicalTargetHost): the CONNECT authority, or the host of an
-// absolute-form URL. Every later policy, credential and dial decision reads
-// that one form. It returns r itself when nothing changes, and a copy
-// otherwise, so the caller's request is never modified. A request that is
-// not a proxy request (no URL host) and a CONNECT without a port pass
-// through; the handlers answer those.
+// canonicalizeTarget returns r with the host of its target (the CONNECT
+// authority, or the host of an absolute-form URL) in canonical form, so every
+// later policy, credential and dial decision reads one name. It returns r when
+// nothing changes and a copy otherwise.
 func canonicalizeTarget(r *http.Request) (*http.Request, error) {
-	var host, port string
+	u := r.URL
 	if r.Method == http.MethodConnect {
-		var err error
-		if host, port, err = net.SplitHostPort(r.Host); err != nil {
-			return r, nil
-		}
-	} else if r.URL.Host != "" {
-		u, err := canonicalizeURLHost(r.URL)
-		if err != nil || u == r.URL {
-			return r, err
-		}
-		out := new(http.Request)
-		*out = *r
-		out.URL, out.Host = u, u.Host
-		return out, nil
-	} else {
+		c := *r.URL
+		c.Host = r.Host
+		u = &c
+	} else if u.Host == "" {
 		return r, nil
 	}
-	canon, err := canonicalTargetHost(host)
-	if err != nil {
-		return nil, err
+	canon, err := canonicalizeURLHost(u)
+	if err != nil || canon == u {
+		return r, err
 	}
-	if canon == host {
-		return r, nil
-	}
-	target := net.JoinHostPort(canon, port)
 	out := new(http.Request)
 	*out = *r
-	u := *r.URL
-	u.Host = target
-	out.URL = &u
-	out.Host = target
+	out.URL, out.Host = canon, canon.Host
 	return out, nil
 }
 
-// canonicalizeURLHost returns u with its host in canonical form (see
-// canonicalTargetHost), keeping the port. It returns u itself when nothing
-// changes and a copy otherwise. A target URL that came from configuration
-// (a relay, an MCP server) goes through it too, so what is matched is what is
-// dialed.
+// canonicalizeURLHost returns u with its host canonical (see
+// canonicalTargetHost), or u itself when nothing changes. Relay and MCP target
+// URLs go through it too, so what is matched is what is dialed.
 func canonicalizeURLHost(u *url.URL) (*url.URL, error) {
 	host := u.Hostname()
 	canon, err := canonicalTargetHost(host)
@@ -245,14 +212,11 @@ func canonicalizeURLHost(u *url.URL) (*url.URL, error) {
 
 // authorityMatchesConnect reports whether the authority of a request inside a
 // CONNECT tunnel (its Host header, or the host of an absolute-form URL) names
-// the CONNECT target. The proxy resolves credentials for the CONNECT target
-// and dials it, so a request for another authority would have the target's
-// credential sent to a virtual host the policy never checked.
-//
-// Hosts compare after the canonicalTargetHost mapping and case folding. An
-// inner authority without a port, or with the CONNECT port, matches; any
-// other port does not. An empty authority (an HTTP/1.0 request with no Host
-// header) names the CONNECT target by default.
+// the CONNECT target. Credentials are resolved for the target and the request
+// is dialed to it, so another authority would get the target's credential on a
+// virtual host the policy never checked. Hosts compare canonically and without
+// ASCII case; the inner port may be absent or must equal the CONNECT port; an
+// empty authority (HTTP/1.0 without Host) matches.
 func authorityMatchesConnect(connect, inner string) bool {
 	if inner == "" {
 		return true
@@ -267,24 +231,19 @@ func authorityMatchesConnect(connect, inner string) bool {
 	}
 	connectHost, err1 := canonicalTargetHost(connectHost)
 	innerHost, err2 := canonicalTargetHost(innerHost)
-	if err1 != nil || err2 != nil || !sameHostName(connectHost, innerHost) {
+	if err1 != nil || err2 != nil || !sameHost(connectHost, innerHost) {
 		return false
 	}
-	if innerPort == "" {
-		return true
-	}
-	want, err1 := strconv.Atoi(connectPort)
-	got, err2 := strconv.Atoi(innerPort)
-	return err1 == nil && err2 == nil && want == got
+	return innerPort == "" || samePort(connectPort, innerPort)
 }
 
-// sameHostName compares two canonical hosts: IP literals by address, names
-// without regard to case.
-func sameHostName(a, b string) bool {
+// sameHost compares canonical hosts: IP literals by address, names without
+// ASCII case.
+func sameHost(a, b string) bool {
 	x, errA := netip.ParseAddr(a)
 	y, errB := netip.ParseAddr(b)
 	if errA == nil && errB == nil {
-		return x.WithZone("").Unmap() == y.WithZone("").Unmap()
+		return x.Unmap() == y.Unmap()
 	}
 	return lowerASCII(a) == lowerASCII(b)
 }

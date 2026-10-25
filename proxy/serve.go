@@ -103,8 +103,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Put the target host in the form the transport will dial, before any
-	// policy, credential or MCP decision reads it.
+	// Canonicalize the target before any policy, credential or MCP decision.
 	canon, err := canonicalizeTarget(r)
 	if err != nil {
 		p.rejectTarget(w, r, err)
@@ -149,8 +148,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.handleHTTP(w, r)
 }
 
-// rejectTarget answers a proxy request whose target host has no dialable
-// form (see canonicalTargetHost) with 400 and records the denial.
+// rejectTarget answers a request whose target host has no dialable form with
+// 400 and records the denial.
 func (p *Proxy) rejectTarget(w http.ResponseWriter, r *http.Request, cause error) {
 	target, requestType := r.URL.String(), "http"
 	if r.Method == http.MethodConnect {

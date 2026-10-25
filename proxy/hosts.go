@@ -61,8 +61,6 @@ func parseHostPatternChecked(s string) (HostPattern, error) {
 	case strings.ContainsAny(host, "[]"):
 		err = fmt.Errorf("host pattern %q has brackets; an IPv6 literal is not a host pattern", orig)
 	case !isASCII(host):
-		// Requests are matched on their ASCII (A-label) form, so a Unicode
-		// pattern would never match; ask for the "xn--" form instead.
 		err = fmt.Errorf("host pattern %q is not ASCII; write internationalized names in their xn-- form", orig)
 	case hasEmptyLabel(host):
 		err = fmt.Errorf("host pattern %q has an empty label or a trailing dot", orig)
@@ -93,8 +91,8 @@ func parseHostPatternChecked(s string) (HostPattern, error) {
 // "pr-*.example.com[:port]" into its lowercase prefix ("pr-") and the rest
 // after the first dot ("example.com[:port]"). The prefix is non-empty and has
 // no "." or "*", the "*" ends the first label, and the rest has no "*" and at
-// least two non-empty labels, so "pr-*.com", "pr-*.com." and "pr-*..com" are
-// not prefix wildcards.
+// least two non-empty labels, so "pr-*.com" and "pr-*.com." are not prefix
+// wildcards.
 func splitPrefixWildcard(s string) (prefix, rest string, ok bool) {
 	label, rest, found := strings.Cut(s, ".")
 	if !found || len(label) < 2 || !strings.HasSuffix(label, "*") || strings.Contains(label[:len(label)-1], "*") {
@@ -168,10 +166,8 @@ func allowPatternPortMatches(patternPort, port int) bool {
 	return port == 80 || port == 443
 }
 
-// hostHasSuffixFold reports whether host ends with suffix, ignoring ASCII
-// case. Lowercasing both sides, rather than slicing by byte length, keeps a
-// multi-byte character from splitting mid-rune. Only ASCII letters fold (see
-// lowerASCII), so a non-ASCII character matches only itself.
+// hostHasSuffixFold reports whether host ends with suffix, ignoring ASCII case
+// (see lowerASCII).
 func hostHasSuffixFold(host, suffix string) bool {
 	return strings.HasSuffix(lowerASCII(host), lowerASCII(suffix))
 }
@@ -384,8 +380,7 @@ func lookupHostKeyedExcluding[V any](m map[string]V, host string, usable func(V)
 	bare := bareHost(host)
 	hostAddr, hostPort, hostIsIP := splitIPKey(host)
 	if bare != host && hostIsIP {
-		// A key pinned to this address and port outranks the portless bare
-		// key, however either is spelled (see lookupHostKeyed).
+		// A key pinned to this address and port outranks a portless key.
 		if v, key, ok := pinnedIPKey(m, hostAddr, hostPort, usable, excluded); ok {
 			return v, hostMatch{hostMatchExactFold, key}
 		}
@@ -407,12 +402,9 @@ func lookupHostKeyedExcluding[V any](m map[string]V, host string, usable func(V)
 		// The case-insensitive exact tier must fold both the bare host and
 		// the full host:port — port-bearing keys are expressible in
 		// embedder-built RunContextData maps. A host:port fold match beats
-		// a bare fold match, as in the verbatim tiers. Folding is ASCII-only
-		// (lowerASCII) in every tier, so no key folds onto a host that the
-		// transport would dial as a different name.
+		// a bare fold match, as in the verbatim tiers.
 		lowerKey := lowerASCII(key)
-		// An IP key names an address: it matches by parsed address (and port)
-		// whatever its spelling, not by text.
+		// An IP key matches by parsed address and port, not by text.
 		var ipMatch, ipPinned bool
 		if hostIsIP {
 			ipMatch, ipPinned = ipKeyMatches(key, hostAddr, hostPort)
@@ -436,9 +428,8 @@ func lookupHostKeyedExcluding[V any](m map[string]V, host string, usable func(V)
 	return best, hostMatch{tier, bestKey}
 }
 
-// pinnedIPKey returns the entry of the smallest key (so the pick never depends
-// on map iteration order) that is an IP key naming hostAddr and pinned to
-// hostPort, among the usable, non-excluded entries of m.
+// pinnedIPKey returns the entry of the smallest IP key (a stable pick) that
+// names hostAddr and is pinned to hostPort.
 func pinnedIPKey[V any](m map[string]V, hostAddr netip.Addr, hostPort string, usable func(V) bool, excluded map[string]bool) (best V, bestKey string, found bool) {
 	for key, v := range m {
 		if excluded[key] || !usable(v) {

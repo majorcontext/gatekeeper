@@ -120,9 +120,8 @@ func (p *Proxy) evaluateAndReplaceLLMResponse(ctxReq *http.Request, req *http.Re
 	return false, ""
 }
 
-// denyMisdirected refuses a request inside an intercepted tunnel whose
-// authority is not the CONNECT target, with 421, before any credential
-// resolution or upstream dial.
+// denyMisdirected refuses with 421 a request inside an intercepted tunnel whose
+// authority is not the CONNECT target.
 func (p *Proxy) denyMisdirected(w http.ResponseWriter, r, req *http.Request, requestID string, start time.Time) {
 	reason := "Request host " + strconv.Quote(req.Host) + " does not match CONNECT target " + r.Host
 	host, _, _ := net.SplitHostPort(r.Host)
@@ -433,8 +432,8 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			innerReqID = newRequestID()
 		}
 
-		// The tunnel serves the CONNECT target and nothing else: credentials
-		// and policy are resolved for it, and the request is dialed to it.
+		// The tunnel serves the CONNECT target only (credentials and the dial
+		// are for it); refuse before any credential resolution.
 		if !authorityMatchesConnect(r.Host, req.Host) || (req.URL.Host != "" && !authorityMatchesConnect(r.Host, req.URL.Host)) {
 			p.denyMisdirected(w, r, req, innerReqID, reqStart)
 			return

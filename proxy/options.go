@@ -555,41 +555,30 @@ func (p *Proxy) RemoveRequestHeader(host, headerName string) {
 
 // SetTokenSubstitution replaces placeholder tokens with real tokens
 // in both Authorization headers and request bodies for a specific host.
-// host is a host pattern (see ValidateHostPattern) or an exact IP literal,
-// optionally pinned to a port; an invalid one, or an IPv6 literal with a
-// zone, is ignored and logged at debug level.
+// host is a host pattern or an exact IP literal, optionally pinned to a port;
+// an invalid one is ignored and logged at debug level.
 func (p *Proxy) SetTokenSubstitution(host, placeholder, realToken string) {
-	host, ok := normalizedHostKey(host, "token substitution")
-	if !ok {
-		return
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.tokenSubstitutions[host] = &TokenSubstitution{
-		placeholder: placeholder,
-		realToken:   realToken,
-	}
+	p.setTokenSubstitution(host, &TokenSubstitution{placeholder: placeholder, realToken: realToken})
 }
 
 // SetInsecureTokenSubstitution is SetTokenSubstitution for a substitution
 // that may also apply to plain-HTTP requests.
 func (p *Proxy) SetInsecureTokenSubstitution(host, placeholder, realToken string) {
+	p.setTokenSubstitution(host, &TokenSubstitution{placeholder: placeholder, realToken: realToken, AllowInsecure: true})
+}
+
+func (p *Proxy) setTokenSubstitution(host string, sub *TokenSubstitution) {
 	host, ok := normalizedHostKey(host, "token substitution")
 	if !ok {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.tokenSubstitutions[host] = &TokenSubstitution{
-		placeholder:   placeholder,
-		realToken:     realToken,
-		AllowInsecure: true,
-	}
+	p.tokenSubstitutions[host] = sub
 }
 
-// normalizedHostKey validates the key of a host-keyed setter that accepts a
-// port-pinned key (see hostKey) and returns the key to store. An invalid one
-// is logged and refused.
+// normalizedHostKey returns the key a host-keyed setter stores for host (see
+// hostKey), or false after logging an invalid one.
 func normalizedHostKey(host, what string) (string, bool) {
 	key, err := hostKey(host)
 	if err != nil {
@@ -601,14 +590,11 @@ func normalizedHostKey(host, what string) (string, bool) {
 
 // isValidHost checks if a host string is valid for credential injection.
 // Returns false for empty strings, malformed host patterns, paths, or other
-// invalid values. The credential setters that take no error ignore (and log)
-// an invalid host; a caller that wants the reason calls ValidateHostPattern.
+// invalid values.
 func isValidHost(host string) bool {
 	if host == "" {
 		return false
 	}
-	// Reject a malformed host pattern: a "*" other than the whole first label
-	// or the end of it, an empty label, or a non-ASCII name.
 	if ValidateHostPattern(host) != nil {
 		return false
 	}
@@ -627,8 +613,7 @@ func isValidHost(host string) bool {
 // policy must be "permissive" or "strict" (empty means permissive), and every
 // entry of allows must pass ValidateHostPattern; otherwise it returns an error
 // and changes nothing.
-// allows is a list of host patterns like "api.example.com", "*.example.com" or
-// "pr-*.example.com".
+// allows is a list of host patterns like "api.example.com" or "*.example.com".
 // grants is a list of grant names like "github" that will be expanded to host patterns.
 func (p *Proxy) SetNetworkPolicy(policy string, allows []string, grants []string) error {
 	policy, err := validatePolicy(policy)
@@ -662,8 +647,8 @@ func (p *Proxy) SetNetworkPolicy(policy string, allows []string, grants []string
 }
 
 // SetNetworkPolicyWithRules sets the network policy with per-host request rules.
-// The allows list should include hosts from rules (the caller extracts them),
-// and each entry must pass ValidateHostPattern, as in SetNetworkPolicy.
+// The allows list should include hosts from rules (the caller extracts them);
+// as in SetNetworkPolicy, each entry must pass ValidateHostPattern.
 // checker evaluates per-request rules; pathChecker reports if path-level rules exist.
 func (p *Proxy) SetNetworkPolicyWithRules(policy string, allows []string, grants []string, checker func(host string, port int, method, path string) bool, pathChecker func(host string, port int) bool) error {
 	policy, err := validatePolicy(policy)
@@ -692,8 +677,6 @@ func (p *Proxy) SetNetworkPolicyWithRules(policy string, allows []string, grants
 	return nil
 }
 
-// validateHostPatterns returns the error of the first pattern that
-// ValidateHostPattern rejects.
 func validateHostPatterns(patterns []string) error {
 	for _, pattern := range patterns {
 		if err := ValidateHostPattern(pattern); err != nil {

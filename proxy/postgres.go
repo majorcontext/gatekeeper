@@ -682,7 +682,6 @@ func (s *PostgresServer) handleConn(conn net.Conn) {
 	var sniHost string
 	tlsConn := tls.Server(conn, &tls.Config{
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			// Match and resolve on the name that is dialed, not the raw SNI.
 			name := hello.ServerName
 			if name != "" {
 				canon, err := canonicalTargetHost(name)

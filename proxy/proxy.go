@@ -277,9 +277,7 @@ func ParseHostPattern(pattern string) HostPattern {
 }
 
 // MatchesHostPattern reports whether a host:port matches a parsed host pattern.
-// host must already be in the form the connection dials: ASCII, with IDNA
-// names in their "xn--" form and no trailing dot. Case is folded for ASCII
-// letters only, so a non-ASCII host never matches an ASCII pattern.
+// host must be canonical (ASCII, IDNA names in "xn--" form, no trailing dot).
 func MatchesHostPattern(pattern HostPattern, host string, port int) bool {
 	return matchesPattern(pattern, host, port)
 }
