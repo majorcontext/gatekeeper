@@ -234,3 +234,158 @@ func dialPostgresTLS(addr, sni string) (*tls.Conn, error) {
 	defer cancel()
 	return tc, tc.HandshakeContext(ctx)
 }
+
+// An IP literal is an address, never a DNS name: a "*." or prefix pattern must
+// not match it, in a network allow list or a host-keyed lookup, whatever the
+// literal's text ends with. A zone is free text (net/http dials the address
+// and ignores it for IPv4-mapped IPv6), so "[::ffff:192.0.2.1%25x.example.com]"
+// is the address 192.0.2.1, not a host under example.com.
+func TestIPLiteralsNeverMatchDNSPatterns(t *testing.T) {
+	hosts := []string{
+		"192.0.2.1",
+		"::ffff:192.0.2.1",
+		"::ffff:192.0.2.1%x.example.com",
+		"[::ffff:192.0.2.1%x.example.com]",
+		"fe80::1%x.example.com",
+		"::1",
+	}
+	patterns := []string{"*.0.2.1", "19*.0.2.1", "*.example.com", "pr-*.example.com", "*.2.1"}
+	for _, host := range hosts {
+		for _, pattern := range patterns {
+			if matchHost([]HostPattern{parseHostPattern(pattern)}, host, 443) {
+				t.Errorf("allow pattern %q matched the IP literal %q", pattern, host)
+			}
+			m := map[string][]string{pattern: {"leaked"}}
+			if got, _ := lookupHostKeyed(m, host, nonEmptySlice); len(got) != 0 {
+				t.Errorf("host key %q matched the IP literal %q", pattern, host)
+			}
+			if got, _ := lookupHostKeyed(m, host+":443", nonEmptySlice); len(got) != 0 {
+				t.Errorf("host key %q matched the IP literal %q with a port", pattern, host)
+			}
+		}
+	}
+	// An exact IP pattern still matches that address.
+	if !matchHost([]HostPattern{parseHostPattern("192.0.2.1")}, "192.0.2.1", 443) {
+		t.Error("exact pattern 192.0.2.1 no longer matches 192.0.2.1")
+	}
+	if got, _ := lookupHostKeyed(map[string][]string{"192.0.2.1": {"ok"}}, "192.0.2.1:443", nonEmptySlice); len(got) != 1 {
+		t.Error("exact key 192.0.2.1 no longer matches 192.0.2.1:443")
+	}
+}
+
+// A zoned IPv6 literal has no use in a proxy request (a zone names an
+// interface of the proxy's host), so it is refused before any policy decision.
+func TestProxy_ZonedIPv6TargetsAreRefused(t *testing.T) {
+	targets := []string{
+		"[::ffff:192.0.2.1%25x.example.com]",
+		"[::1%25x.example.com]",
+		"[fe80::1%25eth0]",
+	}
+	for _, target := range targets {
+		t.Run(target, func(t *testing.T) {
+			rt := useRecordingTransport(t)
+			p := NewProxy()
+			if err := p.SetNetworkPolicy("strict", []string{"*.example.com"}, nil); err != nil {
+				t.Fatal(err)
+			}
+			p.SetInsecureCredentialWithGrant("*.example.com", "Authorization", "Bearer wildcard", "wildcard")
+			srv := httptest.NewServer(p)
+			defer srv.Close()
+
+			raw := "GET http://" + target + "/ HTTP/1.1\r\nHost: ignored\r\nConnection: close\r\n\r\n"
+			if got := serveRaw(t, srv.Listener.Addr().String(), raw); got != 400 {
+				t.Errorf("status = %d, want 400", got)
+			}
+			if len(rt.reqs) != 0 {
+				t.Errorf("forwarded to %q with Authorization %q", rt.reqs[0].URL.Host, rt.reqs[0].Header.Get("Authorization"))
+			}
+		})
+	}
+}
+
+func TestProxy_ZonedIPv6ConnectTargetsAreRefused(t *testing.T) {
+	ca, err := generateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"[::ffff:192.0.2.1%25x.example.com]:443", "[fe80::1%25eth0]:443"} {
+		p := NewProxy()
+		p.SetCA(ca)
+		if err := p.SetNetworkPolicy("strict", []string{"*.example.com"}, nil); err != nil {
+			t.Fatal(err)
+		}
+		srv := httptest.NewServer(p)
+		raw := "CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n"
+		if got := serveRaw(t, srv.Listener.Addr().String(), raw); got == 200 {
+			t.Errorf("CONNECT %s established a tunnel", target)
+		}
+		srv.Close()
+	}
+}
+
+// IP literals are exact keys for the host-keyed setters that take a port:
+// IPv4 and IPv6, bare or bracketed, with or without a port. A zone is refused.
+func TestHostKeyedSetters_AcceptExactIPKeys(t *testing.T) {
+	for _, key := range []string{"::1", "[::1]", "[::1]:8080", "127.0.0.1", "127.0.0.1:8080", "2001:db8::1"} {
+		t.Run(key, func(t *testing.T) {
+			p := NewProxy()
+			p.RemoveRequestHeader(key, "Authorization")
+			p.SetTokenSubstitution(key, "PLACEHOLDER", "secret")
+			p.SetInsecureTokenSubstitution(key, "PLACEHOLDER", "secret")
+			if len(p.removeHeaders) != 1 || len(p.tokenSubstitutions) != 1 {
+				t.Errorf("key %q was not stored: removeHeaders=%v substitutions=%v", key, p.removeHeaders, p.tokenSubstitutions)
+			}
+		})
+	}
+	for _, key := range []string{"fe80::1%eth0", "[fe80::1%25eth0]:80", "[::1%x.example.com]", "[::1]:0", "::zz", "[::1", "1.2.3.4:99999"} {
+		p := NewProxy()
+		p.RemoveRequestHeader(key, "Authorization")
+		p.SetTokenSubstitution(key, "PLACEHOLDER", "secret")
+		p.SetInsecureTokenSubstitution(key, "PLACEHOLDER", "secret")
+		if len(p.removeHeaders) != 0 || len(p.tokenSubstitutions) != 0 {
+			t.Errorf("bad key %q was stored: removeHeaders=%v substitutions=%v", key, p.removeHeaders, p.tokenSubstitutions)
+		}
+	}
+}
+
+// An exact IP key acts on requests to that address, as before the setters
+// validated their keys.
+func TestHostKeyedSetters_IPKeysActOnIPTargets(t *testing.T) {
+	tests := []struct {
+		name   string
+		key    string
+		target string
+	}{
+		{"bare IPv6 key", "::1", "http://[::1]:8080/"},
+		{"bracketed IPv6 key", "[::1]", "http://[::1]:8080/"},
+		{"IPv6 key with port", "[::1]:8080", "http://[::1]:8080/"},
+		{"spelled-out IPv6", "0:0:0:0:0:0:0:1", "http://[::1]:8080/"},
+		{"IPv4 key", "127.0.0.1", "http://127.0.0.1:8080/"},
+		{"IPv4 key with port", "127.0.0.1:8080", "http://127.0.0.1:8080/"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rt := useRecordingTransport(t)
+			p := NewProxy()
+			p.RemoveRequestHeader(tt.key, "X-Remove")
+			p.SetInsecureTokenSubstitution(tt.key, "PLACEHOLDER", "secret")
+			srv := httptest.NewServer(p)
+			defer srv.Close()
+
+			raw := "GET " + tt.target + " HTTP/1.1\r\nHost: ignored\r\nX-Remove: 1\r\nAuthorization: PLACEHOLDER\r\nConnection: close\r\n\r\n"
+			if got := serveRaw(t, srv.Listener.Addr().String(), raw); got != 200 {
+				t.Fatalf("status = %d, want 200", got)
+			}
+			if len(rt.reqs) != 1 {
+				t.Fatalf("transport got %d requests, want 1", len(rt.reqs))
+			}
+			out := rt.reqs[0]
+			if got := out.Header.Get("X-Remove"); got != "" {
+				t.Errorf("X-Remove = %q, want it removed", got)
+			}
+			if got := out.Header.Get("Authorization"); got != "secret" {
+				t.Errorf("Authorization = %q, want the substituted token", got)
+			}
+		})
+	}
+}

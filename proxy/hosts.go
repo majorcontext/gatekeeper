@@ -113,6 +113,9 @@ func matchPrefixWildcard(prefix, rest, host string) bool {
 // hostMatchesPattern is the host half of matchesPattern, without the port
 // policy.
 func hostMatchesPattern(pattern HostPattern, host string) bool {
+	if (pattern.prefix != "" || pattern.isWildcard) && isIPLiteral(host) {
+		return false
+	}
 	switch {
 	case pattern.prefix != "":
 		return matchPrefixWildcard(pattern.prefix, pattern.host, host)
@@ -266,6 +269,9 @@ func matchPrefixWildcardHostKey(key, host, bare string) bool {
 // wildcardHostKeyTier reports how a wildcard key matches host: a prefix key
 // ("pr-*.example.com") or a "*." key, or hostMatchNone.
 func wildcardHostKeyTier(key, host, bare string) hostMatchTier {
+	if isIPLiteral(bare) {
+		return hostMatchNone
+	}
 	switch {
 	case matchPrefixWildcardHostKey(key, host, bare):
 		return hostMatchPrefixWildcard

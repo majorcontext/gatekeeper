@@ -544,7 +544,8 @@ func (p *Proxy) AddResponseTransformer(host string, transformer ResponseTransfor
 
 // RemoveRequestHeader removes a client-sent header before forwarding.
 func (p *Proxy) RemoveRequestHeader(host, headerName string) {
-	if !validHostKey(host, "request header removal") {
+	host, ok := normalizedHostKey(host, "request header removal")
+	if !ok {
 		return
 	}
 	p.mu.Lock()
@@ -554,10 +555,12 @@ func (p *Proxy) RemoveRequestHeader(host, headerName string) {
 
 // SetTokenSubstitution replaces placeholder tokens with real tokens
 // in both Authorization headers and request bodies for a specific host.
-// host is a host pattern (see ValidateHostPattern), optionally pinned to a
-// port; an invalid one is ignored and logged at debug level.
+// host is a host pattern (see ValidateHostPattern) or an exact IP literal,
+// optionally pinned to a port; an invalid one, or an IPv6 literal with a
+// zone, is ignored and logged at debug level.
 func (p *Proxy) SetTokenSubstitution(host, placeholder, realToken string) {
-	if !validHostKey(host, "token substitution") {
+	host, ok := normalizedHostKey(host, "token substitution")
+	if !ok {
 		return
 	}
 	p.mu.Lock()
@@ -571,7 +574,8 @@ func (p *Proxy) SetTokenSubstitution(host, placeholder, realToken string) {
 // SetInsecureTokenSubstitution is SetTokenSubstitution for a substitution
 // that may also apply to plain-HTTP requests.
 func (p *Proxy) SetInsecureTokenSubstitution(host, placeholder, realToken string) {
-	if !validHostKey(host, "token substitution") {
+	host, ok := normalizedHostKey(host, "token substitution")
+	if !ok {
 		return
 	}
 	p.mu.Lock()
@@ -583,14 +587,16 @@ func (p *Proxy) SetInsecureTokenSubstitution(host, placeholder, realToken string
 	}
 }
 
-// validHostKey reports whether host is a valid host pattern for a host-keyed
-// setter that accepts a port-pinned key. An invalid one is logged and refused.
-func validHostKey(host, what string) bool {
-	if err := ValidateHostPattern(host); err != nil {
+// normalizedHostKey validates the key of a host-keyed setter that accepts a
+// port-pinned key (see hostKey) and returns the key to store. An invalid one
+// is logged and refused.
+func normalizedHostKey(host, what string) (string, bool) {
+	key, err := hostKey(host)
+	if err != nil {
 		slog.Debug("ignoring invalid host for "+what, "subsystem", "proxy", "host", host, "error", err)
-		return false
+		return "", false
 	}
-	return true
+	return key, true
 }
 
 // isValidHost checks if a host string is valid for credential injection.

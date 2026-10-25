@@ -21,15 +21,19 @@ import (
 // U+3002, U+FF0E and U+FF61 into "." and U+0130 into a different label from
 // "i", differences a byte-wise match on the raw host cannot see. One trailing
 // root dot is dropped, so "api.example.com." is the host "api.example.com"
-// for exact, "*." and prefix patterns alike. An IP literal passes unchanged.
-// It returns an error for a host that has no dialable form: an empty label,
-// or a name IDNA rejects.
+// for exact, "*." and prefix patterns alike. An IP literal is returned in its
+// canonical text form. It returns an error for a host that has no dialable
+// form: an empty label, a name IDNA rejects, or an IPv6 literal with a zone
+// (the zone is free text, and the dial ignores it for an IPv4-mapped address).
 func canonicalTargetHost(host string) (string, error) {
-	if strings.Contains(host, ":") {
-		if _, err := netip.ParseAddr(host); err != nil {
-			return "", fmt.Errorf("invalid IP literal %q", host)
+	if addr, err := netip.ParseAddr(host); err == nil {
+		if addr.Zone() != "" {
+			return "", fmt.Errorf("IP literal %q has a zone", host)
 		}
-		return host, nil
+		return addr.String(), nil
+	}
+	if strings.Contains(host, ":") {
+		return "", fmt.Errorf("invalid IP literal %q", host)
 	}
 	if !isASCII(host) {
 		ascii, err := idna.Lookup.ToASCII(host)
@@ -43,6 +47,56 @@ func canonicalTargetHost(host string) (string, error) {
 		return "", fmt.Errorf("host %q has an empty label", host)
 	}
 	return host, nil
+}
+
+// isIPLiteral reports whether host, bare or in brackets, with or without a
+// zone, is an IP address. An address is never a DNS name: a "*." or prefix
+// pattern must not match one, however its text ends (a zone is free text, and
+// "192.0.2.1" ends in ".0.2.1").
+func isIPLiteral(host string) bool {
+	_, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(host, "["), "]"))
+	return err == nil
+}
+
+// hostKey validates and normalizes the key of a host-keyed setter that takes
+// a port-pinned key: a host pattern (ValidateHostPattern), or an exact IP
+// literal, IPv4 or IPv6, bare or in brackets, with an optional port
+// ("::1", "[::1]:8080", "127.0.0.1:8080"). An IP key is returned in the form
+// a request's lookup host takes, which is the canonical address, bracketed
+// when it has a port. A zone is refused: it is never part of a request host.
+func hostKey(key string) (string, error) {
+	addr, port, isIP := splitIPKey(key)
+	if !isIP {
+		return key, ValidateHostPattern(key)
+	}
+	if addr.Zone() != "" {
+		return "", fmt.Errorf("host key %q has an IPv6 zone", key)
+	}
+	if port == "" {
+		return addr.String(), nil
+	}
+	if n, err := strconv.Atoi(port); err != nil || n <= 0 || n > 65535 {
+		return "", fmt.Errorf("host key %q has an invalid port", key)
+	}
+	return net.JoinHostPort(addr.String(), port), nil
+}
+
+// splitIPKey splits an IP literal key into its address and port.
+func splitIPKey(key string) (addr netip.Addr, port string, ok bool) {
+	if a, err := netip.ParseAddr(key); err == nil {
+		return a, "", true
+	}
+	if strings.HasPrefix(key, "[") && strings.HasSuffix(key, "]") {
+		if a, err := netip.ParseAddr(key[1 : len(key)-1]); err == nil {
+			return a, "", true
+		}
+	}
+	if hostPart, portPart, err := net.SplitHostPort(key); err == nil {
+		if a, err := netip.ParseAddr(hostPart); err == nil {
+			return a, portPart, true
+		}
+	}
+	return netip.Addr{}, "", false
 }
 
 // lowerASCII lowercases the ASCII letters of s and nothing else. DNS folds
@@ -139,6 +193,8 @@ func canonicalizeURLHost(u *url.URL) (*url.URL, error) {
 	out.Host = canon
 	if port := u.Port(); port != "" {
 		out.Host = net.JoinHostPort(canon, port)
+	} else if strings.Contains(canon, ":") {
+		out.Host = "[" + canon + "]"
 	}
 	return &out, nil
 }

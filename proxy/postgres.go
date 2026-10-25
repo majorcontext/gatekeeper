@@ -117,7 +117,8 @@ func (s *staticPostgresResolver) InvalidatePassword(host, user, database string)
 // explicit port other than 5432 will never match. An invalid pattern (see
 // ValidateHostPattern) is ignored and logged at debug level.
 func (p *Proxy) SetPostgresResolver(pattern string, r PostgresCredentialResolver) {
-	if !validHostKey(pattern, "postgres resolver") {
+	if err := ValidateHostPattern(pattern); err != nil {
+		slog.Debug("ignoring invalid host for postgres resolver", "subsystem", "proxy", "host", pattern, "error", err)
 		return
 	}
 	p.mu.Lock()

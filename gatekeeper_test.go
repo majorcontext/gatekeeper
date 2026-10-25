@@ -43,12 +43,20 @@ import (
 // Returns the server (for cleanup), the port it's listening on, and the CA cert pool.
 func startTLSBackend(t *testing.T, ca *proxy.CA, handler http.Handler) (srv *http.Server, port string, caCertPool *x509.CertPool) {
 	t.Helper()
+	return startTLSBackendFor(t, ca, "127.0.0.1", handler)
+}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+// startTLSBackendFor is startTLSBackend for a backend that listens on, and
+// presents a certificate for, host (an IP literal or a name that resolves to
+// this machine).
+func startTLSBackendFor(t *testing.T, ca *proxy.CA, host string, handler http.Handler) (srv *http.Server, port string, caCertPool *x509.CertPool) {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert, err := ca.GenerateCert("127.0.0.1")
+	cert, err := ca.GenerateCert(host)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3391,8 +3399,8 @@ func TestServerPostgresUnknownResolver(t *testing.T) {
 
 func TestHTTPSTokenExchangeOutrankedByStatic(t *testing.T) {
 	// End-to-end wiring check for outranked resolvers: a token-exchange
-	// credential under a wildcard host is outranked by a static credential
-	// for the exact host. The resolver must not run (no STS round trip),
+	// credential under a case-folded host key is outranked by a static
+	// credential for the exact host. The resolver must not run (no STS round trip),
 	// the static credential must be injected, and the subject header must
 	// still be stripped before the request leaves the proxy — the wiring
 	// declares it via SetCredentialResolverWithStripHeaders.
@@ -3421,7 +3429,7 @@ func TestHTTPSTokenExchangeOutrankedByStatic(t *testing.T) {
 		backendSubjectHeader string
 		backendMu            sync.Mutex
 	)
-	_, backendPort, caCertPool := startTLSBackend(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, backendPort, caCertPool := startTLSBackendFor(t, ca, "localhost", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		backendMu.Lock()
 		backendAuth = r.Header.Get("Authorization")
 		backendSubjectHeader = r.Header.Get("X-Gatekeeper-Subject")
@@ -3439,8 +3447,10 @@ func TestHTTPSTokenExchangeOutrankedByStatic(t *testing.T) {
 		},
 		Credentials: []CredentialConfig{
 			{
-				// Wildcard suffix that matches 127.0.0.1.
-				Host:   "*.0.0.1",
+				// Matches localhost by case folding only, so the exact
+				// static credential below outranks it. (A "*." pattern never
+				// matches an IP literal, so this test targets a name.)
+				Host:   "LOCALHOST",
 				Grant:  "github",
 				Prefix: "Bearer",
 				Source: SourceConfig{
@@ -3452,7 +3462,7 @@ func TestHTTPSTokenExchangeOutrankedByStatic(t *testing.T) {
 				},
 			},
 			{
-				Host:  "127.0.0.1",
+				Host:  "localhost",
 				Grant: "static-grant",
 				Source: SourceConfig{
 					Type:  "static",
@@ -3481,7 +3491,7 @@ func TestHTTPSTokenExchangeOutrankedByStatic(t *testing.T) {
 		},
 	}
 
-	req, err := http.NewRequest(http.MethodGet, "https://127.0.0.1:"+backendPort+"/user", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://localhost:"+backendPort+"/user", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
