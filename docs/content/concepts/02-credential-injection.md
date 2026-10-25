@@ -18,6 +18,9 @@ Matching rules:
 |---|---|---|
 | `api.github.com` | `api.github.com`, `api.github.com:443` (port stripped before comparison) | `github.com`, `foo.api.github.com` |
 | `*.github.com` | `api.github.com`, `foo.bar.github.com` | `github.com` |
+| `pr-*.example.com` | `pr-6301.example.com` | `pr-.example.com`, `pr-1.x.example.com`, `xpr-1.example.com`, `example.com` |
+
+A prefix pattern, such as `pr-*.example.com`, matches one label: the prefix, at least one more character, then exactly the rest of the pattern. The `*` must end the first label, the prefix cannot be empty, and the rest needs two labels. Any other `*` placement fails config load. When several patterns match, an exact host wins over a prefix pattern, and a prefix pattern wins over a `*.` pattern.
 
 A `host` pattern cannot contain a port — `credentials[].host` is validated and any value containing `:` is rejected (silently dropped, logged at debug level), so a pattern like `api.example.com:8080` can never be configured. This differs from network policy's `allow` patterns, which do support an explicit port and default unported patterns to matching only ports 80 and 443 — that port-aware matching is specific to network policy and does not apply to credential host matching. See [Network Policy](./04-network-policy.md).
 

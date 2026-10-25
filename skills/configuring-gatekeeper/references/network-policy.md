@@ -29,6 +29,10 @@ globs:
 - Glob: `*.anthropic.com` matches `api.anthropic.com` and any subdomain at any
   depth (e.g. `a-b.anthropic.com`, `x.y.anthropic.com`) — it's a `.anthropic.com`
   suffix match — but **not** the bare `anthropic.com`.
+- Prefix glob: `pr-*.example.com` matches `pr-6301.example.com`: one label that
+  starts with `pr-` and has at least one more character, then exactly
+  `.example.com`. It does not match `pr-1.x.example.com` or `example.com`. Any
+  other `*` placement is a config error.
 - Ports: a pattern without an explicit port matches only the standard ports 80
   and 443. For a non-standard port, include it in the pattern (`host:8443`).
 - Add regional/multi-label hosts explicitly (e.g.

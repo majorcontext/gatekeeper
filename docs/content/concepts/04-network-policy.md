@@ -33,6 +33,7 @@ The allow list is a set of host patterns. Each pattern follows the same matching
 
 - **Exact match.** `api.github.com` matches only `api.github.com`.
 - **Wildcard.** `*.github.com` matches any subdomain: `api.github.com`, `raw.githubusercontent.com` does not match (different base domain), but `foo.bar.github.com` does.
+- **Prefix wildcard.** `pr-*.example.com` matches `pr-6301.example.com`: one label that starts with `pr-` and has at least one more character, then exactly `.example.com`. It does not match `pr-.example.com`, `pr-1.x.example.com`, `xpr-1.example.com`, or `example.com`.
 - **Port-specific.** `api.example.com:8080` matches only that port. Patterns without a port match only ports 80 and 443.
 
 When a client sends a CONNECT request, gatekeeper extracts the host and port and checks them against the allow list. If no pattern matches, the tunnel is refused.

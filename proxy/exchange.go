@@ -102,7 +102,7 @@ func (l *exchangeLog) matches(host string) bool {
 		if pat.port != 0 && pat.port != port {
 			continue
 		}
-		if pat.isWildcard && hostHasSuffixFold(host, "."+pat.host) || !pat.isWildcard && strings.EqualFold(pat.host, host) {
+		if hostMatchesPattern(pat, host) {
 			return true
 		}
 	}

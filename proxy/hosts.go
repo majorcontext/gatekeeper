@@ -13,6 +13,7 @@ type HostPattern struct {
 	host       string // the host part (without port)
 	port       int    // specific port, or 0 if unspecified (matches only ports 80 and 443)
 	isWildcard bool   // true if pattern starts with *.
+	prefix     string // lowercase prefix of a one-label prefix wildcard (pr-*.example.com), else empty
 }
 
 // parseHostPattern parses a host pattern string into a HostPattern struct.
@@ -21,6 +22,7 @@ type HostPattern struct {
 //   - api.example.com:8080
 //   - *.example.com
 //   - *.example.com:443
+//   - pr-*.example.com (one label that starts with "pr-" and has more characters)
 func parseHostPattern(s string) HostPattern {
 	p, _ := parseHostPatternChecked(s)
 	return p
@@ -54,6 +56,14 @@ func parseHostPatternChecked(s string) (HostPattern, error) {
 	var err error
 	if host == "" {
 		err = fmt.Errorf("host pattern %q has no host", orig)
+	} else if strings.Contains(host, "*") {
+		if p.isWildcard {
+			err = fmt.Errorf("host pattern %q has a * after its leading \"*.\"", orig)
+		} else if prefix, rest, ok := splitPrefixWildcard(host); ok {
+			p.prefix, p.host = prefix, rest
+		} else {
+			err = fmt.Errorf("host pattern %q: * must be the whole first label (*.example.com) or end it (pr-*.example.com)", orig)
+		}
 	}
 	if hasPort {
 		port, perr := strconv.Atoi(portStr)
@@ -67,10 +77,52 @@ func parseHostPatternChecked(s string) (HostPattern, error) {
 	return p, err
 }
 
+// splitPrefixWildcard splits a one-label prefix wildcard such as
+// "pr-*.example.com[:port]" into its lowercase prefix ("pr-") and the rest
+// after the first dot ("example.com[:port]"). The prefix is non-empty and has
+// no "." or "*", the "*" ends the first label, and the rest has no "*" and at
+// least two labels, so "pr-*.com" and "pr-*" are not prefix wildcards.
+func splitPrefixWildcard(s string) (prefix, rest string, ok bool) {
+	label, rest, found := strings.Cut(s, ".")
+	if !found || len(label) < 2 || !strings.HasSuffix(label, "*") || strings.Contains(label[:len(label)-1], "*") {
+		return "", "", false
+	}
+	domain, _, _ := strings.Cut(rest, ":")
+	if strings.Contains(rest, "*") || !strings.Contains(domain, ".") {
+		return "", "", false
+	}
+	return strings.ToLower(label[:len(label)-1]), strings.ToLower(rest), true
+}
+
+// matchPrefixWildcard reports whether host is one label that starts with
+// prefix and has at least one more character, followed by exactly rest.
+// Both prefix and rest must already be lowercase.
+func matchPrefixWildcard(prefix, rest, host string) bool {
+	label, remainder, found := strings.Cut(strings.ToLower(host), ".")
+	return found && remainder == rest && len(label) > len(prefix) && strings.HasPrefix(label, prefix)
+}
+
+// hostMatchesPattern is the host half of matchesPattern, without the port
+// policy.
+func hostMatchesPattern(pattern HostPattern, host string) bool {
+	switch {
+	case pattern.prefix != "":
+		return matchPrefixWildcard(pattern.prefix, pattern.host, host)
+	case pattern.isWildcard:
+		// *.example.com matches api.example.com, foo.bar.example.com: the
+		// host must end with .{pattern.host}
+		return hostHasSuffixFold(host, "."+pattern.host)
+	default:
+		return strings.EqualFold(pattern.host, host)
+	}
+}
+
 // matchHost checks if the given host:port matches any of the patterns.
 // Matching rules:
 //   - Exact match: "api.github.com" matches only "api.github.com"
 //   - Wildcard: "*.github.com" matches "api.github.com", "foo.bar.github.com"
+//   - Prefix wildcard: "pr-*.example.com" matches "pr-1.example.com" only: one
+//     label, "pr-" plus at least one character, then exactly ".example.com"
 //   - Port matching: if pattern has port, must match exactly;
 //     if pattern has no port (0), match 80 or 443
 func matchHost(patterns []HostPattern, host string, port int) bool {
@@ -88,15 +140,7 @@ func matchesPattern(pattern HostPattern, host string, port int) bool {
 		return false
 	}
 
-	// Check host matching
-	if pattern.isWildcard {
-		// Wildcard matching: *.example.com matches api.example.com, foo.bar.example.com
-		// The host must end with .{pattern.host}
-		return hostHasSuffixFold(host, "."+pattern.host)
-	}
-
-	// Exact host match
-	return strings.EqualFold(pattern.host, host)
+	return hostMatchesPattern(pattern, host)
 }
 
 // allowPatternPortMatches is the port policy of network allow patterns: a
@@ -202,6 +246,27 @@ func matchWildcardHostKey(key, host, bare string) bool {
 		(host != bare && hostHasSuffixFold(host, suffix))
 }
 
+// matchPrefixWildcardHostKey is the same policy for a one-label prefix key
+// such as "pr-*.example.com": the key's rest (which keeps any ":port") is
+// compared against the bare host, or against the full host:port.
+func matchPrefixWildcardHostKey(key, host, bare string) bool {
+	prefix, rest, ok := splitPrefixWildcard(key)
+	return ok && (matchPrefixWildcard(prefix, rest, bare) ||
+		(host != bare && matchPrefixWildcard(prefix, rest, host)))
+}
+
+// wildcardHostKeyTier reports how a wildcard key matches host: a prefix key
+// ("pr-*.example.com") or a "*." key, or hostMatchNone.
+func wildcardHostKeyTier(key, host, bare string) hostMatchTier {
+	switch {
+	case matchPrefixWildcardHostKey(key, host, bare):
+		return hostMatchPrefixWildcard
+	case matchWildcardHostKey(key, host, bare):
+		return hostMatchWildcard
+	}
+	return hostMatchNone
+}
+
 // compareHostKeySpecificity ranks two host keys of the same tier that match
 // the same host: positive when a is more specific than b, negative when
 // less, zero when equally specific. Specificity is the length of the key's
@@ -237,12 +302,15 @@ func moreSpecificWildcardKey(a, b string) bool {
 
 // hostMatchTier classifies how lookupHostKeyed matched a host against a key.
 // Order matters: higher tiers outrank lower ones. A verbatim (case-exact)
-// key match outranks a case-fold match, which outranks a wildcard match.
+// key match outranks a case-fold match, which outranks a prefix wildcard
+// ("pr-*.example.com"), which outranks a "*." wildcard. So an exact host beats
+// a prefix pattern beats a "*." pattern, whatever the key lengths.
 type hostMatchTier int
 
 const (
 	hostMatchNone hostMatchTier = iota
 	hostMatchWildcard
+	hostMatchPrefixWildcard
 	hostMatchExactFold
 	hostMatchExact
 )
@@ -269,13 +337,15 @@ func (m hostMatch) outranks(other hostMatch) bool {
 	return m.tier != hostMatchNone && compareHostKeySpecificity(m.key, other.key) > 0
 }
 
-// lookupHostKeyed resolves a host against a map keyed by exact hostnames or
-// "*." wildcard patterns, skipping entries the usable predicate rejects
+// lookupHostKeyed resolves a host against a map keyed by exact hostnames,
+// "*." wildcard patterns, or one-label prefix patterns ("pr-*.example.com"),
+// skipping entries the usable predicate rejects
 // (embedder-supplied maps may hold empty slices or nil values, which must
 // not shadow a key from a later tier). Exact keys win over wildcard keys:
 // the host is tried verbatim, then port-stripped, then case-insensitively;
-// only when every exact tier misses is the most specific (longest) matching
-// wildcard key used, ranked by moreSpecificWildcardKey. In the fold tier, a
+// only when every exact tier misses is a matching wildcard key used: a prefix
+// key before a "*." key, then the most specific (longest) by
+// moreSpecificWildcardKey. In the fold tier, a
 // key matching the full host:port beats a key matching only the bare host
 // (mirroring the verbatim tiers' order), and any remaining tie goes to the
 // lexicographically smallest key so the pick never depends on map iteration
@@ -325,9 +395,9 @@ func lookupHostKeyedExcluding[V any](m map[string]V, host string, usable func(V)
 		if tier == hostMatchExactFold {
 			continue
 		}
-		if matchWildcardHostKey(key, host, bare) &&
-			(tier == hostMatchNone || moreSpecificWildcardKey(key, bestKey)) {
-			bestKey, best, tier = key, v, hostMatchWildcard
+		if wt := wildcardHostKeyTier(key, host, bare); wt != hostMatchNone &&
+			(wt > tier || wt == tier && moreSpecificWildcardKey(key, bestKey)) {
+			bestKey, best, tier = key, v, wt
 		}
 	}
 	return best, hostMatch{tier, bestKey}
