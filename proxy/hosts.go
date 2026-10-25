@@ -51,7 +51,7 @@ func parseHostPatternChecked(s string) (HostPattern, error) {
 
 	// Split host and port
 	host, portStr, hasPort := strings.Cut(s, ":")
-	p.host = strings.ToLower(host)
+	p.host = lowerASCII(host)
 
 	var err error
 	switch {
@@ -99,14 +99,14 @@ func splitPrefixWildcard(s string) (prefix, rest string, ok bool) {
 	if strings.Contains(rest, "*") || !strings.Contains(domain, ".") || hasEmptyLabel(domain) {
 		return "", "", false
 	}
-	return strings.ToLower(label[:len(label)-1]), strings.ToLower(rest), true
+	return lowerASCII(label[:len(label)-1]), lowerASCII(rest), true
 }
 
 // matchPrefixWildcard reports whether host is one label that starts with
 // prefix and has at least one more character, followed by exactly rest.
 // Both prefix and rest must already be lowercase.
 func matchPrefixWildcard(prefix, rest, host string) bool {
-	label, remainder, found := strings.Cut(strings.ToLower(host), ".")
+	label, remainder, found := strings.Cut(lowerASCII(host), ".")
 	return found && remainder == rest && len(label) > len(prefix) && strings.HasPrefix(label, prefix)
 }
 
@@ -121,7 +121,7 @@ func hostMatchesPattern(pattern HostPattern, host string) bool {
 		// host must end with .{pattern.host}
 		return hostHasSuffixFold(host, "."+pattern.host)
 	default:
-		return strings.EqualFold(pattern.host, host)
+		return lowerASCII(pattern.host) == lowerASCII(host)
 	}
 }
 
@@ -160,12 +160,12 @@ func allowPatternPortMatches(patternPort, port int) bool {
 	return port == 80 || port == 443
 }
 
-// hostHasSuffixFold reports whether host ends with suffix, ignoring case.
-// Lowercasing both sides, rather than slicing by byte length, keeps
-// characters whose lowercase form has a different byte length (U+1E9E to
-// U+00DF) from splitting mid-rune.
+// hostHasSuffixFold reports whether host ends with suffix, ignoring ASCII
+// case. Lowercasing both sides, rather than slicing by byte length, keeps a
+// multi-byte character from splitting mid-rune. Only ASCII letters fold (see
+// lowerASCII), so a non-ASCII character matches only itself.
 func hostHasSuffixFold(host, suffix string) bool {
-	return strings.HasSuffix(strings.ToLower(host), strings.ToLower(suffix))
+	return strings.HasSuffix(lowerASCII(host), lowerASCII(suffix))
 }
 
 // grantHosts maps grant names to their allowed host patterns.
@@ -376,7 +376,7 @@ func lookupHostKeyedExcluding[V any](m map[string]V, host string, usable func(V)
 			return v, hostMatch{hostMatchExact, bare}
 		}
 	}
-	lowerHost, lowerBare := strings.ToLower(host), strings.ToLower(bare)
+	lowerHost, lowerBare := lowerASCII(host), lowerASCII(bare)
 	var best V
 	var bestKey string
 	tier := hostMatchNone
@@ -388,10 +388,10 @@ func lookupHostKeyedExcluding[V any](m map[string]V, host string, usable func(V)
 		// The case-insensitive exact tier must fold both the bare host and
 		// the full host:port — port-bearing keys are expressible in
 		// embedder-built RunContextData maps. A host:port fold match beats
-		// a bare fold match, as in the verbatim tiers. Folding is via
-		// ToLower so this tier agrees with the wildcard tier's semantics
-		// (EqualFold's simple folding differs for e.g. U+017F ſ).
-		lowerKey := strings.ToLower(key)
+		// a bare fold match, as in the verbatim tiers. Folding is ASCII-only
+		// (lowerASCII) in every tier, so no key folds onto a host that the
+		// transport would dial as a different name.
+		lowerKey := lowerASCII(key)
 		if foldsHost := host != bare && lowerKey == lowerHost; foldsHost || lowerKey == lowerBare {
 			if tier != hostMatchExactFold ||
 				(foldsHost && !bestFoldsHost) ||

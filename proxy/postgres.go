@@ -114,8 +114,12 @@ func (s *staticPostgresResolver) InvalidatePassword(host, user, database string)
 // SetPostgresResolver registers a proxy-level Postgres credential resolver
 // for hosts matching pattern. Calling again with the same pattern replaces
 // the previous resolver. Patterns match hostname only; a pattern with an
-// explicit port other than 5432 will never match.
+// explicit port other than 5432 will never match. An invalid pattern (see
+// ValidateHostPattern) is ignored and logged at debug level.
 func (p *Proxy) SetPostgresResolver(pattern string, r PostgresCredentialResolver) {
+	if !validHostKey(pattern, "postgres resolver") {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for i, entry := range p.postgresResolvers {
@@ -677,8 +681,17 @@ func (s *PostgresServer) handleConn(conn net.Conn) {
 	var sniHost string
 	tlsConn := tls.Server(conn, &tls.Config{
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			sniHost = hello.ServerName
-			return s.proxy.ca.GenerateCert(hello.ServerName)
+			// Match and resolve on the name that is dialed, not the raw SNI.
+			name := hello.ServerName
+			if name != "" {
+				canon, err := canonicalTargetHost(name)
+				if err != nil {
+					return nil, err
+				}
+				name = canon
+			}
+			sniHost = name
+			return s.proxy.ca.GenerateCert(name)
 		},
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), postgresHandshakeTimeout)

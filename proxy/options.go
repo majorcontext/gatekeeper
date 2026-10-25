@@ -544,6 +544,9 @@ func (p *Proxy) AddResponseTransformer(host string, transformer ResponseTransfor
 
 // RemoveRequestHeader removes a client-sent header before forwarding.
 func (p *Proxy) RemoveRequestHeader(host, headerName string) {
+	if !validHostKey(host, "request header removal") {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.removeHeaders[host] = append(p.removeHeaders[host], headerName)
@@ -551,7 +554,12 @@ func (p *Proxy) RemoveRequestHeader(host, headerName string) {
 
 // SetTokenSubstitution replaces placeholder tokens with real tokens
 // in both Authorization headers and request bodies for a specific host.
+// host is a host pattern (see ValidateHostPattern), optionally pinned to a
+// port; an invalid one is ignored and logged at debug level.
 func (p *Proxy) SetTokenSubstitution(host, placeholder, realToken string) {
+	if !validHostKey(host, "token substitution") {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.tokenSubstitutions[host] = &TokenSubstitution{
@@ -563,6 +571,9 @@ func (p *Proxy) SetTokenSubstitution(host, placeholder, realToken string) {
 // SetInsecureTokenSubstitution is SetTokenSubstitution for a substitution
 // that may also apply to plain-HTTP requests.
 func (p *Proxy) SetInsecureTokenSubstitution(host, placeholder, realToken string) {
+	if !validHostKey(host, "token substitution") {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.tokenSubstitutions[host] = &TokenSubstitution{
@@ -570,6 +581,16 @@ func (p *Proxy) SetInsecureTokenSubstitution(host, placeholder, realToken string
 		realToken:     realToken,
 		AllowInsecure: true,
 	}
+}
+
+// validHostKey reports whether host is a valid host pattern for a host-keyed
+// setter that accepts a port-pinned key. An invalid one is logged and refused.
+func validHostKey(host, what string) bool {
+	if err := ValidateHostPattern(host); err != nil {
+		slog.Debug("ignoring invalid host for "+what, "subsystem", "proxy", "host", host, "error", err)
+		return false
+	}
+	return true
 }
 
 // isValidHost checks if a host string is valid for credential injection.

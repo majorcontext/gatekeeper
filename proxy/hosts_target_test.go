@@ -334,11 +334,13 @@ func TestIntercept_InnerAuthorityMustMatchConnectTarget(t *testing.T) {
 	setup.Proxy.SetCredentialWithGrant(setup.BackendHost, "Authorization", "Bearer secret", "g")
 	hostPort := mustParseURL(setup.Backend.URL).Host
 
-	var resolverCalls int
+	// Credential lookup runs on the CONNECT target, so a resolver on that
+	// host is called for every request that gets past the authority check.
 	var resolverMu sync.Mutex
-	setup.Proxy.SetCredentialResolver("resolver.example", func(context.Context, *http.Request, *http.Request, string) ([]CredentialHeader, error) {
+	var resolverHosts []string // inner Host of every request the resolver saw
+	setup.Proxy.SetCredentialResolver(setup.BackendHost, func(_ context.Context, _, inner *http.Request, _ string) ([]CredentialHeader, error) {
 		resolverMu.Lock()
-		resolverCalls++
+		resolverHosts = append(resolverHosts, inner.Host)
 		resolverMu.Unlock()
 		return nil, nil
 	})
@@ -354,7 +356,6 @@ func TestIntercept_InnerAuthorityMustMatchConnectTarget(t *testing.T) {
 		{"other host, same port", "GET / HTTP/1.1\r\nHost: attacker.example:" + mustParseURL(setup.Backend.URL).Port() + "\r\nConnection: close\r\n\r\n", 421},
 		{"same host, other port", "GET / HTTP/1.1\r\nHost: " + setup.BackendHost + ":1\r\nConnection: close\r\n\r\n", 421},
 		{"absolute-form for other host", "GET https://attacker.example/ HTTP/1.1\r\nHost: " + hostPort + "\r\nConnection: close\r\n\r\n", 421},
-		{"host that resolves a credential", "GET / HTTP/1.1\r\nHost: resolver.example\r\nConnection: close\r\n\r\n", 421},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -384,8 +385,13 @@ func TestIntercept_InnerAuthorityMustMatchConnectTarget(t *testing.T) {
 	}
 	resolverMu.Lock()
 	defer resolverMu.Unlock()
-	if resolverCalls != 0 {
-		t.Errorf("a resolver ran %d times for a mismatched authority", resolverCalls)
+	if len(resolverHosts) != 2 {
+		t.Errorf("resolver saw requests for hosts %q, want only the two requests for the CONNECT target", resolverHosts)
+	}
+	for _, h := range resolverHosts {
+		if !strings.HasPrefix(h, setup.BackendHost) {
+			t.Errorf("resolver ran for mismatched host %q", h)
+		}
 	}
 }
 

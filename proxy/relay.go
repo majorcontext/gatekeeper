@@ -42,6 +42,15 @@ func (p *Proxy) AddRelay(name, targetURL string) error {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("invalid relay target URL %q", targetURL)
 	}
+	// Store the target with the host that will be dialed, so the credential
+	// lookup and the connection use one name.
+	canon, err := canonicalizeURLHost(u)
+	if err != nil {
+		return fmt.Errorf("invalid relay target URL %q: %w", targetURL, err)
+	}
+	if canon != u {
+		targetURL = canon.String()
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.relays == nil {
@@ -117,6 +126,11 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// Build target URL
 	targetURL, err := url.Parse(target)
 	if err != nil {
+		p.logExit(r, logBase, start, http.StatusInternalServerError, func(d *RequestLogData) { d.Err = err })
+		http.Error(w, p.errorPrefix()+": Invalid relay target URL", http.StatusInternalServerError)
+		return
+	}
+	if targetURL, err = canonicalizeURLHost(targetURL); err != nil {
 		p.logExit(r, logBase, start, http.StatusInternalServerError, func(d *RequestLogData) { d.Err = err })
 		http.Error(w, p.errorPrefix()+": Invalid relay target URL", http.StatusInternalServerError)
 		return

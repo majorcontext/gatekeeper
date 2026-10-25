@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -44,6 +45,25 @@ func canonicalTargetHost(host string) (string, error) {
 	return host, nil
 }
 
+// lowerASCII lowercases the ASCII letters of s and nothing else. DNS folds
+// case for ASCII only: Unicode lowercasing would match hosts the transport
+// dials as different names (U+0130 lowercases to "i", but IDNA maps it to a
+// different label), so every host comparison folds with this.
+func lowerASCII(s string) string {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; 'A' <= c && c <= 'Z' {
+			b := []byte(s)
+			for j := i; j < len(b); j++ {
+				if 'A' <= b[j] && b[j] <= 'Z' {
+					b[j] += 'a' - 'A'
+				}
+			}
+			return string(b)
+		}
+	}
+	return s
+}
+
 // hasEmptyLabel reports whether a dotted name is empty or has an empty label.
 func hasEmptyLabel(name string) bool {
 	return name == "" || strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") || strings.Contains(name, "..")
@@ -73,7 +93,14 @@ func canonicalizeTarget(r *http.Request) (*http.Request, error) {
 			return r, nil
 		}
 	} else if r.URL.Host != "" {
-		host, port = r.URL.Hostname(), r.URL.Port()
+		u, err := canonicalizeURLHost(r.URL)
+		if err != nil || u == r.URL {
+			return r, err
+		}
+		out := new(http.Request)
+		*out = *r
+		out.URL, out.Host = u, u.Host
+		return out, nil
 	} else {
 		return r, nil
 	}
@@ -84,10 +111,7 @@ func canonicalizeTarget(r *http.Request) (*http.Request, error) {
 	if canon == host {
 		return r, nil
 	}
-	target := canon
-	if port != "" {
-		target = net.JoinHostPort(canon, port)
-	}
+	target := net.JoinHostPort(canon, port)
 	out := new(http.Request)
 	*out = *r
 	u := *r.URL
@@ -95,6 +119,28 @@ func canonicalizeTarget(r *http.Request) (*http.Request, error) {
 	out.URL = &u
 	out.Host = target
 	return out, nil
+}
+
+// canonicalizeURLHost returns u with its host in canonical form (see
+// canonicalTargetHost), keeping the port. It returns u itself when nothing
+// changes and a copy otherwise. A target URL that came from configuration
+// (a relay, an MCP server) goes through it too, so what is matched is what is
+// dialed.
+func canonicalizeURLHost(u *url.URL) (*url.URL, error) {
+	host := u.Hostname()
+	canon, err := canonicalTargetHost(host)
+	if err != nil {
+		return nil, err
+	}
+	if canon == host {
+		return u, nil
+	}
+	out := *u
+	out.Host = canon
+	if port := u.Port(); port != "" {
+		out.Host = net.JoinHostPort(canon, port)
+	}
+	return &out, nil
 }
 
 // authorityMatchesConnect reports whether the authority of a request inside a
@@ -140,5 +186,5 @@ func sameHostName(a, b string) bool {
 	if errA == nil && errB == nil {
 		return x.WithZone("").Unmap() == y.WithZone("").Unmap()
 	}
-	return strings.EqualFold(a, b)
+	return lowerASCII(a) == lowerASCII(b)
 }
