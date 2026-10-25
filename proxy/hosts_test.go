@@ -574,17 +574,19 @@ func TestRegisterGrantHosts(t *testing.T) {
 	}
 }
 
-// TestHostHasSuffixFold_UnicodeCaseFold verifies the suffix match handles
-// characters whose lowercase form has a different byte length (e.g. U+1E9E
-// LATIN CAPITAL LETTER SHARP S, 3 bytes, lowercases to U+00DF, 2 bytes) —
-// fixed-length byte slicing would split mid-rune and wrongly reject.
+// TestHostHasSuffixFold_UnicodeCaseFold verifies the suffix match folds ASCII
+// case only and handles multi-byte characters without slicing mid-rune. U+1E9E
+// (LATIN CAPITAL LETTER SHARP S, 3 bytes) is not folded onto U+00DF (2 bytes):
+// IDNA maps it to "ss", so folding it to U+00DF would match a name the
+// transport does not dial.
 func TestHostHasSuffixFold_UnicodeCaseFold(t *testing.T) {
 	tests := []struct {
 		host   string
 		suffix string
 		want   bool
 	}{
-		{"FOO.STRAẞE.example.com", ".straße.example.com", true},
+		{"FOO.STRAẞE.example.com", ".straße.example.com", false},
+		{"FOO.STRAße.example.com", ".straße.example.com", true},
 		{"foo.straße.example.com", ".straße.example.com", true},
 		{"api.example.com", ".example.com", true},
 		{"API.EXAMPLE.COM", ".example.com", true},

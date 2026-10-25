@@ -103,6 +103,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Canonicalize the target before any policy, credential or MCP decision.
+	canon, err := canonicalizeTarget(r)
+	if err != nil {
+		p.rejectTarget(w, r, err)
+		return
+	}
+	r = canon
+
 	// Handle AWS credential endpoint
 	if awsH := p.getAWSHandlerForRequest(r); awsH != nil && strings.HasPrefix(r.URL.Path, "/_aws/credentials") {
 		awsH.ServeHTTP(w, r)
@@ -138,6 +146,30 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"port", r.URL.Port(),
 		"path", r.URL.Path)
 	p.handleHTTP(w, r)
+}
+
+// rejectTarget answers a request whose target host has no dialable form with
+// 400 and records the denial.
+func (p *Proxy) rejectTarget(w http.ResponseWriter, r *http.Request, cause error) {
+	target, requestType := r.URL.String(), "http"
+	if r.Method == http.MethodConnect {
+		target, requestType = r.Host, "connect"
+	}
+	reason := "Invalid target host: " + cause.Error()
+	p.logRequest(r, RequestLogData{
+		Method:       r.Method,
+		URL:          target,
+		Host:         r.URL.Hostname(),
+		RequestType:  requestType,
+		StatusCode:   http.StatusBadRequest,
+		RequestSize:  -1,
+		ResponseSize: -1,
+		ClientAddr:   r.RemoteAddr,
+		Denied:       true,
+		DenyReason:   reason,
+	})
+	p.logPolicy(r, "network", "http.request", "", reason)
+	http.Error(w, "invalid target host", http.StatusBadRequest)
 }
 
 // lookupHostForURL returns the URL's host with a port always present — the

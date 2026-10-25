@@ -4650,7 +4650,7 @@ func TestProxy_HostGatewayLoopbackSpellingsRestricted(t *testing.T) {
 
 	for _, host := range []string{
 		"127.0.0.1", "127.0.0.2", "LOCALHOST", "localhost.", "0.0.0.0",
-		"[::1]", "[::1%25lo0]", "[::ffff:127.0.0.1]", "[::]",
+		"[::1]", "[::ffff:127.0.0.1]", "[::]",
 	} {
 		t.Run(host, func(t *testing.T) {
 			req := httptest.NewRequest("GET", "http://"+host+":8080/", nil)

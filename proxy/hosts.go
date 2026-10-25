@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 )
@@ -51,15 +52,24 @@ func parseHostPatternChecked(s string) (HostPattern, error) {
 
 	// Split host and port
 	host, portStr, hasPort := strings.Cut(s, ":")
-	p.host = strings.ToLower(host)
+	p.host = lowerASCII(host)
 
 	var err error
-	if host == "" {
+	switch {
+	case host == "":
 		err = fmt.Errorf("host pattern %q has no host", orig)
-	} else if strings.Contains(host, "*") {
-		if p.isWildcard {
-			err = fmt.Errorf("host pattern %q has a * after its leading \"*.\"", orig)
-		} else if prefix, rest, ok := splitPrefixWildcard(host); ok {
+	case strings.ContainsAny(host, "[]"):
+		err = fmt.Errorf("host pattern %q has brackets; an IPv6 literal is not a host pattern", orig)
+	case !isASCII(host):
+		err = fmt.Errorf("host pattern %q is not ASCII; write internationalized names in their xn-- form", orig)
+	case hasEmptyLabel(host):
+		err = fmt.Errorf("host pattern %q has an empty label or a trailing dot", orig)
+	case endsInNumber(host) && (p.isWildcard || strings.Contains(host, "*") || !isIPv4Literal(host)):
+		err = fmt.Errorf("host pattern %q ends in a number; write an IPv4 address as an exact dotted quad", orig)
+	case p.isWildcard && strings.Contains(host, "*"):
+		err = fmt.Errorf("host pattern %q has a * after its leading \"*.\"", orig)
+	case strings.Contains(host, "*"):
+		if prefix, rest, ok := splitPrefixWildcard(host); ok {
 			p.prefix, p.host = prefix, rest
 		} else {
 			err = fmt.Errorf("host pattern %q: * must be the whole first label (*.example.com) or end it (pr-*.example.com)", orig)
@@ -81,30 +91,34 @@ func parseHostPatternChecked(s string) (HostPattern, error) {
 // "pr-*.example.com[:port]" into its lowercase prefix ("pr-") and the rest
 // after the first dot ("example.com[:port]"). The prefix is non-empty and has
 // no "." or "*", the "*" ends the first label, and the rest has no "*" and at
-// least two labels, so "pr-*.com" and "pr-*" are not prefix wildcards.
+// least two non-empty labels, so "pr-*.com" and "pr-*.com." are not prefix
+// wildcards.
 func splitPrefixWildcard(s string) (prefix, rest string, ok bool) {
 	label, rest, found := strings.Cut(s, ".")
 	if !found || len(label) < 2 || !strings.HasSuffix(label, "*") || strings.Contains(label[:len(label)-1], "*") {
 		return "", "", false
 	}
 	domain, _, _ := strings.Cut(rest, ":")
-	if strings.Contains(rest, "*") || !strings.Contains(domain, ".") {
+	if strings.Contains(rest, "*") || !strings.Contains(domain, ".") || hasEmptyLabel(domain) {
 		return "", "", false
 	}
-	return strings.ToLower(label[:len(label)-1]), strings.ToLower(rest), true
+	return lowerASCII(label[:len(label)-1]), lowerASCII(rest), true
 }
 
 // matchPrefixWildcard reports whether host is one label that starts with
 // prefix and has at least one more character, followed by exactly rest.
 // Both prefix and rest must already be lowercase.
 func matchPrefixWildcard(prefix, rest, host string) bool {
-	label, remainder, found := strings.Cut(strings.ToLower(host), ".")
+	label, remainder, found := strings.Cut(lowerASCII(host), ".")
 	return found && remainder == rest && len(label) > len(prefix) && strings.HasPrefix(label, prefix)
 }
 
 // hostMatchesPattern is the host half of matchesPattern, without the port
 // policy.
 func hostMatchesPattern(pattern HostPattern, host string) bool {
+	if (pattern.prefix != "" || pattern.isWildcard) && isIPLiteral(host) {
+		return false
+	}
 	switch {
 	case pattern.prefix != "":
 		return matchPrefixWildcard(pattern.prefix, pattern.host, host)
@@ -113,7 +127,7 @@ func hostMatchesPattern(pattern HostPattern, host string) bool {
 		// host must end with .{pattern.host}
 		return hostHasSuffixFold(host, "."+pattern.host)
 	default:
-		return strings.EqualFold(pattern.host, host)
+		return lowerASCII(pattern.host) == lowerASCII(host)
 	}
 }
 
@@ -152,12 +166,10 @@ func allowPatternPortMatches(patternPort, port int) bool {
 	return port == 80 || port == 443
 }
 
-// hostHasSuffixFold reports whether host ends with suffix, ignoring case.
-// Lowercasing both sides, rather than slicing by byte length, keeps
-// characters whose lowercase form has a different byte length (U+1E9E to
-// U+00DF) from splitting mid-rune.
+// hostHasSuffixFold reports whether host ends with suffix, ignoring ASCII case
+// (see lowerASCII).
 func hostHasSuffixFold(host, suffix string) bool {
-	return strings.HasSuffix(strings.ToLower(host), strings.ToLower(suffix))
+	return strings.HasSuffix(lowerASCII(host), lowerASCII(suffix))
 }
 
 // grantHosts maps grant names to their allowed host patterns.
@@ -258,6 +270,9 @@ func matchPrefixWildcardHostKey(key, host, bare string) bool {
 // wildcardHostKeyTier reports how a wildcard key matches host: a prefix key
 // ("pr-*.example.com") or a "*." key, or hostMatchNone.
 func wildcardHostKeyTier(key, host, bare string) hostMatchTier {
+	if isIPLiteral(bare) {
+		return hostMatchNone
+	}
 	switch {
 	case matchPrefixWildcardHostKey(key, host, bare):
 		return hostMatchPrefixWildcard
@@ -363,12 +378,19 @@ func lookupHostKeyedExcluding[V any](m map[string]V, host string, usable func(V)
 		}
 	}
 	bare := bareHost(host)
+	hostAddr, hostPort, hostIsIP := splitIPKey(host)
+	if bare != host && hostIsIP {
+		// A key pinned to this address and port outranks a portless key.
+		if v, key, ok := pinnedIPKey(m, hostAddr, hostPort, usable, excluded); ok {
+			return v, hostMatch{hostMatchExactFold, key}
+		}
+	}
 	if bare != host && !excluded[bare] {
 		if v, ok := m[bare]; ok && usable(v) {
 			return v, hostMatch{hostMatchExact, bare}
 		}
 	}
-	lowerHost, lowerBare := strings.ToLower(host), strings.ToLower(bare)
+	lowerHost, lowerBare := lowerASCII(host), lowerASCII(bare)
 	var best V
 	var bestKey string
 	tier := hostMatchNone
@@ -380,11 +402,14 @@ func lookupHostKeyedExcluding[V any](m map[string]V, host string, usable func(V)
 		// The case-insensitive exact tier must fold both the bare host and
 		// the full host:port — port-bearing keys are expressible in
 		// embedder-built RunContextData maps. A host:port fold match beats
-		// a bare fold match, as in the verbatim tiers. Folding is via
-		// ToLower so this tier agrees with the wildcard tier's semantics
-		// (EqualFold's simple folding differs for e.g. U+017F ſ).
-		lowerKey := strings.ToLower(key)
-		if foldsHost := host != bare && lowerKey == lowerHost; foldsHost || lowerKey == lowerBare {
+		// a bare fold match, as in the verbatim tiers.
+		lowerKey := lowerASCII(key)
+		// An IP key matches by parsed address and port, not by text.
+		var ipMatch, ipPinned bool
+		if hostIsIP {
+			ipMatch, ipPinned = ipKeyMatches(key, hostAddr, hostPort)
+		}
+		if foldsHost := (host != bare && lowerKey == lowerHost) || (ipMatch && ipPinned); foldsHost || lowerKey == lowerBare || ipMatch {
 			if tier != hostMatchExactFold ||
 				(foldsHost && !bestFoldsHost) ||
 				(foldsHost == bestFoldsHost && key < bestKey) {
@@ -401,6 +426,20 @@ func lookupHostKeyedExcluding[V any](m map[string]V, host string, usable func(V)
 		}
 	}
 	return best, hostMatch{tier, bestKey}
+}
+
+// pinnedIPKey returns the entry of the smallest IP key (a stable pick) that
+// names hostAddr and is pinned to hostPort.
+func pinnedIPKey[V any](m map[string]V, hostAddr netip.Addr, hostPort string, usable func(V) bool, excluded map[string]bool) (best V, bestKey string, found bool) {
+	for key, v := range m {
+		if excluded[key] || !usable(v) {
+			continue
+		}
+		if match, pinned := ipKeyMatches(key, hostAddr, hostPort); match && pinned && (!found || key < bestKey) {
+			best, bestKey, found = v, key, true
+		}
+	}
+	return best, bestKey, found
 }
 
 // Usable predicates for lookupHostKeyed. Credentials use nonEmptySlice,

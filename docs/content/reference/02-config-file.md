@@ -298,7 +298,7 @@ credentials:
 - **Required:** Yes
 - **Default:** —
 
-Supports a `*.` suffix pattern (`*.github.com`) and a one-label prefix pattern (`pr-*.example.com`, which matches `pr-6301.example.com` only). An exact host wins over a prefix pattern, and a prefix pattern wins over a `*.` pattern. Any other `*` placement fails config load. Port numbers are stripped before matching — `api.github.com:443` matches a rule for `api.github.com`.
+Supports a `*.` suffix pattern (`*.github.com`) and a one-label prefix pattern (`pr-*.example.com`, which matches `pr-6301.example.com` only). An exact host wins over a prefix pattern, and a prefix pattern wins over a `*.` pattern. Any other `*` placement, an empty label, a trailing dot, or a non-ASCII name (write the `xn--` form) fails config load. Port numbers are stripped before matching — `api.github.com:443` matches a rule for `api.github.com`.
 
 ### credentials[].header
 

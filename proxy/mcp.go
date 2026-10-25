@@ -97,7 +97,10 @@ func (p *Proxy) injectMCPCredentialsWithContext(ctxReq, targetReq *http.Request)
 			continue
 		}
 
-		// Match by host
+		// Match by host, in the form the request is dialed
+		if canon, err := canonicalizeURLHost(serverURL); err == nil {
+			serverURL = canon
+		}
 		if serverURL.Host == reqHost {
 			matchedServer = server
 			break
@@ -239,6 +242,13 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		p.logExit(r, logBase, start, http.StatusInternalServerError, func(d *RequestLogData) { d.Err = err })
 		http.Error(w, fmt.Sprintf("%s: Invalid MCP server URL for '%s': %s", p.errorPrefix(), serverName, mcpServer.URL),
+			http.StatusInternalServerError)
+		return
+	}
+
+	if targetURL, err = canonicalizeURLHost(targetURL); err != nil {
+		p.logExit(r, logBase, start, http.StatusInternalServerError, func(d *RequestLogData) { d.Err = err })
+		http.Error(w, fmt.Sprintf("%s: Invalid MCP server URL for '%s'", p.errorPrefix(), serverName),
 			http.StatusInternalServerError)
 		return
 	}
