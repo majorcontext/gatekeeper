@@ -939,3 +939,27 @@ func TestConfig_MatchValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestParseConfig_HostPatternStars(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		ok   bool
+	}{
+		{"allow prefix wildcard", "network:\n  policy: strict\n  allow: [\"pr-*.meetneptune.dev\"]\n", true},
+		{"allow bad star", "network:\n  policy: strict\n  allow: [\"pr-*-x.meetneptune.dev\"]\n", false},
+		{"credential prefix wildcard", "credentials:\n  - host: \"pr-*.meetneptune.dev\"\n    source: {type: static, value: t}\n", true},
+		{"credential suffix wildcard", "credentials:\n  - host: \"*.meetneptune.dev\"\n    source: {type: static, value: t}\n", true},
+		{"credential star in the middle", "credentials:\n  - host: \"pr-*-x.meetneptune.dev\"\n    source: {type: static, value: t}\n", false},
+		{"credential star in a later label", "credentials:\n  - host: \"a.pr-*.meetneptune.dev\"\n    source: {type: static, value: t}\n", false},
+		{"credential one-label rest", "credentials:\n  - host: \"pr-*.com\"\n    source: {type: static, value: t}\n", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseConfig([]byte(tt.yaml))
+			if (err == nil) != tt.ok {
+				t.Errorf("ParseConfig error = %v, want ok=%v", err, tt.ok)
+			}
+		})
+	}
+}

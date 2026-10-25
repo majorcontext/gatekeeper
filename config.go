@@ -161,6 +161,13 @@ func (c *Config) validate() error {
 	if err := c.Network.validate(); err != nil {
 		return err
 	}
+	for _, cred := range c.Credentials {
+		if strings.Contains(cred.Host, "*") {
+			if err := proxy.ValidateHostPattern(cred.Host); err != nil {
+				return fmt.Errorf("credentials: %w", err)
+			}
+		}
+	}
 	if err := c.validateCredentialMatches(); err != nil {
 		return err
 	}

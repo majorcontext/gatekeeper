@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## Unreleased
+
+### Added
+
+- **One-label prefix wildcard host patterns** (`proxy/hosts.go`, `proxy/exchange.go`, `config.go`) — a host pattern such as `pr-*.example.com` matches one label that starts with `pr-` and has at least one more character, then exactly `.example.com`. It matches `pr-6301.example.com`, not `pr-.example.com`, `pr-1.x.example.com`, `xpr-1.example.com`, or `example.com`. It works in `network.allow`, `log.model_exchange` hosts, and `credentials[].host`. Where credential host patterns overlap, an exact host wins over a prefix pattern, and a prefix pattern wins over a `*.` pattern. Config load and `ValidateHostPattern` now reject any other `*` placement, such as `*foo.example.com`, `pr-*-x.example.com`, `a.pr-*.example.com`, `pr-*`, `pr-*.com`, or a `*` after a leading `*.`. Before, these were silently kept as exact hosts that never matched.
+
 ## v0.34.0 — 2026-10-23
 
 ### Added
