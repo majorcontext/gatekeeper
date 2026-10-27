@@ -43,6 +43,15 @@ credentials:
   #     type: env
   #     var: GITHUB_TOKEN
 
+  # Cloudflare Access accepts a service token as JSON in one Authorization
+  # header. Use format: raw to bypass scheme detection and inject it verbatim;
+  # prefix must not be set.
+  # - host: api.example.com
+  #   format: raw
+  #   source:
+  #     type: env
+  #     var: CLOUDFLARE_ACCESS_AUTHORIZATION
+
 network:
   policy: permissive
 

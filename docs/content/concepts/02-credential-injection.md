@@ -104,11 +104,12 @@ Built-in grant names (`github`, `anthropic`, `openai`, `aws`, and others) map to
 
 ## Prefix and format
 
-For `Authorization` headers, gatekeeper ensures the value includes an auth scheme prefix. The behavior depends on configuration:
+For `Authorization` headers, the behavior depends on configuration:
 
 - **No prefix, no format.** Gatekeeper auto-detects the scheme from known token prefixes. GitHub `ghp_` and `ghs_` tokens get `token` scheme. GitHub `gho_` and `github_pat_` tokens get `Bearer`. Everything else defaults to `Bearer`.
 - **Explicit prefix.** The `prefix` value is prepended with a space: `prefix: "token"` produces `token sk-xxxx`.
 - **Basic format.** Set `format: basic` to produce HTTP Basic authentication. The `prefix` field becomes the username: `Basic base64(prefix:value)`.
+- **Raw format.** Set `format: raw` to inject the value exactly as resolved, with no prefix or scheme detection. Do not set `prefix` with this format. This supports APIs such as Cloudflare Access, which requires the JSON service-token object as the complete `Authorization` value.
 
 ```yaml
 # HTTP Basic auth for git smart HTTP
@@ -120,6 +121,17 @@ credentials:
     source:
       type: env
       var: GITHUB_TOKEN
+```
+
+For services such as Cloudflare Access that require a JSON service token in the complete `Authorization` value, use `format: raw` and omit `prefix`:
+
+```yaml
+credentials:
+  - host: api.example.com
+    format: raw
+    source:
+      type: env
+      var: CLOUDFLARE_ACCESS_AUTHORIZATION
 ```
 
 ## Multiple credentials per host

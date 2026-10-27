@@ -330,8 +330,8 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 			continue
 		}
 
-		if cred.Format != "" && !strings.EqualFold(cred.Format, "basic") {
-			return fmt.Errorf("credential for %s: unknown format %q (valid values: \"basic\")", cred.Host, cred.Format)
+		if cred.Format != "" && !strings.EqualFold(cred.Format, "basic") && !strings.EqualFold(cred.Format, "raw") {
+			return fmt.Errorf("credential for %s: unknown format %q (valid values: \"basic\", \"raw\")", cred.Host, cred.Format)
 		}
 
 		header := cred.Header
@@ -345,6 +345,9 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 
 		if cred.Format != "" && !strings.EqualFold(header, "Authorization") {
 			return fmt.Errorf("credential for %s: format %q is only supported with the Authorization header", cred.Host, cred.Format)
+		}
+		if strings.EqualFold(cred.Format, "raw") && cred.Prefix != "" {
+			return fmt.Errorf("credential for %s: format \"raw\" cannot be combined with prefix", cred.Host)
 		}
 
 		if s.resolveSource == nil && cred.Source.Type == "token-exchange" {
@@ -666,11 +669,16 @@ func refreshInterval(ttl time.Duration) time.Duration {
 // "Basic base64(prefix:value)". The prefix field is the username
 // (e.g., "x-access-token" for GitHub git smart HTTP).
 //
+// When format is "raw", the value is returned unchanged.
+//
 // Otherwise, if the value already contains a scheme (e.g., "Bearer xxx",
 // "token xxx"), it is returned unchanged. If prefix is set explicitly,
 // it is used as the scheme. Otherwise the scheme is auto-detected from
 // known GitHub token prefixes, defaulting to "Bearer".
 func ensureAuthScheme(val, prefix, format string) string {
+	if strings.EqualFold(format, "raw") {
+		return val
+	}
 	if strings.EqualFold(format, "basic") {
 		encoded := base64.StdEncoding.EncodeToString([]byte(prefix + ":" + val))
 		return "Basic " + encoded

@@ -338,7 +338,7 @@ When the header is `Authorization` and no prefix is set, gatekeeper auto-detects
 
 If the credential value already contains a scheme (e.g., `Bearer xxx`), it is used as-is.
 
-When `format` is `"basic"`, the `prefix` field is used as the Basic auth username instead.
+When `format` is `"basic"`, the `prefix` field is used as the Basic auth username instead. When `format` is `"raw"`, `prefix` must be omitted.
 
 ### credentials[].format
 
@@ -354,9 +354,9 @@ credentials:
 - **Type:** `string`
 - **Required:** No
 - **Default:** — (scheme prefix mode)
-- **Valid values:** `""`, `"basic"`
+- **Valid values:** `""`, `"basic"`, `"raw"`
 
-When set to `"basic"`, the credential is encoded as HTTP Basic authentication: `Authorization: Basic base64(prefix:value)`. The `prefix` field becomes the username and the credential value becomes the password. Only supported with the `Authorization` header.
+When set to `"basic"`, the credential is encoded as HTTP Basic authentication: `Authorization: Basic base64(prefix:value)`. The `prefix` field becomes the username and the credential value becomes the password. When set to `"raw"`, the credential value is injected exactly as stored, with no prefix or scheme detection; `prefix` must be omitted. For example, `format: raw` supports APIs such as Cloudflare Access that require a JSON document as the complete `Authorization` value. Both non-empty formats are only supported with the `Authorization` header.
 
 ### credentials[].grant
 
