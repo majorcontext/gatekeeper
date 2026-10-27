@@ -38,8 +38,8 @@ postgres:     { ... }   # optional: Postgres data-plane listener
 |------------|----------|-----------------|----------------------------------------------------------|
 | `host`     | yes      | —               | Target host; matched **exactly**, port-insensitive. Not a wildcard — use `network.allow`/postgres for globs. |
 | `header`   | no       | `Authorization` | Header to inject.                                         |
-| `prefix`   | no       | auto-detected   | **Authorization only.** Scheme word (`Bearer`, `token`); or Basic username when `format: basic`. Ignored for other headers (value injected verbatim). |
-| `format`   | no       | `""`            | **Authorization only.** `""` (prefix scheme) or `basic` (HTTP Basic). Any other header with `format: basic` is a config error. |
+| `prefix`   | no       | auto-detected   | **Authorization only.** Scheme word (`Bearer`, `token`); or Basic username when `format: basic`. Ignored for other headers. Must be omitted with `format: raw`. |
+| `format`   | no       | `""`            | **Authorization only.** `""` (prefix scheme), `basic` (HTTP Basic), or `raw` (verbatim value, no prefix or scheme detection). `raw` cannot be combined with `prefix`. Any non-empty format with another header is a config error. |
 | `grant`    | no       | —               | Label for logs only. Never the secret.                   |
 | `source`   | yes      | —               | Credential source — see [credential-sources.md](credential-sources.md). |
 | `postgres` | no       | —               | Postgres resolver config — see [postgres-data-plane.md](postgres-data-plane.md). |

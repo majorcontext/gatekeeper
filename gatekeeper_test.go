@@ -1604,6 +1604,66 @@ func TestBasicFormatValidation(t *testing.T) {
 	})
 }
 
+func TestRawFormatValidation(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		header string
+		prefix string
+		want   string
+	}{
+		{name: "non-Authorization header", header: "x-api-key", want: "only supported with the Authorization header"},
+		{name: "prefix combination", header: "Authorization", prefix: "Bearer", want: "cannot be combined with prefix"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(context.Background(), &Config{
+				Proxy: ProxyConfig{Host: "127.0.0.1"},
+				Credentials: []CredentialConfig{{
+					Host: "api.example.com", Header: tt.header, Prefix: tt.prefix, Format: "raw",
+					Source: SourceConfig{Type: "static", Value: `{"cf-access-client-id":"id","cf-access-client-secret":"secret"}`},
+				}},
+			}, Options{})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("New error = %v, want it to contain %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestRawFormatThroughProxy(t *testing.T) {
+	const want = `{"cf-access-client-id":"id","cf-access-client-secret":"secret"}`
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, r.Header.Get("Authorization"))
+	}))
+	defer backend.Close()
+	backendURL, _ := url.Parse(backend.URL)
+
+	srv, err := New(context.Background(), &Config{
+		Proxy: ProxyConfig{Host: "127.0.0.1"},
+		Credentials: []CredentialConfig{{
+			Host: backendURL.Hostname(), AllowInsecure: true, Format: "raw",
+			Source: SourceConfig{Type: "static", Value: want},
+		}},
+	}, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := t.Context()
+	go func() { _ = srv.Start(ctx) }()
+	waitForProxy(t, srv, 2*time.Second)
+	proxyURL, _ := url.Parse("http://" + srv.ProxyAddr())
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	defer client.CloseIdleConnections()
+	resp, err := client.Get(backend.URL + "/")
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != want {
+		t.Errorf("backend got Authorization = %q, want %q", body, want)
+	}
+}
+
 func TestEnsureAuthScheme(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -1638,6 +1698,9 @@ func TestEnsureAuthScheme(t *testing.T) {
 		{name: "basic format with username", val: "ghs_abc123", prefix: "x-access-token", format: "basic", want: "Basic eC1hY2Nlc3MtdG9rZW46Z2hzX2FiYzEyMw=="},
 		{name: "basic format no username", val: "ghs_abc123", prefix: "", format: "basic", want: "Basic Omdoc19hYmMxMjM="},
 		{name: "basic format case insensitive", val: "mytoken", prefix: "user", format: "Basic", want: "Basic dXNlcjpteXRva2Vu"},
+
+		// Raw format — passes values through without adding or detecting a scheme.
+		{name: "raw JSON", val: `{"cf-access-client-id":"id","cf-access-client-secret":"secret"}`, format: "RAW", want: `{"cf-access-client-id":"id","cf-access-client-secret":"secret"}`},
 	}
 
 	for _, tt := range tests {

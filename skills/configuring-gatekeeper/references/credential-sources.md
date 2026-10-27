@@ -8,7 +8,7 @@ credentials:
   - host: api.example.com     # exact host (case-insensitive, port ignored)
     header: Authorization     # optional; default "Authorization"
     prefix: Bearer            # optional; auth scheme — auto-detected if omitted
-    format: ""                # optional; "" (prefix scheme) or "basic" (HTTP Basic)
+    format: ""                # optional; "" (scheme), "basic" (HTTP Basic), or "raw" (verbatim)
     grant: my-api             # optional; label for logs only (never the secret)
     source:
       type: env               # the source type — see below
@@ -24,9 +24,8 @@ credentials:
   `token`, `Token`, …); if omitted, Gatekeeper auto-detects it from the token
   shape. Set it explicitly when auto-detection would be wrong.
 - **For any other header, the resolved value is injected verbatim** — `prefix`
-  and `format` are ignored. So for `header: x-api-key`, store the *complete*
-  value in the source. (To inject a bare value with no scheme on an
-  `Authorization` header, set `prefix: ""`.)
+  is ignored, and non-empty `format` values are rejected. So for
+  `header: x-api-key`, store the *complete* value in the source.
 
 ```yaml
 # Bearer scheme on Authorization (this is also the auto-detected default)
@@ -44,6 +43,17 @@ credentials:
   base64(prefix:value)`, where `prefix` is the **username**. Required for `git`
   push/clone to `github.com` (username `x-access-token`). `format: basic` is only
   valid with the `Authorization` header — any other header is a config error.
+- **`format: raw`** — inject the resolved value exactly as stored, with no
+  prefix or scheme detection. Do not combine it with `prefix`. Use this for
+  APIs such as Cloudflare Access that require a JSON service-token object as
+  the complete `Authorization` value.
+
+```yaml
+# Cloudflare Access service token as one JSON Authorization value
+- host: api.example.com
+  format: raw
+  source: { type: env, var: CLOUDFLARE_ACCESS_AUTHORIZATION }
+```
 
 ```yaml
 # git over HTTPS to github.com
@@ -106,8 +116,7 @@ source:
   var: GITHUB_TOKEN
 ```
 
-Resolved once at startup. The value is the full credential (Gatekeeper adds the
-scheme prefix unless the value already looks complete).
+Resolved once at startup. The value is the full credential. For `Authorization`, Gatekeeper adds the scheme prefix unless the value already looks complete; `format: raw` disables that behavior.
 
 ## static — literal value
 

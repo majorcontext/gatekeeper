@@ -4,6 +4,12 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## Unreleased
+
+### Added
+
+- **`format: raw` credential option** — inject an `Authorization` credential exactly as stored, without prefixing or scheme detection. It cannot be combined with `prefix`; use it for services such as Cloudflare Access that require a JSON service-token value.
+
 ## v0.35.0 — 2026-10-25
 
 ### Fixed
