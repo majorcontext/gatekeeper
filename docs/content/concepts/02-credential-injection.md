@@ -123,10 +123,9 @@ credentials:
       var: GITHUB_TOKEN
 ```
 
-For services such as Cloudflare Access that require a JSON service token in the complete `Authorization` value, use `format: raw` and omit `prefix`:
-
 ```yaml
 credentials:
+  # Cloudflare Access service token, injected verbatim
   - host: api.example.com
     format: raw
     source:

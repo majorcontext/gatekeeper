@@ -1698,6 +1698,10 @@ func TestEnsureAuthScheme(t *testing.T) {
 		{name: "basic format with username", val: "ghs_abc123", prefix: "x-access-token", format: "basic", want: "Basic eC1hY2Nlc3MtdG9rZW46Z2hzX2FiYzEyMw=="},
 		{name: "basic format no username", val: "ghs_abc123", prefix: "", format: "basic", want: "Basic Omdoc19hYmMxMjM="},
 		{name: "basic format case insensitive", val: "mytoken", prefix: "user", format: "Basic", want: "Basic dXNlcjpteXRva2Vu"},
+
+		// Raw format — passes values through without adding or detecting a scheme.
+		{name: "raw JSON", val: `{"cf-access-client-id":"id","cf-access-client-secret":"secret"}`, format: "raw", want: `{"cf-access-client-id":"id","cf-access-client-secret":"secret"}`},
+		{name: "raw scheme-like value", val: "Bearer x", format: "raw", want: "Bearer x"},
 	}
 
 	for _, tt := range tests {
