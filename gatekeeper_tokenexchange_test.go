@@ -52,6 +52,15 @@ func TestNewTokenExchangeResolver(t *testing.T) {
 		t.Errorf("Value = %q, want %q", creds[0].Value, "Bearer gho_resolved")
 	}
 
+	if creds[0].Grant != "github" {
+		t.Errorf("Grant = %q, want %q", creds[0].Grant, "github")
+	}
+
+	// Subject header should be stripped
+	if req.Header.Get("X-Gatekeeper-Subject") != "" {
+		t.Error("subject header should be stripped from request")
+	}
+
 	rawResolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
 		Endpoint:      srv.URL,
 		ClientID:      "gk",
@@ -70,15 +79,6 @@ func TestNewTokenExchangeResolver(t *testing.T) {
 	}
 	if len(rawCreds) != 1 || rawCreds[0].Value != "gho_resolved" {
 		t.Errorf("raw credentials = %#v, want one value %q", rawCreds, "gho_resolved")
-	}
-
-	if creds[0].Grant != "github" {
-		t.Errorf("Grant = %q, want %q", creds[0].Grant, "github")
-	}
-
-	// Subject header should be stripped
-	if req.Header.Get("X-Gatekeeper-Subject") != "" {
-		t.Error("subject header should be stripped from request")
 	}
 }
 
