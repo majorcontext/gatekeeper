@@ -356,7 +356,7 @@ credentials:
 - **Default:** — (scheme prefix mode)
 - **Valid values:** `""`, `"basic"`, `"raw"`
 
-When set to `"basic"`, the credential is encoded as HTTP Basic authentication: `Authorization: Basic base64(prefix:value)`. The `prefix` field becomes the username and the credential value becomes the password. When set to `"raw"`, the credential value is injected exactly as stored, with no prefix or scheme detection; `prefix` must be omitted. For example, `format: raw` supports APIs such as Cloudflare Access that require a JSON document as the complete `Authorization` value. Both non-empty formats are only supported with the `Authorization` header.
+When set to `"basic"`, the credential is encoded as HTTP Basic authentication: `Authorization: Basic base64(prefix:value)`. The `prefix` field becomes the username and the credential value becomes the password. When set to `"raw"`, the credential value is injected exactly as stored, with no prefix or scheme detection. Both non-empty formats are only supported with the `Authorization` header. Formatting is applied after the credential value is resolved, including for token-exchange credentials.
 
 ### credentials[].grant
 

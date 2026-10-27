@@ -51,6 +51,27 @@ func TestNewTokenExchangeResolver(t *testing.T) {
 	if creds[0].Value != "Bearer gho_resolved" {
 		t.Errorf("Value = %q, want %q", creds[0].Value, "Bearer gho_resolved")
 	}
+
+	rawResolver := newTokenExchangeResolver(tokenExchangeResolverConfig{
+		Endpoint:      srv.URL,
+		ClientID:      "gk",
+		ClientSecret:  "secret",
+		Resource:      "https://api.github.com",
+		SubjectHeader: "X-Gatekeeper-Subject",
+		Grant:         "github",
+		Header:        "Authorization",
+		Format:        "raw",
+	})
+	rawReq := httptest.NewRequest("GET", "https://api.github.com/user", nil)
+	rawReq.Header.Set("X-Gatekeeper-Subject", "usr_abc123")
+	rawCreds, err := rawResolver(context.Background(), rawReq, rawReq, "api.github.com")
+	if err != nil {
+		t.Fatalf("raw resolver: %v", err)
+	}
+	if len(rawCreds) != 1 || rawCreds[0].Value != "gho_resolved" {
+		t.Errorf("raw credentials = %#v, want one value %q", rawCreds, "gho_resolved")
+	}
+
 	if creds[0].Grant != "github" {
 		t.Errorf("Grant = %q, want %q", creds[0].Grant, "github")
 	}
