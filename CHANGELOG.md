@@ -6,6 +6,10 @@ Gatekeeper is pre-1.0. The configuration schema and credential source interface 
 
 ## Unreleased
 
+### Changed
+
+- **Body inspection follows each rule's `operation`** (`proxy/httppolicy.go`) — the `http` scope now reads and parses a request body only when a rule that references `params.body` has an `operation` glob matching the request (`eng.RequiresBodyFor`, keep ≥ v0.7.0). Before, a single body rule made every request in the scope JSON-only: a policy that inspected `POST api.github.com/graphql` also denied `git push` over HTTPS, whose `git-receive-pack` body is not JSON. Body rules with no `operation` behave as before.
+
 ### Added
 
 - **`format: raw` credential option** — inject an `Authorization` credential exactly as stored, without prefixing or scheme detection. It cannot be combined with `prefix`; use it for services such as Cloudflare Access that require a JSON service-token value.

@@ -40,9 +40,11 @@ func isJSONContentType(ct string) bool {
 
 // buildHTTPCall constructs the Keep Call for an http-scope policy evaluation.
 //
-// When no loaded rule in the "http" scope inspects the request body
-// (eng.RequiresBody is false), it returns a body-less call and leaves req
-// untouched — the common, zero-overhead path.
+// When no rule that applies to this request inspects the body
+// (eng.RequiresBodyFor is false), it returns a body-less call and leaves req
+// untouched — the common, zero-overhead path. A body rule pinned to an
+// operation (e.g. operation: "post api.github.com/graphql") only applies to
+// requests whose "METHOD host/path" operation matches it.
 //
 // When a body rule is in effect, it buffers and JSON-parses the request body,
 // exposing it to rules under params.body, and restores req.Body so the upstream
@@ -52,13 +54,14 @@ func isJSONContentType(ct string) bool {
 // caller denies. A request with no body is allowed through with params.body ==
 // null, so body rules simply don't match while path rules still apply.
 //
-// Note: RequiresBody is scope-global — a single body rule makes this path apply
-// to every request in the "http" scope. As a result, any non-JSON request with
-// a payload is denied once a body rule exists, even for hosts the rule's `when`
-// clause would never match. Scope body rules by host in the rule itself if that
-// over-broad denial is a concern.
+// Note: a body rule with no operation applies to every request in the "http"
+// scope, so once one exists any non-JSON request with a payload is denied, even
+// for hosts the rule's `when` clause would never match. Pin body rules to an
+// operation to keep that fail-closed behavior to the requests they inspect —
+// for example so git smart-HTTP pushes (non-JSON pack bodies) keep working
+// next to a GraphQL body rule.
 func buildHTTPCall(eng *keeplib.Engine, req *http.Request, host string) (call keeplib.Call, ok bool, denyReason string) {
-	if !eng.RequiresBody("http") {
+	if !eng.RequiresBodyFor("http", keeplib.NewHTTPCall(req.Method, host, req.URL.Path)) {
 		return keeplib.NewHTTPCall(req.Method, host, req.URL.Path), true, ""
 	}
 

@@ -36,7 +36,19 @@ Runs after [network policy](../concepts/04-network-policy.md) allows a request, 
 
 **Denial:** `403 Forbidden`, header `X-Gatekeeper-Blocked: keep-policy` (also sent as `X-Moat-Blocked`), `Content-Type: text/plain`, a plaintext body naming the host (and, for evaluation-error denials, a generic "policy evaluation error" — the specific evaluator error is not echoed to the client).
 
-**Fail-closed conditions.** The engine's rules determine whether a body is needed at all (`eng.RequiresBody("http")`); when it is, gatekeeper reads and parses it before evaluation, and any of the following denies the request rather than passing it through unevaluated:
+**Which requests have their body read.** The engine decides per request (`eng.RequiresBodyFor("http", call)`): a rule that references `params.body` applies only to requests whose operation — `"METHOD host/path"`, matched case-insensitively — matches the rule's `operation` glob. A body rule with no `operation` applies to every request in the scope. Pin body rules to an operation so non-JSON traffic to other hosts is unaffected:
+
+```yaml
+- name: deny-graphql-mutations
+  match:
+    operation: "post api.github.com/graphql"   # only these requests are buffered
+    when: "graphql(params.body).mutations.size() > 0"
+  action: deny
+```
+
+Without the `operation`, this rule would make every request with a non-JSON body fail closed — including `git push` over HTTPS, whose pack body is `application/x-git-receive-pack-request`.
+
+**Fail-closed conditions.** When a request's body is needed, gatekeeper reads and parses it before evaluation, and any of the following denies the request rather than passing it through unevaluated:
 
 - `Content-Encoding` is set on the request (e.g., `gzip`) — the body is not decompressed here, so a compressed body can't be inspected and is denied outright. This differs from the `llm-gateway` scope below, which does decompress gzip responses.
 - `Content-Type` is not `application/json` or does not end in `+json`.
