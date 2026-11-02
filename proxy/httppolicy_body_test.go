@@ -318,3 +318,118 @@ func TestBuildHTTPCall_DeniesViaEngine(t *testing.T) {
 	require.NoError(t, evalErr2)
 	assert.NotEqual(t, keeplib.Deny, result2.Decision, "non-gpt-4 body should be allowed")
 }
+
+// pinnedBodyRules holds a body rule pinned to one operation (GitHub's GraphQL
+// endpoint) next to a path rule. Only requests matching the operation need
+// their body inspected.
+const pinnedBodyRules = `
+scope: http
+mode: enforce
+rules:
+  - name: deny-mutation
+    match:
+      operation: "post api.github.com/graphql"
+      when: "params.body.query.startsWith('mutation')"
+    action: deny
+    message: "mutations blocked"
+  - name: deny-path
+    match:
+      when: "params.path == '/blocked'"
+    action: deny
+    message: "path blocked"
+`
+
+// TestBuildHTTPCall_PinnedBodyRuleSkipsOtherOperations is the git-over-HTTPS
+// case: with a body rule pinned to POST api.github.com/graphql, a git push
+// (a POST to github.com/<owner>/<repo>.git/git-receive-pack with a non-JSON
+// pack body) used to be denied because body inspection applied to the whole
+// http scope. It must pass through untouched with no body in the call.
+func TestBuildHTTPCall_PinnedBodyRuleSkipsOtherOperations(t *testing.T) {
+	eng, err := keeplib.LoadFromBytes([]byte(pinnedBodyRules))
+	require.NoError(t, err)
+	defer eng.Close()
+	require.True(t, eng.RequiresBody("http"), "scope-wide check still reports a body rule")
+
+	pack := "0000PACK\x00\x00\x00\x02binary"
+	req, err := http.NewRequest("POST", "https://github.com/acme/app.git/git-receive-pack", strings.NewReader(pack))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+
+	call, ok, reason := buildHTTPCall(eng, req, "github.com")
+	require.True(t, ok, "non-JSON body for an operation no body rule matches must not be denied (reason: %s)", reason)
+	assert.Empty(t, reason)
+	_, hasBody := call.Params["body"]
+	assert.False(t, hasBody, "body should not be inspected for an operation no body rule matches")
+
+	got, _ := io.ReadAll(req.Body)
+	assert.Equal(t, pack, string(got), "pack body must reach upstream unmodified")
+}
+
+// TestBuildHTTPCall_PinnedBodyRuleInspectsMatchingOperation is the companion
+// case: the operation the body rule is pinned to is still inspected — and
+// still fails closed on a non-JSON body.
+func TestBuildHTTPCall_PinnedBodyRuleInspectsMatchingOperation(t *testing.T) {
+	eng, err := keeplib.LoadFromBytes([]byte(pinnedBodyRules))
+	require.NoError(t, err)
+	defer eng.Close()
+
+	body := `{"query":"mutation { deleteRef(input:{refId:\"x\"}) { clientMutationId } }"}`
+	req, err := http.NewRequest("POST", "https://api.github.com/graphql", strings.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	call, ok, reason := buildHTTPCall(eng, req, "api.github.com")
+	require.True(t, ok, reason)
+	parsed, hasBody := call.Params["body"].(map[string]any)
+	require.True(t, hasBody, "body must be parsed for the pinned operation")
+	assert.Contains(t, parsed["query"], "deleteRef")
+
+	res, err := keeplib.SafeEvaluate(context.Background(), eng, call, "http")
+	require.NoError(t, err)
+	assert.Equal(t, keeplib.Deny, res.Decision)
+
+	form, err := http.NewRequest("POST", "https://api.github.com/graphql", strings.NewReader("query=mutation"))
+	require.NoError(t, err)
+	form.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	_, ok, reason = buildHTTPCall(eng, form, "api.github.com")
+	assert.False(t, ok, "non-JSON body for the pinned operation must still fail closed")
+	assert.Contains(t, reason, "not JSON")
+}
+
+// TestBuildHTTPCall_ExposesQuery: rules can read the raw query string as
+// params.query. git's ref advertisement differs between fetch and push only in
+// the query (?service=git-upload-pack vs git-receive-pack), so without it a
+// policy cannot refuse a push at the one request whose error body git shows.
+func TestBuildHTTPCall_ExposesQuery(t *testing.T) {
+	for name, rules := range map[string]string{"no body rule": httpNoBodyRules, "body rule": httpBodyRules} {
+		t.Run(name, func(t *testing.T) {
+			eng, err := keeplib.LoadFromBytes([]byte(rules))
+			require.NoError(t, err)
+			defer eng.Close()
+
+			req, err := http.NewRequest("GET", "https://github.com/acme/app.git/info/refs?service=git-receive-pack", nil)
+			require.NoError(t, err)
+			call, ok, _ := buildHTTPCall(eng, req, "github.com")
+			require.True(t, ok)
+			assert.Equal(t, "service=git-receive-pack", call.Params["query"])
+
+			// Companion: no query is an empty string, not a missing key.
+			req, err = http.NewRequest("GET", "https://github.com/acme/app.git/HEAD", nil)
+			require.NoError(t, err)
+			call, ok, _ = buildHTTPCall(eng, req, "github.com")
+			require.True(t, ok)
+			assert.Equal(t, "", call.Params["query"])
+
+			// Parsed bodies must also retain the raw query, including escapes,
+			// repeated keys, and case, without adding it to the operation.
+			rawQuery := "service=git%2Dreceive-pack&ref=Main&ref=other+branch"
+			req, err = http.NewRequest("POST", "https://github.com/graphql?"+rawQuery, strings.NewReader(`{"query":"{ viewer { login } }"}`))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			call, ok, _ = buildHTTPCall(eng, req, "github.com")
+			require.True(t, ok)
+			assert.Equal(t, rawQuery, call.Params["query"])
+			assert.Equal(t, "POST github.com/graphql", call.Operation)
+		})
+	}
+}

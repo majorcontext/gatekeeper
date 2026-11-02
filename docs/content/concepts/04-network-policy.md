@@ -72,11 +72,11 @@ When a request targets a host gateway address (synthetic hostname or loopback), 
 
 ## HTTP-scope Keep policy
 
-On intercepted requests, a second, distinct policy layer runs after network policy allows the request: if the run's `RunContextData.KeepEngines` has an entry keyed `"http"`, gatekeeper evaluates that Keep engine against the request before forwarding it. Unlike network policy, this check can inspect the request body — the engine's rules are evaluated against a parsed HTTP call (method, host, headers, and body), not just the host.
+On intercepted requests, a second, distinct policy layer runs after network policy allows the request: if the run's `RunContextData.KeepEngines` has an entry keyed `"http"`, gatekeeper evaluates that Keep engine against the request before forwarding it. Unlike network policy, this check can inspect the request body — the engine's rules are evaluated against an HTTP call with method, host, path, raw query string, and body when needed.
 
 This layer is engine-driven: the `"http"` engine comes from an embedder's `RunContextData` (moat's daemon layer compiles Keep rule files into engines and attaches them per run), not from `gatekeeper.yaml`. Standalone gatekeeper has no YAML knob for it.
 
-Body inspection fails closed — if the body can't be parsed or evaluation errors, the request is denied rather than passed through. A denial returns `403 Forbidden` with `X-Gatekeeper-Blocked: keep-policy` (also sent as `X-Moat-Blocked`) (distinct from network policy's `407`/`request-rule` denials) and a plaintext body describing the host and, for body-inspection failures, that the body couldn't be inspected.
+Gatekeeper reads the body only when a rule that references `params.body` has an `operation` glob matching the request. A body rule without an operation applies to every request. Body inspection fails closed — if a required body can't be parsed or evaluation errors, the request is denied rather than passed through. A denial returns `403 Forbidden` with `X-Gatekeeper-Blocked: keep-policy` (also sent as `X-Moat-Blocked`) (distinct from network policy's `407`/`request-rule` denials) and a plaintext body describing the host and, for body-inspection failures, that the body couldn't be inspected. See [Keep policy scopes](../guides/18-keep-policy-scopes.md#http-scope) for rule examples and inspection limits.
 
 ## Blocked response format
 

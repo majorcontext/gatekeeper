@@ -40,25 +40,41 @@ func isJSONContentType(ct string) bool {
 
 // buildHTTPCall constructs the Keep Call for an http-scope policy evaluation.
 //
-// When no loaded rule in the "http" scope inspects the request body
-// (eng.RequiresBody is false), it returns a body-less call and leaves req
-// untouched — the common, zero-overhead path.
+// When no rule that applies to this request inspects the body
+// (eng.RequiresBodyFor is false), it returns a body-less call and leaves req
+// untouched — the common, zero-overhead path. A body rule pinned to an
+// operation (e.g. operation: "post api.github.com/graphql") only applies to
+// requests whose "METHOD host/path" operation matches it.
 //
 // When a body rule is in effect, it buffers and JSON-parses the request body,
 // exposing it to rules under params.body, and restores req.Body so the upstream
 // request is unchanged. It fails closed: a body that cannot be inspected
 // (non-JSON Content-Type with a payload, malformed JSON, duplicate JSON keys, or
 // a body exceeding maxPolicyBodySize) returns ok=false with a reason, and the
-// caller denies. A request with no body is allowed through with params.body ==
-// null, so body rules simply don't match while path rules still apply.
+// caller denies. A request with no body produces params.body == null, leaving
+// policy evaluation to decide whether the bodyless request is allowed.
 //
-// Note: RequiresBody is scope-global — a single body rule makes this path apply
-// to every request in the "http" scope. As a result, any non-JSON request with
-// a payload is denied once a body rule exists, even for hosts the rule's `when`
-// clause would never match. Scope body rules by host in the rule itself if that
-// over-broad denial is a concern.
+// Note: a body rule with no operation applies to every request in the "http"
+// scope, so once one exists any non-JSON request with a payload is denied, even
+// for hosts the rule's `when` clause would never match. Pin body rules to an
+// operation to keep that fail-closed behavior to the requests they inspect —
+// for example so git smart-HTTP pushes (non-JSON pack bodies) keep working
+// next to a GraphQL body rule.
+//
+// Every call also carries the raw (undecoded) query string as params.query,
+// "" when there is none. Some requests differ only in their query — git's ref
+// advertisement is GET .../info/refs?service=git-upload-pack for a fetch and
+// ?service=git-receive-pack for a push.
 func buildHTTPCall(eng *keeplib.Engine, req *http.Request, host string) (call keeplib.Call, ok bool, denyReason string) {
-	if !eng.RequiresBody("http") {
+	call, ok, denyReason = buildHTTPCallParams(eng, req, host)
+	if ok {
+		call.Params["query"] = req.URL.RawQuery
+	}
+	return call, ok, denyReason
+}
+
+func buildHTTPCallParams(eng *keeplib.Engine, req *http.Request, host string) (call keeplib.Call, ok bool, denyReason string) {
+	if !eng.RequiresBodyFor("http", keeplib.NewHTTPCall(req.Method, host, req.URL.Path)) {
 		return keeplib.NewHTTPCall(req.Method, host, req.URL.Path), true, ""
 	}
 
@@ -95,8 +111,8 @@ func buildHTTPCall(eng *keeplib.Engine, req *http.Request, host string) (call ke
 	// An empty or whitespace-only body carries no JSON to inspect — e.g. a
 	// chunked/unknown-length request (ContentLength == -1, so it slips past the
 	// fast path above) with no payload. Treat it as bodyless rather than failing
-	// closed on json.Unmarshal of empty input, so path rules still apply and body
-	// rules simply don't match.
+	// closed on json.Unmarshal of empty input. Rules still evaluate with
+	// params.body == null.
 	if len(bytes.TrimSpace(buf)) == 0 {
 		return keeplib.NewHTTPCallWithBody(req.Method, host, req.URL.Path, nil), true, ""
 	}

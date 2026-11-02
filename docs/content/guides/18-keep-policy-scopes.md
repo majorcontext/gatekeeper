@@ -24,7 +24,7 @@ There is no setter method — an embedder populates the map directly when buildi
 
 | Key | Looked up | Evaluates |
 |---|---|---|
-| `"http"` | On every intercepted HTTPS request, after network policy allows it | The request itself (method, host, path, body) |
+| `"http"` | On every intercepted HTTPS request, after network policy allows it | The request itself (method, host, path, query, body) |
 | `"mcp-" + serverName` | On `POST` requests to `/mcp/{serverName}` whose body is a `tools/call` | The tool name and arguments |
 | `"llm-gateway"` | On `200` responses from `api.anthropic.com` | The response body (JSON or SSE) |
 
@@ -36,7 +36,26 @@ Runs after [network policy](../concepts/04-network-policy.md) allows a request, 
 
 **Denial:** `403 Forbidden`, header `X-Gatekeeper-Blocked: keep-policy` (also sent as `X-Moat-Blocked`), `Content-Type: text/plain`, a plaintext body naming the host (and, for evaluation-error denials, a generic "policy evaluation error" — the specific evaluator error is not echoed to the client).
 
-**Fail-closed conditions.** The engine's rules determine whether a body is needed at all (`eng.RequiresBody("http")`); when it is, gatekeeper reads and parses it before evaluation, and any of the following denies the request rather than passing it through unevaluated:
+**Params.** Rules see `params.method`, `params.host`, `params.path`, `params.query` (the raw query string, `""` when there is none, not URL-decoded), and — when a body rule applies — `params.body`. The operation string is `"METHOD host/path"` without the query.
+
+**Which requests have their body read.** The engine decides per request (`eng.RequiresBodyFor("http", call)`): a rule that references `params.body` applies only to requests whose operation — `"METHOD host/path"`, matched case-insensitively by default — matches the rule's `operation` glob. A scope with `case_sensitive: true` matches the operation exactly, including the upper-case method. A body rule with no `operation` applies to every request in the scope. Pin body rules to an operation so non-JSON traffic to other hosts is unaffected. For GraphQL, reject invalid input as well as mutations:
+
+```yaml
+- name: deny-invalid-graphql
+  match:
+    operation: "post api.github.com/graphql"
+    when: "!graphql(params.body).valid"
+  action: deny
+- name: deny-graphql-mutations
+  match:
+    operation: "post api.github.com/graphql"   # only these requests are buffered
+    when: "graphql(params.body).mutations.size() > 0"
+  action: deny
+```
+
+Without the `operation`, this rule would make every request with a non-JSON body fail closed — including `git push` over HTTPS, whose pack body is `application/x-git-receive-pack-request`.
+
+**Fail-closed conditions.** When a request's body is needed, gatekeeper reads and parses it before evaluation, and any of the following denies the request rather than passing it through unevaluated:
 
 - `Content-Encoding` is set on the request (e.g., `gzip`) — the body is not decompressed here, so a compressed body can't be inspected and is denied outright. This differs from the `llm-gateway` scope below, which does decompress gzip responses.
 - `Content-Type` is not `application/json` or does not end in `+json`.
@@ -44,7 +63,7 @@ Runs after [network policy](../concepts/04-network-policy.md) allows a request, 
 - The body is not valid JSON.
 - The body has duplicate keys in a JSON object at any nesting depth (e.g., two `"model"` keys) — rejected because `encoding/json` silently keeps the last value, but a downstream parser that keeps the first would see a different value than the one the policy evaluated, a bypass vector.
 
-A `nil` or zero-`Content-Length` body, or a body that is empty/whitespace after trimming, is treated as body-less rather than a failure — path-only rules still apply, body rules just don't match.
+A `nil` or zero-`Content-Length` body, or a body that is empty/whitespace after trimming, produces `params.body == null`. Policy evaluation still runs: path rules apply, and body rules decide how to handle null. For example, the invalid-GraphQL rule above denies a bodyless request to the GraphQL operation.
 
 ## `mcp-<server-name>` scope
 
