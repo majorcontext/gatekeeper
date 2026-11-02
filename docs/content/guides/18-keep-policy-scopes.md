@@ -63,7 +63,7 @@ Without the `operation`, this rule would make every request with a non-JSON body
 - The body is not valid JSON.
 - The body has duplicate keys in a JSON object at any nesting depth (e.g., two `"model"` keys) — rejected because `encoding/json` silently keeps the last value, but a downstream parser that keeps the first would see a different value than the one the policy evaluated, a bypass vector.
 
-A `nil` or zero-`Content-Length` body, or a body that is empty/whitespace after trimming, is treated as body-less rather than a failure — path-only rules still apply, body rules just don't match.
+A `nil` or zero-`Content-Length` body, or a body that is empty/whitespace after trimming, produces `params.body == null`. Policy evaluation still runs: path rules apply, and body rules decide how to handle null. For example, the invalid-GraphQL rule above denies a bodyless request to the GraphQL operation.
 
 ## `mcp-<server-name>` scope
 

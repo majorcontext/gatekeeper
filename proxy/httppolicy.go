@@ -51,8 +51,8 @@ func isJSONContentType(ct string) bool {
 // request is unchanged. It fails closed: a body that cannot be inspected
 // (non-JSON Content-Type with a payload, malformed JSON, duplicate JSON keys, or
 // a body exceeding maxPolicyBodySize) returns ok=false with a reason, and the
-// caller denies. A request with no body is allowed through with params.body ==
-// null, so body rules simply don't match while path rules still apply.
+// caller denies. A request with no body produces params.body == null, leaving
+// policy evaluation to decide whether the bodyless request is allowed.
 //
 // Note: a body rule with no operation applies to every request in the "http"
 // scope, so once one exists any non-JSON request with a payload is denied, even
@@ -111,8 +111,8 @@ func buildHTTPCallParams(eng *keeplib.Engine, req *http.Request, host string) (c
 	// An empty or whitespace-only body carries no JSON to inspect — e.g. a
 	// chunked/unknown-length request (ContentLength == -1, so it slips past the
 	// fast path above) with no payload. Treat it as bodyless rather than failing
-	// closed on json.Unmarshal of empty input, so path rules still apply and body
-	// rules simply don't match.
+	// closed on json.Unmarshal of empty input. Rules still evaluate with
+	// params.body == null.
 	if len(bytes.TrimSpace(buf)) == 0 {
 		return keeplib.NewHTTPCallWithBody(req.Method, host, req.URL.Path, nil), true, ""
 	}

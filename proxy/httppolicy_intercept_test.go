@@ -80,6 +80,7 @@ rules:
 		{name: "graphql query forwarded", method: "POST", path: "/graphql", contentType: "application/json", body: `{"query":"{ viewer { login } }"}`},
 		{name: "graphql mutation denied", method: "POST", path: "/graphql", contentType: "application/json", body: `{"query":"mutation { deleteRef(input:{refId:\"x\"}) { clientMutationId } }"}`, denied: true},
 		{name: "invalid graphql denied", method: "POST", path: "/graphql", contentType: "application/json", body: `{"query":"mutation {"}`, denied: true},
+		{name: "bodyless graphql denied", method: "POST", path: "/graphql", contentType: "application/json", denied: true},
 		{name: "non-json graphql denied", method: "POST", path: "/graphql", contentType: "application/x-www-form-urlencoded", body: "query=mutation", denied: true},
 		{name: "malformed json denied", method: "POST", path: "/graphql", contentType: "application/json", body: `{"query":`, denied: true},
 		{name: "duplicate json keys denied", method: "POST", path: "/graphql", contentType: "application/json", body: `{"query":"mutation { deleteRef { id } }","query":"{ viewer { login } }"}`, denied: true},
