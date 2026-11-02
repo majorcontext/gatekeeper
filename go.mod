@@ -10,7 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.7
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.41.5
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/majorcontext/keep v0.6.1-0.20261102065226-70b52f1d03ee
+	github.com/majorcontext/keep v0.7.0
 	github.com/pires/go-proxyproto v0.15.0
 	github.com/stretchr/testify v1.12.1
 	github.com/xdg-go/scram v1.2.0

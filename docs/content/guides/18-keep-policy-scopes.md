@@ -38,9 +38,14 @@ Runs after [network policy](../concepts/04-network-policy.md) allows a request, 
 
 **Params.** Rules see `params.method`, `params.host`, `params.path`, `params.query` (the raw query string, `""` when there is none, not URL-decoded), and — when a body rule applies — `params.body`. The operation string is `"METHOD host/path"` without the query.
 
-**Which requests have their body read.** The engine decides per request (`eng.RequiresBodyFor("http", call)`): a rule that references `params.body` applies only to requests whose operation — `"METHOD host/path"`, matched case-insensitively — matches the rule's `operation` glob. A body rule with no `operation` applies to every request in the scope. Pin body rules to an operation so non-JSON traffic to other hosts is unaffected:
+**Which requests have their body read.** The engine decides per request (`eng.RequiresBodyFor("http", call)`): a rule that references `params.body` applies only to requests whose operation — `"METHOD host/path"`, matched case-insensitively by default — matches the rule's `operation` glob. A scope with `case_sensitive: true` matches the operation exactly, including the upper-case method. A body rule with no `operation` applies to every request in the scope. Pin body rules to an operation so non-JSON traffic to other hosts is unaffected. For GraphQL, reject invalid input as well as mutations:
 
 ```yaml
+- name: deny-invalid-graphql
+  match:
+    operation: "post api.github.com/graphql"
+    when: "!graphql(params.body).valid"
+  action: deny
 - name: deny-graphql-mutations
   match:
     operation: "post api.github.com/graphql"   # only these requests are buffered

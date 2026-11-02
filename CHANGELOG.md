@@ -6,13 +6,21 @@ Gatekeeper is pre-1.0. The configuration schema and credential source interface 
 
 ## Unreleased
 
+## v0.37.0 — 2026-11-02
+
 ### Changed
 
-- **Body inspection follows each rule's `operation`** (`proxy/httppolicy.go`) — the `http` scope now reads and parses a request body only when a rule that references `params.body` has an `operation` glob matching the request (`eng.RequiresBodyFor`, keep ≥ v0.7.0). Before, a single body rule made every request in the scope JSON-only: a policy that inspected `POST api.github.com/graphql` also denied `git push` over HTTPS, whose `git-receive-pack` body is not JSON. Body rules with no `operation` behave as before.
+- **Body inspection follows each rule's `operation`** (`proxy/httppolicy.go`) — the `http` scope now reads and parses a request body only when a rule that references `params.body` has an `operation` glob matching the request (`eng.RequiresBodyFor`, Keep v0.7.0). Before, a single body rule made every request in the scope JSON-only: a policy that inspected `POST api.github.com/graphql` also denied `git push` over HTTPS, whose `git-receive-pack` body is not JSON. Body rules with no `operation` behave as before. Matching requests retain the existing fail-closed body checks.
+- **Keep v0.7.0** (`go.mod`) — upgrades Keep from v0.5.0, including the `graphql(params.body)` CEL helper for inspecting GraphQL operations and arguments.
 
 ### Added
 
 - **`params.query` in `http`-scope Keep rules** (`proxy/httppolicy.go`) — every intercepted request's call now carries its raw query string (`""` when there is none). Rules can tell apart requests that differ only in their query, such as git's ref advertisement for a fetch (`?service=git-upload-pack`) and a push (`?service=git-receive-pack`).
+
+## v0.36.0 — 2026-10-27
+
+### Added
+
 - **`format: raw` credential option** — inject an `Authorization` credential exactly as stored, without prefixing or scheme detection. It cannot be combined with `prefix`; use it for services such as Cloudflare Access that require a JSON service-token value.
 
 ## v0.35.0 — 2026-10-25

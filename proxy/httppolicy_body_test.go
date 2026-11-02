@@ -419,6 +419,17 @@ func TestBuildHTTPCall_ExposesQuery(t *testing.T) {
 			call, ok, _ = buildHTTPCall(eng, req, "github.com")
 			require.True(t, ok)
 			assert.Equal(t, "", call.Params["query"])
+
+			// Parsed bodies must also retain the raw query, including escapes,
+			// repeated keys, and case, without adding it to the operation.
+			rawQuery := "service=git%2Dreceive-pack&ref=Main&ref=other+branch"
+			req, err = http.NewRequest("POST", "https://github.com/graphql?"+rawQuery, strings.NewReader(`{"query":"{ viewer { login } }"}`))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			call, ok, _ = buildHTTPCall(eng, req, "github.com")
+			require.True(t, ok)
+			assert.Equal(t, rawQuery, call.Params["query"])
+			assert.Equal(t, "POST github.com/graphql", call.Operation)
 		})
 	}
 }
