@@ -24,7 +24,7 @@ There is no setter method — an embedder populates the map directly when buildi
 
 | Key | Looked up | Evaluates |
 |---|---|---|
-| `"http"` | On every intercepted HTTPS request, after network policy allows it | The request itself (method, host, path, body) |
+| `"http"` | On every intercepted HTTPS request, after network policy allows it | The request itself (method, host, path, query, body) |
 | `"mcp-" + serverName` | On `POST` requests to `/mcp/{serverName}` whose body is a `tools/call` | The tool name and arguments |
 | `"llm-gateway"` | On `200` responses from `api.anthropic.com` | The response body (JSON or SSE) |
 
@@ -35,6 +35,8 @@ A run with no entry for a given key simply skips that check — Keep evaluation 
 Runs after [network policy](../concepts/04-network-policy.md) allows a request, on the plaintext request produced by TLS interception. Unlike network policy, it can inspect the request body, not just the host.
 
 **Denial:** `403 Forbidden`, header `X-Gatekeeper-Blocked: keep-policy` (also sent as `X-Moat-Blocked`), `Content-Type: text/plain`, a plaintext body naming the host (and, for evaluation-error denials, a generic "policy evaluation error" — the specific evaluator error is not echoed to the client).
+
+**Params.** Rules see `params.method`, `params.host`, `params.path`, `params.query` (the raw query string, `""` when there is none, not URL-decoded), and — when a body rule applies — `params.body`. The operation string is `"METHOD host/path"` without the query.
 
 **Which requests have their body read.** The engine decides per request (`eng.RequiresBodyFor("http", call)`): a rule that references `params.body` applies only to requests whose operation — `"METHOD host/path"`, matched case-insensitively — matches the rule's `operation` glob. A body rule with no `operation` applies to every request in the scope. Pin body rules to an operation so non-JSON traffic to other hosts is unaffected:
 

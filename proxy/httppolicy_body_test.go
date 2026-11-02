@@ -395,3 +395,30 @@ func TestBuildHTTPCall_PinnedBodyRuleInspectsMatchingOperation(t *testing.T) {
 	assert.False(t, ok, "non-JSON body for the pinned operation must still fail closed")
 	assert.Contains(t, reason, "not JSON")
 }
+
+// TestBuildHTTPCall_ExposesQuery: rules can read the raw query string as
+// params.query. git's ref advertisement differs between fetch and push only in
+// the query (?service=git-upload-pack vs git-receive-pack), so without it a
+// policy cannot refuse a push at the one request whose error body git shows.
+func TestBuildHTTPCall_ExposesQuery(t *testing.T) {
+	for name, rules := range map[string]string{"no body rule": httpNoBodyRules, "body rule": httpBodyRules} {
+		t.Run(name, func(t *testing.T) {
+			eng, err := keeplib.LoadFromBytes([]byte(rules))
+			require.NoError(t, err)
+			defer eng.Close()
+
+			req, err := http.NewRequest("GET", "https://github.com/acme/app.git/info/refs?service=git-receive-pack", nil)
+			require.NoError(t, err)
+			call, ok, _ := buildHTTPCall(eng, req, "github.com")
+			require.True(t, ok)
+			assert.Equal(t, "service=git-receive-pack", call.Params["query"])
+
+			// Companion: no query is an empty string, not a missing key.
+			req, err = http.NewRequest("GET", "https://github.com/acme/app.git/HEAD", nil)
+			require.NoError(t, err)
+			call, ok, _ = buildHTTPCall(eng, req, "github.com")
+			require.True(t, ok)
+			assert.Equal(t, "", call.Params["query"])
+		})
+	}
+}

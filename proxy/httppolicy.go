@@ -60,7 +60,20 @@ func isJSONContentType(ct string) bool {
 // operation to keep that fail-closed behavior to the requests they inspect —
 // for example so git smart-HTTP pushes (non-JSON pack bodies) keep working
 // next to a GraphQL body rule.
+//
+// Every call also carries the raw (undecoded) query string as params.query,
+// "" when there is none. Some requests differ only in their query — git's ref
+// advertisement is GET .../info/refs?service=git-upload-pack for a fetch and
+// ?service=git-receive-pack for a push.
 func buildHTTPCall(eng *keeplib.Engine, req *http.Request, host string) (call keeplib.Call, ok bool, denyReason string) {
+	call, ok, denyReason = buildHTTPCallParams(eng, req, host)
+	if ok {
+		call.Params["query"] = req.URL.RawQuery
+	}
+	return call, ok, denyReason
+}
+
+func buildHTTPCallParams(eng *keeplib.Engine, req *http.Request, host string) (call keeplib.Call, ok bool, denyReason string) {
 	if !eng.RequiresBodyFor("http", keeplib.NewHTTPCall(req.Method, host, req.URL.Path)) {
 		return keeplib.NewHTTPCall(req.Method, host, req.URL.Path), true, ""
 	}

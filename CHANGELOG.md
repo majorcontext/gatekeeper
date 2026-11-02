@@ -12,6 +12,7 @@ Gatekeeper is pre-1.0. The configuration schema and credential source interface 
 
 ### Added
 
+- **`params.query` in `http`-scope Keep rules** (`proxy/httppolicy.go`) — every intercepted request's call now carries its raw query string (`""` when there is none). Rules can tell apart requests that differ only in their query, such as git's ref advertisement for a fetch (`?service=git-upload-pack`) and a push (`?service=git-receive-pack`).
 - **`format: raw` credential option** — inject an `Authorization` credential exactly as stored, without prefixing or scheme detection. It cannot be combined with `prefix`; use it for services such as Cloudflare Access that require a JSON service-token value.
 
 ## v0.35.0 — 2026-10-25
