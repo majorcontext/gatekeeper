@@ -36,6 +36,8 @@ Authorization: Basic base64(client_id:client_secret)
 | `actor_token_type`   | Token type URI (default: `urn:ietf:params:oauth:token-type:access_token`; configurable via `actor_token_type`) | Only if `actor_token` is present |
 | `upstream_status` | `401`, indicating the previously injected token was rejected | Only on the exchange following a 401 eviction; a 401 during the per-key eviction cooldown is not signalled |
 
+The `upstream_status` field is an advisory signal, not proof that a credential is invalid: a caller may trigger an upstream 401, and a delayed response can refer to an earlier token.
+
 ### Example Request
 
 ```http
