@@ -8,7 +8,7 @@ import (
 )
 
 func captureUpstreamAuthCode(resp *http.Response, req *http.Request) *capturingBody {
-	if req == nil || req.URL == nil || req.URL.User != nil {
+	if req == nil || req.URL == nil || req.URL.User != nil || req.URL.RawQuery != "" || req.URL.ForceQuery {
 		return nil
 	}
 	if resp.StatusCode != http.StatusUnauthorized || resp.Body == nil || !isTextContentType(resp.Header.Get("Content-Type")) {
@@ -68,7 +68,8 @@ func overlapsCredential(code, value string, authorization bool) bool {
 	if len(value) > MaxBodySize {
 		return true
 	}
-	if strings.Contains(value, code) || strings.Contains(code, value) {
+	lowerValue := strings.ToLower(value)
+	if strings.Contains(lowerValue, code) || strings.Contains(code, lowerValue) {
 		return true
 	}
 	parts := strings.Fields(value)
@@ -98,6 +99,7 @@ func overlapsCredential(code, value string, authorization bool) bool {
 }
 
 func credentialFragmentOverlap(code, value string) bool {
+	value = strings.ToLower(value)
 	if strings.Contains(value, code) || strings.Contains(code, value) {
 		return true
 	}

@@ -24,7 +24,7 @@ This guide covers gatekeeper configuration and the STS endpoint contract. Implem
 4. The STS returns an `access_token` (and optional `expires_in`).
 5. Gatekeeper caches the token and injects it into the upstream request.
 
-When an upstream 401 evicts an injected token, the next exchange for that cache key includes the optional form field `upstream_status=401`. Normal exchanges omit it. Gatekeeper does not retry the failed request.
+When an upstream 401 evicts an injected token, the next exchange for that cache key includes the optional form field `upstream_status=401`. A 401 during the per-key eviction cooldown does not evict the token or signal the STS. Normal exchanges omit the field. Gatekeeper does not retry the failed request.
 
 ## Subject identity modes
 

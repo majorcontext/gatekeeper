@@ -355,3 +355,106 @@ func TestPlainHTTPUserinfoUpstreamAuthCodeSuppressed(t *testing.T) {
 		t.Fatal("upstream auth code exposed userinfo")
 	}
 }
+
+func TestUpstreamUnauthorizedCaseInsensitiveCredentialRedaction(t *testing.T) {
+	for _, tc := range []struct {
+		name, code string
+		headers    http.Header
+		injected   []CredentialHeader
+	}{
+		{"injected", "secret_token", nil, []CredentialHeader{{Name: "X-Key", Value: "SECRET_TOKEN"}}},
+		{"header", "secret_token", http.Header{"X-Key": {"SECRET_TOKEN"}}, nil},
+		{"basic decoded", "secret_token", http.Header{"X-Key": {"Basic " + basicAuth("user", "SECRET_TOKEN")}}, nil},
+		{"fragment injected", "bad_key_abcdef12", nil, []CredentialHeader{{Name: "X-Key", Value: "ABCDEF12_more"}}},
+		{"fragment header", "bad_key_abcdef12", http.Header{"X-Key": {"ABCDEF12_more"}}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &http.Response{StatusCode: 401, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"` + tc.code + `"}}`))}
+			body := captureUpstreamAuthCode(resp, &http.Request{URL: &url.URL{}})
+			_, _ = io.Copy(io.Discard, resp.Body)
+			if got := upstreamAuthCode(body, tc.headers, tc.injected, false); got != "" {
+				t.Fatalf("credential leaked as code %q", got)
+			}
+		})
+	}
+}
+
+func TestInterceptTransformedUnauthorizedOmitsAuthCode(t *testing.T) {
+	const body = `{"error":{"code":"token_expired"}}`
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, body)
+	}))
+	setup.Proxy.AddResponseTransformer(setup.BackendHost, func(_, value any) (any, bool) {
+		resp := value.(*http.Response)
+		resp.StatusCode = http.StatusOK
+		resp.Status = "200 OK"
+		return resp, true
+	})
+	wait := captureLog(t, setup.Proxy)
+	resp, err := setup.Client.Get(setup.Backend.URL + "/resource")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || string(got) != body || resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %q, err = %v", resp.StatusCode, got, err)
+	}
+	if data := wait(); data.StatusCode != http.StatusOK || data.UpstreamAuthCode != "" {
+		t.Fatalf("logged status %d with code %q", data.StatusCode, data.UpstreamAuthCode)
+	}
+}
+
+func TestQueryCredentialUpstreamAuthCodeSuppressed(t *testing.T) {
+	for _, path := range []string{"http", "relay", "mcp", "connect"} {
+		t.Run(path, func(t *testing.T) {
+			seen := make(chan string, 1)
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seen <- r.URL.Query().Get("api_key")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = io.WriteString(w, `{"error":{"code":"secret_token"}}`)
+			})
+			var p *Proxy
+			var backendURL string
+			var client *http.Client
+			if path == "connect" {
+				setup := newInterceptTestSetup(t, handler)
+				p, backendURL, client = setup.Proxy, setup.Backend.URL, setup.Client
+			} else {
+				backend := httptest.NewServer(handler)
+				t.Cleanup(backend.Close)
+				p, backendURL = NewProxy(), backend.URL
+			}
+			wait := captureLog(t, p)
+			if path == "connect" {
+				resp, err := client.Get(backendURL + "/resource?api_key=secret_token")
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, _ = io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			} else {
+				target := backendURL + "/resource?api_key=secret_token"
+				if path == "relay" {
+					if err := p.AddRelay("test", backendURL); err != nil {
+						t.Fatal(err)
+					}
+					target = "/relay/test/resource?api_key=secret_token"
+				} else if path == "mcp" {
+					p.SetMCPServers([]MCPServerConfig{{Name: "test", URL: backendURL}})
+					target = "/mcp/test/resource?api_key=secret_token"
+				}
+				p.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", target, nil))
+			}
+			if got := <-seen; got != "secret_token" {
+				t.Fatal("upstream query did not carry credential")
+			}
+			if data := wait(); data.UpstreamAuthCode != "" {
+				t.Fatal("upstream auth code exposed query credential")
+			}
+		})
+	}
+}

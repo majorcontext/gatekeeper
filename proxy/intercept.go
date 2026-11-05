@@ -378,7 +378,9 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			if isTextContentType(resp.Header.Get("Content-Type")) && resp.StatusCode != http.StatusSwitchingProtocols {
 				resp.Body = newCapturingBody(resp.Body, MaxBodySize, func(captured []byte) {
 					logData.ResponseBody = captured
-					logData.UpstreamAuthCode = upstreamAuthCode(authBody, req.Header, cr.Injected, p.getTokenSubstitutionForRequest(r, r.Host) != nil)
+					if logData.StatusCode == http.StatusUnauthorized {
+						logData.UpstreamAuthCode = upstreamAuthCode(authBody, req.Header, cr.Injected, p.getTokenSubstitutionForRequest(r, r.Host) != nil)
+					}
 					logData.Duration = time.Since(reqStart)
 					p.logRequest(r, logData)
 				})
