@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -15,8 +16,8 @@ func captureUpstreamAuthCode(resp *http.Response) *capturingBody {
 	return body
 }
 
-func upstreamAuthCode(body *capturingBody, headers http.Header, injected []CredentialHeader) string {
-	if body == nil {
+func upstreamAuthCode(body *capturingBody, headers http.Header, injected []CredentialHeader, substitution bool) string {
+	if body == nil || substitution {
 		return ""
 	}
 	var data struct {
@@ -63,5 +64,23 @@ func upstreamAuthCode(body *capturingBody, headers http.Header, injected []Crede
 }
 
 func overlapsCredential(code, value string) bool {
-	return value != "" && (strings.Contains(value, code) || strings.Contains(code, value))
+	if value == "" {
+		return false
+	}
+	if strings.Contains(value, code) || strings.Contains(code, value) {
+		return true
+	}
+	parts := strings.Fields(value)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Basic") {
+		return false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		return true
+	}
+	username, password, ok := strings.Cut(string(decoded), ":")
+	if !ok {
+		return true
+	}
+	return overlapsCredential(code, username) || overlapsCredential(code, password)
 }

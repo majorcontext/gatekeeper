@@ -9,6 +9,8 @@ Gatekeeper is pre-1.0. The configuration schema and credential source interface 
 ### Added
 
 - **Token exchange rejection signal** — after an upstream 401 evicts an injected token, the next exchange sends `upstream_status=401` to the STS.
+- **Upstream authentication observability** — canonical request logs and `request.complete` events include `upstream_auth_code` when a bounded upstream 401 JSON code can be recorded safely. `proxy.RequestLogData.UpstreamAuthCode` exposes it to custom loggers.
+- **Status-aware invalidation** — `proxy.CredentialHeader.InvalidateWithStatus` receives the rejected upstream status and takes precedence over `Invalidate` when both are set.
 
 ## v0.37.0 — 2026-11-02
 

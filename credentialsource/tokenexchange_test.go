@@ -903,3 +903,13 @@ func TestTokenExchange_UpstreamStatusAfterUnauthorized(t *testing.T) {
 		t.Errorf("exchange statuses = %q, want %q", got, want)
 	}
 }
+
+func TestTokenExchangePendingUnauthorizedIsBounded(t *testing.T) {
+	src := NewTokenExchangeSource(TokenExchangeConfig{})
+	for i := 0; i < 4097; i++ {
+		src.invalidateForStatus(fmt.Sprint(i), "", http.StatusUnauthorized)
+	}
+	if got := len(src.pendingUnauthorized); got > 4096 {
+		t.Fatalf("pending unauthorized entries = %d, want at most 4096", got)
+	}
+}

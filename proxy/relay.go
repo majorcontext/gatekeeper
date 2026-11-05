@@ -243,7 +243,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	written, streamErr := forwardStreaming(r.Context(), w, resp)
 
 	p.logExit(r, logBase, start, resp.StatusCode, func(d *RequestLogData) {
-		d.UpstreamAuthCode = upstreamAuthCode(authBody, proxyReq.Header, credResult.Injected)
+		d.UpstreamAuthCode = upstreamAuthCode(authBody, proxyReq.Header, credResult.Injected, p.getTokenSubstitutionForRequest(r, host) != nil)
 		d.Err = streamErr
 		d.ResponseSize = written
 		d.ResponseHeaders = resp.Header.Clone()

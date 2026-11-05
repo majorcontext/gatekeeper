@@ -491,7 +491,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	written, copyErr := forwardStreaming(r.Context(), w, resp)
 
 	p.logExit(r, logBase, start, resp.StatusCode, func(d *RequestLogData) {
-		d.UpstreamAuthCode = upstreamAuthCode(authBody, proxyReq.Header, nil)
+		d.UpstreamAuthCode = upstreamAuthCode(authBody, proxyReq.Header, nil, false)
 		d.Err = copyErr
 		d.ResponseSize = written
 		d.ResponseHeaders = resp.Header.Clone()

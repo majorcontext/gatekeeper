@@ -163,7 +163,7 @@ func (s *TokenExchangeSource) exchange(ctx context.Context, subjectToken, actorT
 	}
 	if upstreamUnauthorized {
 		form.Set("upstream_status", "401")
-		slog.InfoContext(ctx, "token exchange after upstream rejection", "upstream_status", 401, "request_id", requestID)
+		slog.InfoContext(ctx, "token exchange after upstream rejection", "upstream_status", 401)
 	}
 	if s.resource != "" {
 		form.Set("resource", s.resource)
@@ -329,6 +329,8 @@ const maxTokenTTL = time.Minute
 // cooldown passes before a changed backing credential is picked up.
 const defaultInvalidateCooldown = 10 * time.Second
 
+const maxPendingUnauthorized = 4096
+
 // Invalidate drops the cached token for the given subject and actor, so the
 // next Resolve performs a fresh exchange. Callers invoke it when the
 // destination returns a status that may indicate the backing credential was
@@ -354,6 +356,12 @@ func (s *TokenExchangeSource) invalidateForStatus(subjectToken, actorToken strin
 	}
 	s.lastInvalidated[ck] = now
 	if status == http.StatusUnauthorized {
+		if !s.pendingUnauthorized[ck] && len(s.pendingUnauthorized) >= maxPendingUnauthorized {
+			for key := range s.pendingUnauthorized {
+				delete(s.pendingUnauthorized, key)
+				break
+			}
+		}
 		s.pendingUnauthorized[ck] = true
 	}
 

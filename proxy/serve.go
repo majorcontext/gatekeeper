@@ -425,7 +425,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		_, _ = io.Copy(w, resp.Body)
 	}
-	logData.UpstreamAuthCode = upstreamAuthCode(authBody, outReq.Header, credResult.Injected)
+	logData.UpstreamAuthCode = upstreamAuthCode(authBody, outReq.Header, credResult.Injected, p.getTokenSubstitutionForRequest(r, lookupHost) != nil)
 	logData.Duration = time.Since(start)
 	p.logRequest(r, logData)
 }
