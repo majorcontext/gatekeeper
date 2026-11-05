@@ -137,22 +137,13 @@ func TestUpstreamUnauthorizedSecretsNotLogged(t *testing.T) {
 }
 
 func TestUpstreamUnauthorizedCodeIgnoresHeaderSyntax(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		code        string
-		headers     http.Header
-		credentials []CredentialHeader
-	}{
-		{"token scheme", "invalid_token", http.Header{"Authorization": {"token abc123"}}, []CredentialHeader{{Name: "Authorization", Value: "token abc123"}}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			resp := &http.Response{StatusCode: 401, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"` + tc.code + `"}}`))}
-			body := captureUpstreamAuthCode(resp, &http.Request{URL: &url.URL{}})
-			_, _ = io.Copy(io.Discard, resp.Body)
-			if got := upstreamAuthCode(body, tc.headers, tc.credentials, false); got != tc.code {
-				t.Fatalf("code = %q, want %q", got, tc.code)
-			}
-		})
+	resp := &http.Response{StatusCode: 401, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"invalid_token"}}`))}
+	body := captureUpstreamAuthCode(resp, &http.Request{URL: &url.URL{}})
+	_, _ = io.Copy(io.Discard, resp.Body)
+	headers := http.Header{"Authorization": {"token abc123"}}
+	credentials := []CredentialHeader{{Name: "Authorization", Value: "token abc123"}}
+	if got := upstreamAuthCode(body, headers, credentials, false); got != "invalid_token" {
+		t.Fatalf("code = %q, want invalid_token", got)
 	}
 }
 
