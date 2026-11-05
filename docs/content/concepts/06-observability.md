@@ -52,6 +52,7 @@ Gatekeeper emits one wide structured log entry per request at completion. Each l
 | `http_host` | Target hostname |
 | `http_path` | Request path |
 | `http_status` | Response status code |
+| `upstream_auth_code` | Safe, bounded error identifier from an upstream 401 JSON response, when available |
 | `duration_ms` | Request duration in milliseconds |
 | `proxy_type` | Request classification (`http`, `connect`, `mcp`, `relay`, `postgres`) |
 | `credential_injected` | Whether any credential was injected |

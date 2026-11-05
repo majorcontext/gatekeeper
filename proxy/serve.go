@@ -398,6 +398,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	settleUpstreamResponse(resp, credResult.Injected, resolved.declined)
+	authBody := captureUpstreamAuthCode(resp)
 	ex.wrapResponse(resp)
 	defer ex.finish()
 	defer func() { resp.Body.Close() }() // the exchange wrapper, closed before finish
@@ -424,6 +425,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		_, _ = io.Copy(w, resp.Body)
 	}
+	logData.UpstreamAuthCode = upstreamAuthCode(authBody, outReq.Header, credResult.Injected)
 	logData.Duration = time.Since(start)
 	p.logRequest(r, logData)
 }

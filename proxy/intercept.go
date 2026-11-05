@@ -294,6 +294,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			cr, _ := req.Context().Value(interceptCredResultKey{}).(credentialInjectionResult)
 			resolved, _ := req.Context().Value(interceptCredsKey{}).(resolvedCredentials)
 			settleUpstreamResponse(resp, cr.Injected, resolved.declined)
+			authBody := captureUpstreamAuthCode(resp)
 
 			// Track LLM policy denials for the canonical log line.
 			var llmDenied bool
@@ -377,6 +378,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			if isTextContentType(resp.Header.Get("Content-Type")) && resp.StatusCode != http.StatusSwitchingProtocols {
 				resp.Body = newCapturingBody(resp.Body, MaxBodySize, func(captured []byte) {
 					logData.ResponseBody = captured
+					logData.UpstreamAuthCode = upstreamAuthCode(authBody, req.Header, cr.Injected)
 					logData.Duration = time.Since(reqStart)
 					p.logRequest(r, logData)
 				})

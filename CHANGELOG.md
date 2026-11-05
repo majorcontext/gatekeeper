@@ -6,6 +6,10 @@ Gatekeeper is pre-1.0. The configuration schema and credential source interface 
 
 ## Unreleased
 
+### Added
+
+- **Token exchange rejection signal** — after an upstream 401 evicts an injected token, the next exchange sends `upstream_status=401` to the STS.
+
 ## v0.37.0 — 2026-11-02
 
 ### Changed

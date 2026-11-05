@@ -235,6 +235,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	settleUpstreamResponse(resp, credResult.Injected, resolved.declined)
+	authBody := captureUpstreamAuthCode(resp)
 	exch.wrapResponse(resp)
 	defer exch.finish()
 	defer func() { resp.Body.Close() }() // the exchange wrapper, closed before finish
@@ -242,6 +243,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	written, streamErr := forwardStreaming(r.Context(), w, resp)
 
 	p.logExit(r, logBase, start, resp.StatusCode, func(d *RequestLogData) {
+		d.UpstreamAuthCode = upstreamAuthCode(authBody, proxyReq.Header, credResult.Injected)
 		d.Err = streamErr
 		d.ResponseSize = written
 		d.ResponseHeaders = resp.Header.Clone()

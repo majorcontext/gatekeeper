@@ -483,13 +483,15 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 			p.errorPrefix(), serverName, targetURL.String(), err), http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { resp.Body.Close() }()
 
 	slog.Debug("MCP relay response", "server", serverName, "status", resp.StatusCode)
 
+	authBody := captureUpstreamAuthCode(resp)
 	written, copyErr := forwardStreaming(r.Context(), w, resp)
 
 	p.logExit(r, logBase, start, resp.StatusCode, func(d *RequestLogData) {
+		d.UpstreamAuthCode = upstreamAuthCode(authBody, proxyReq.Header, nil)
 		d.Err = copyErr
 		d.ResponseSize = written
 		d.ResponseHeaders = resp.Header.Clone()

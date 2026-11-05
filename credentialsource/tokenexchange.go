@@ -98,9 +98,10 @@ type TokenExchangeSource struct {
 	// older generation must not write its result: the exchange may have been
 	// issued before the upstream credential rotated, so caching it would
 	// re-stale the entry the invalidation just cleared.
-	cacheGen        uint64
-	lastInvalidated map[tokenCacheKey]time.Time
-	sf              singleflight.Group
+	cacheGen            uint64
+	lastInvalidated     map[tokenCacheKey]time.Time
+	pendingUnauthorized map[tokenCacheKey]bool
+	sf                  singleflight.Group
 }
 
 type tokenCacheKey struct {
@@ -133,16 +134,17 @@ func NewTokenExchangeSource(cfg TokenExchangeConfig) *TokenExchangeSource {
 		actorTokenType = "urn:ietf:params:oauth:token-type:access_token"
 	}
 	return &TokenExchangeSource{
-		endpoint:           cfg.Endpoint,
-		clientID:           cfg.ClientID,
-		clientSecret:       cfg.ClientSecret,
-		resource:           cfg.Resource,
-		subjectTokenType:   subjectTokenType,
-		actorTokenType:     actorTokenType,
-		client:             &http.Client{Timeout: 30 * time.Second},
-		cache:              make(map[tokenCacheKey]cachedToken),
-		lastInvalidated:    make(map[tokenCacheKey]time.Time),
-		invalidateCooldown: defaultInvalidateCooldown,
+		endpoint:            cfg.Endpoint,
+		clientID:            cfg.ClientID,
+		clientSecret:        cfg.ClientSecret,
+		resource:            cfg.Resource,
+		subjectTokenType:    subjectTokenType,
+		actorTokenType:      actorTokenType,
+		client:              &http.Client{Timeout: 30 * time.Second},
+		cache:               make(map[tokenCacheKey]cachedToken),
+		lastInvalidated:     make(map[tokenCacheKey]time.Time),
+		pendingUnauthorized: make(map[tokenCacheKey]bool),
+		invalidateCooldown:  defaultInvalidateCooldown,
 	}
 }
 
@@ -150,10 +152,18 @@ func NewTokenExchangeSource(cfg TokenExchangeConfig) *TokenExchangeSource {
 // When actorToken is non-empty, it is included as the actor_token parameter.
 // When requestID is non-empty, it is forwarded as X-Request-Id to the STS.
 func (s *TokenExchangeSource) Exchange(ctx context.Context, subjectToken, actorToken, requestID string) (*TokenExchangeResponse, error) {
+	return s.exchange(ctx, subjectToken, actorToken, requestID, false)
+}
+
+func (s *TokenExchangeSource) exchange(ctx context.Context, subjectToken, actorToken, requestID string, upstreamUnauthorized bool) (*TokenExchangeResponse, error) {
 	form := url.Values{
 		"grant_type":         {tokenExchangeGrantType},
 		"subject_token":      {subjectToken},
 		"subject_token_type": {s.subjectTokenType},
+	}
+	if upstreamUnauthorized {
+		form.Set("upstream_status", "401")
+		slog.InfoContext(ctx, "token exchange after upstream rejection", "upstream_status", 401, "request_id", requestID)
 	}
 	if s.resource != "" {
 		form.Set("resource", s.resource)
@@ -329,6 +339,10 @@ const defaultInvalidateCooldown = 10 * time.Second
 // cached — it still bars any in-flight exchange from caching a result that
 // predates it.
 func (s *TokenExchangeSource) Invalidate(subjectToken, actorToken string) {
+	s.invalidateForStatus(subjectToken, actorToken, 0)
+}
+
+func (s *TokenExchangeSource) invalidateForStatus(subjectToken, actorToken string, status int) {
 	ck := tokenCacheKey{subject: subjectToken, actor: actorToken}
 
 	s.mu.Lock()
@@ -339,6 +353,9 @@ func (s *TokenExchangeSource) Invalidate(subjectToken, actorToken string) {
 		return
 	}
 	s.lastInvalidated[ck] = now
+	if status == http.StatusUnauthorized {
+		s.pendingUnauthorized[ck] = true
+	}
 
 	delete(s.cache, ck)
 	s.cacheGen++
@@ -384,6 +401,8 @@ func (s *TokenExchangeSource) ResolveToken(ctx context.Context, subjectToken, ac
 			return cached, nil
 		}
 		gen := s.cacheGen
+		upstreamUnauthorized := s.pendingUnauthorized[ck]
+		delete(s.pendingUnauthorized, ck)
 		s.mu.Unlock()
 
 		// WithoutCancel strips both cancellation and deadline from the parent.
@@ -393,7 +412,7 @@ func (s *TokenExchangeSource) ResolveToken(ctx context.Context, subjectToken, ac
 		//
 		// The winning goroutine's requestID is forwarded to the STS call.
 		// Callers coalesced by singleflight do not each get a correlated STS entry.
-		result, err := s.Exchange(context.WithoutCancel(ctx), subjectToken, actorToken, requestID)
+		result, err := s.exchange(context.WithoutCancel(ctx), subjectToken, actorToken, requestID, upstreamUnauthorized)
 		var entry cachedToken
 		var declined *TokenExchangeDeclined
 		switch {

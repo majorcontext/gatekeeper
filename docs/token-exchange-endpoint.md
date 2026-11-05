@@ -34,6 +34,7 @@ Authorization: Basic base64(client_id:client_secret)
 | `resource`           | Target resource URI (e.g., `https://api.github.com`)               | Only if configured |
 | `actor_token`        | Caller proof token (the proxy auth password, which is the shared proxy token)                 | Only if `actor_token_from` is configured |
 | `actor_token_type`   | Token type URI (default: `urn:ietf:params:oauth:token-type:access_token`; configurable via `actor_token_type`) | Only if `actor_token` is present |
+| `upstream_status` | `401`, indicating the previously injected token was rejected | Only on the exchange following a 401 eviction |
 
 ### Example Request
 
