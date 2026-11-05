@@ -294,7 +294,7 @@ func (p *Proxy) handleConnectWithInterception(w http.ResponseWriter, r *http.Req
 			cr, _ := req.Context().Value(interceptCredResultKey{}).(credentialInjectionResult)
 			resolved, _ := req.Context().Value(interceptCredsKey{}).(resolvedCredentials)
 			settleUpstreamResponse(resp, cr.Injected, resolved.declined)
-			authBody := captureUpstreamAuthCode(resp)
+			authBody := captureUpstreamAuthCode(resp, req)
 
 			// Track LLM policy denials for the canonical log line.
 			var llmDenied bool

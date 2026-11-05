@@ -7,7 +7,10 @@ import (
 	"strings"
 )
 
-func captureUpstreamAuthCode(resp *http.Response) *capturingBody {
+func captureUpstreamAuthCode(resp *http.Response, req *http.Request) *capturingBody {
+	if req == nil || req.URL == nil || req.URL.User != nil {
+		return nil
+	}
 	if resp.StatusCode != http.StatusUnauthorized || resp.Body == nil || !isTextContentType(resp.Header.Get("Content-Type")) {
 		return nil
 	}

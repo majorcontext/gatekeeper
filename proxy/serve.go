@@ -398,7 +398,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	settleUpstreamResponse(resp, credResult.Injected, resolved.declined)
-	authBody := captureUpstreamAuthCode(resp)
+	authBody := captureUpstreamAuthCode(resp, outReq)
 	ex.wrapResponse(resp)
 	defer ex.finish()
 	defer func() { resp.Body.Close() }() // the exchange wrapper, closed before finish

@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -18,7 +19,7 @@ func TestUpstreamUnauthorizedCode(t *testing.T) {
 	} {
 		t.Run(tc.body, func(t *testing.T) {
 			resp := &http.Response{StatusCode: 401, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(tc.body))}
-			body := captureUpstreamAuthCode(resp)
+			body := captureUpstreamAuthCode(resp, &http.Request{URL: &url.URL{}})
 			_, _ = io.Copy(io.Discard, resp.Body)
 			if got := upstreamAuthCode(body, nil, nil, false); got != tc.want {
 				t.Errorf("code = %q, want %q", got, tc.want)
@@ -29,7 +30,7 @@ func TestUpstreamUnauthorizedCode(t *testing.T) {
 
 func TestUpstreamUnauthorizedRedactsCredentialCode(t *testing.T) {
 	resp := &http.Response{StatusCode: 401, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"secret_token"}}`))}
-	body := captureUpstreamAuthCode(resp)
+	body := captureUpstreamAuthCode(resp, &http.Request{URL: &url.URL{}})
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if got := upstreamAuthCode(body, nil, []CredentialHeader{{Value: "secret_token"}}, false); got != "" {
 		t.Fatalf("credential logged: %s", got)
@@ -51,7 +52,7 @@ func TestUpstreamUnauthorizedRedactsCredentialCode(t *testing.T) {
 func TestUpstreamUnauthorizedCaptureStreamsUnchanged(t *testing.T) {
 	body := `{"detail":{"code":"token_expired"}}`
 	resp := &http.Response{StatusCode: 401, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}
-	captured := captureUpstreamAuthCode(resp)
+	captured := captureUpstreamAuthCode(resp, &http.Request{URL: &url.URL{}})
 	if len(captured.Captured()) != 0 {
 		t.Fatal("capture read ahead")
 	}
@@ -161,7 +162,7 @@ func TestUpstreamUnauthorizedCodeIgnoresHeaderSyntax(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := &http.Response{StatusCode: 401, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"` + tc.code + `"}}`))}
-			body := captureUpstreamAuthCode(resp)
+			body := captureUpstreamAuthCode(resp, &http.Request{URL: &url.URL{}})
 			_, _ = io.Copy(io.Discard, resp.Body)
 			if got := upstreamAuthCode(body, tc.headers, tc.credentials, false); got != tc.code {
 				t.Fatalf("code = %q, want %q", got, tc.code)
@@ -207,7 +208,7 @@ func TestUpstreamUnauthorizedPartialCredentialRedaction(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := &http.Response{StatusCode: 401, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"` + tc.code + `"}}`))}
-			body := captureUpstreamAuthCode(resp)
+			body := captureUpstreamAuthCode(resp, &http.Request{URL: &url.URL{}})
 			_, _ = io.Copy(io.Discard, resp.Body)
 			if got := upstreamAuthCode(body, tc.headers, tc.injected, false); got != tc.want {
 				t.Fatalf("code = %q, want %q", got, tc.want)
@@ -288,9 +289,69 @@ func TestInterceptUnauthorizedCodePreservesBody(t *testing.T) {
 
 func TestUpstreamUnauthorizedCodeSuppressesShortHeader(t *testing.T) {
 	resp := &http.Response{StatusCode: 401, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"token_expired"}}`))}
-	body := captureUpstreamAuthCode(resp)
+	body := captureUpstreamAuthCode(resp, &http.Request{URL: &url.URL{}})
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if got := upstreamAuthCode(body, http.Header{"Accept-Language": {"en"}}, nil, false); got != "" {
 		t.Fatalf("code = %q, want omission for overlapping header", got)
+	}
+}
+
+func TestUserinfoUpstreamAuthCodeSuppressed(t *testing.T) {
+	for _, path := range []string{"relay", "mcp"} {
+		t.Run(path, func(t *testing.T) {
+			seen := make(chan bool, 1)
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				user, pass, ok := r.BasicAuth()
+				seen <- ok && user == "user" && pass == "secret_token"
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = io.WriteString(w, `{"error":{"code":"secret_token"}}`)
+			}))
+			defer backend.Close()
+			u := mustParseURL(backend.URL)
+			u.User = url.UserPassword("user", "secret_token")
+			p := NewProxy()
+			if path == "relay" {
+				if err := p.AddRelay("test", u.String()); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				p.SetMCPServers([]MCPServerConfig{{Name: "test", URL: u.String()}})
+			}
+			var logged RequestLogData
+			p.SetLogger(func(d RequestLogData) { logged = d })
+			requestPath := "/relay/test/"
+			if path == "mcp" {
+				requestPath = "/mcp/test"
+			}
+			p.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", requestPath, nil))
+			if !<-seen {
+				t.Fatal("upstream did not receive expected Basic credentials")
+			}
+			if logged.UpstreamAuthCode != "" {
+				t.Fatal("upstream auth code exposed userinfo")
+			}
+		})
+	}
+}
+
+func TestPlainHTTPUserinfoUpstreamAuthCodeSuppressed(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"code":"secret_token"}}`)
+	}))
+	defer backend.Close()
+	u := mustParseURL(backend.URL)
+	u.User = url.UserPassword("user", "secret_token")
+	p := NewProxy()
+	var logged RequestLogData
+	p.SetLogger(func(d RequestLogData) { logged = d })
+	p.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", u.String(), nil))
+	if logged.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d", logged.StatusCode)
+	}
+	if logged.UpstreamAuthCode != "" {
+		t.Fatal("upstream auth code exposed userinfo")
 	}
 }

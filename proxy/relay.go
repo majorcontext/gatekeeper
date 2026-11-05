@@ -235,7 +235,7 @@ func (p *Proxy) handleRelay(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	settleUpstreamResponse(resp, credResult.Injected, resolved.declined)
-	authBody := captureUpstreamAuthCode(resp)
+	authBody := captureUpstreamAuthCode(resp, proxyReq)
 	exch.wrapResponse(resp)
 	defer exch.finish()
 	defer func() { resp.Body.Close() }() // the exchange wrapper, closed before finish
