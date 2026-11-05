@@ -163,7 +163,7 @@ func (s *TokenExchangeSource) exchange(ctx context.Context, subjectToken, actorT
 	}
 	if upstreamUnauthorized {
 		form.Set("upstream_status", "401")
-		slog.InfoContext(ctx, "token exchange after upstream rejection", "upstream_status", 401)
+		slog.InfoContext(ctx, "token exchange attempt after upstream rejection", "subsystem", "credentialsource", "upstream_status", 401)
 	}
 	if s.resource != "" {
 		form.Set("resource", s.resource)
