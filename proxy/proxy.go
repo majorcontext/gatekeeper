@@ -108,17 +108,19 @@ const maxPolicyBodySize = 10 << 20
 // RequestLogData contains all data for a logged request.
 // Designed for canonical log lines: one wide structured entry per request.
 type RequestLogData struct {
-	RequestID       string // Unique request identifier (from X-Request-Id or generated)
-	Method          string
-	URL             string
-	Host            string // Target hostname (extracted from URL or CONNECT)
-	Path            string // Request path (empty for CONNECT tunnel-level logs)
-	RequestType     string // "http", "connect", "mcp", "relay", "postgres"
-	StatusCode      int
-	Duration        time.Duration
-	Err             error
-	RequestHeaders  http.Header
-	ResponseHeaders http.Header
+	RequestID   string // Unique request identifier (from X-Request-Id or generated)
+	Method      string
+	URL         string
+	Host        string // Target hostname (extracted from URL or CONNECT)
+	Path        string // Request path (empty for CONNECT tunnel-level logs)
+	RequestType string // "http", "connect", "mcp", "relay", "postgres"
+	StatusCode  int
+	// UpstreamAuthCode is a validated code from a 401 response, when available.
+	UpstreamAuthCode string
+	Duration         time.Duration
+	Err              error
+	RequestHeaders   http.Header
+	ResponseHeaders  http.Header
 	// CapturedResponseHeaders contains configured response headers for logs.
 	CapturedResponseHeaders http.Header
 	RequestBody             []byte
@@ -202,6 +204,9 @@ type Credential struct {
 	// Invalidate drops cached state that produced Value when the destination
 	// rejects the credential or reports an exhausted allowance.
 	Invalidate func() `yaml:"-"`
+
+	// InvalidateWithStatus replaces Invalidate when set and receives the upstream failure status.
+	InvalidateWithStatus func(int) `yaml:"-"`
 
 	UpgradeHint UpgradeHint `yaml:"-"`
 }

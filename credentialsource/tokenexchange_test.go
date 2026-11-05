@@ -871,3 +871,45 @@ func TestTokenExchangeResolver_NilProxyAuthIssuesNothing(t *testing.T) {
 		t.Fatalf("resolve = %+v, %v; want nil, nil", got, err)
 	}
 }
+
+func TestTokenExchange_UpstreamStatusAfterUnauthorized(t *testing.T) {
+	var statuses []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		statuses = append(statuses, r.Form.Get("upstream_status"))
+		fmt.Fprint(w, `{"access_token":"token","expires_in":60}`)
+	}))
+	defer srv.Close()
+	src := NewTokenExchangeSource(TokenExchangeConfig{Endpoint: srv.URL})
+	ctx := context.Background()
+	if _, err := src.Resolve(ctx, "alice", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	src.invalidateForStatus("alice", "", http.StatusUnauthorized)
+	if _, err := src.Resolve(ctx, "bob", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.Resolve(ctx, "alice", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	src.invalidateCooldown = 0
+	src.invalidateForStatus("alice", "", http.StatusForbidden)
+	if _, err := src.Resolve(ctx, "alice", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fmt.Sprint(statuses), "[  401 ]"; got != want {
+		t.Errorf("exchange statuses = %q, want %q", got, want)
+	}
+}
+
+func TestTokenExchangePendingUnauthorizedIsBounded(t *testing.T) {
+	src := NewTokenExchangeSource(TokenExchangeConfig{})
+	for i := 0; i < 4097; i++ {
+		src.invalidateForStatus(fmt.Sprint(i), "", http.StatusUnauthorized)
+	}
+	if got := len(src.pendingUnauthorized); got > 4096 {
+		t.Fatalf("pending unauthorized entries = %d, want at most 4096", got)
+	}
+}

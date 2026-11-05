@@ -75,7 +75,7 @@ func newTokenExchangeResolver(cfg tokenExchangeResolverConfig) proxy.CredentialR
 		}
 		out := make([]proxy.CredentialHeader, len(headers))
 		for i, h := range headers {
-			out[i] = proxy.CredentialHeader{Name: h.Name, Value: h.Value, Grant: h.Grant, Invalidate: h.Invalidate, UpgradeHint: proxy.UpgradeHint(h.Upgrade)}
+			out[i] = proxy.CredentialHeader{Name: h.Name, Value: h.Value, Grant: h.Grant, Invalidate: h.Invalidate, InvalidateWithStatus: h.InvalidateWithStatus, UpgradeHint: proxy.UpgradeHint(h.Upgrade)}
 		}
 		return out, nil
 	}

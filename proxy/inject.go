@@ -834,7 +834,9 @@ func invalidateCredentialsOnCredentialFailure(creds []CredentialHeader, statusCo
 		return
 	}
 	for _, cred := range creds {
-		if cred.Invalidate != nil {
+		if cred.InvalidateWithStatus != nil {
+			cred.InvalidateWithStatus(statusCode)
+		} else if cred.Invalidate != nil {
 			cred.Invalidate()
 		}
 	}

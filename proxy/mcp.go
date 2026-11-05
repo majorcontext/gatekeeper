@@ -435,6 +435,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 	// injectedHeaders and grants record the injection for the canonical log
 	// lines below, mirroring injectCredentials' credentialInjectionResult.
 	var injectedHeaders map[string]bool
+	var injectedCreds []CredentialHeader
 	var grants []string
 	if mcpServer.Auth != nil {
 		var credValue string
@@ -463,6 +464,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 		}
 
 		proxyReq.Header.Set(mcpServer.Auth.Header, formatCredValue(mcpServer.Auth.Grant, credValue))
+		injectedCreds = []CredentialHeader{{Name: mcpServer.Auth.Header, Value: credValue}}
 		injectedHeaders = map[string]bool{strings.ToLower(mcpServer.Auth.Header): true}
 		if mcpServer.Auth.Grant != "" {
 			grants = []string{mcpServer.Auth.Grant}
@@ -487,9 +489,11 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 
 	slog.Debug("MCP relay response", "server", serverName, "status", resp.StatusCode)
 
+	authBody := captureUpstreamAuthCode(resp, proxyReq)
 	written, copyErr := forwardStreaming(r.Context(), w, resp)
 
 	p.logExit(r, logBase, start, resp.StatusCode, func(d *RequestLogData) {
+		d.UpstreamAuthCode = upstreamAuthCode(authBody, proxyReq.Header, injectedCreds, false)
 		d.Err = copyErr
 		d.ResponseSize = written
 		d.ResponseHeaders = resp.Header.Clone()

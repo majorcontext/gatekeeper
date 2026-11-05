@@ -28,6 +28,9 @@ func (s *Server) installRequestLogger() {
 			slog.Float64("duration_ms", durationMS),
 			slog.String("proxy_type", data.RequestType),
 		}
+		if data.UpstreamAuthCode != "" {
+			attrs = append(attrs, slog.String("upstream_auth_code", data.UpstreamAuthCode))
+		}
 		if data.RunID != "" {
 			attrs = append(attrs, slog.String("run_id", data.RunID))
 		}
@@ -133,6 +136,9 @@ func (s *Server) installRequestLogger() {
 					attribute.Bool("credential_injected", data.AuthInjected),
 					attribute.String("proxy.request.type", data.RequestType),
 					attribute.String("http.host", data.Host),
+				}
+				if data.UpstreamAuthCode != "" {
+					spanAttrs = append(spanAttrs, attribute.String("upstream_auth_code", data.UpstreamAuthCode))
 				}
 				if data.RunID != "" {
 					spanAttrs = append(spanAttrs, attribute.String("run_id", data.RunID))

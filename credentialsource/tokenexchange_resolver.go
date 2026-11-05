@@ -10,11 +10,12 @@ import (
 // ResolvedHeader is one header produced by a TokenExchangeResolver. It carries
 // the subset of the proxy package's credential header that a resolver sets.
 type ResolvedHeader struct {
-	Name       string
-	Value      string
-	Grant      string
-	Invalidate func()
-	Upgrade    UpgradeHint
+	Name                 string
+	Value                string
+	Grant                string
+	Invalidate           func()
+	InvalidateWithStatus func(int)
+	Upgrade              UpgradeHint
 }
 
 // HeaderResolver resolves headers for one request. Its signature matches
@@ -113,11 +114,12 @@ func TokenExchangeResolver(cfg TokenExchangeResolverConfig) HeaderResolver {
 		}
 
 		return []ResolvedHeader{{
-			Name:       header,
-			Value:      cfg.AuthValue(token.AccessToken, cfg.Prefix, cfg.Format),
-			Grant:      cfg.Grant,
-			Invalidate: invalidate,
-			Upgrade:    token.Upgrade,
+			Name:                 header,
+			Value:                cfg.AuthValue(token.AccessToken, cfg.Prefix, cfg.Format),
+			Grant:                cfg.Grant,
+			Invalidate:           invalidate,
+			InvalidateWithStatus: func(status int) { src.invalidateForStatus(subject, actorToken, status) },
+			Upgrade:              token.Upgrade,
 		}}, nil
 	}
 }

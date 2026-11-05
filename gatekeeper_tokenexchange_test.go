@@ -974,3 +974,41 @@ func TestMatchedTokenExchangeRules_EndToEnd(t *testing.T) {
 		t.Errorf("STS calls = %d and %d, want 1 and 1", subCalls.Load(), apiCalls.Load())
 	}
 }
+
+func TestTokenExchangeUpstreamUnauthorizedSignalsNextExchange(t *testing.T) {
+	var statuses []string
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		statuses = append(statuses, r.Form.Get("upstream_status"))
+		io.WriteString(w, `{"access_token":"test-token","expires_in":60}`)
+	}))
+	defer sts.Close()
+	var upstreamCalls int
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer backend.Close()
+	srv := newBareServer(t)
+	cfg := &Config{Credentials: []CredentialConfig{{Host: "127.0.0.1", Grant: "test", AllowInsecure: true, Source: SourceConfig{Type: "token-exchange", Endpoint: sts.URL, ClientID: "c", ClientSecret: "s", SubjectHeader: "X-Subject"}}}}
+	if err := srv.loadCredentials(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		req := httptest.NewRequest(http.MethodGet, backend.URL, nil)
+		req.Header.Set("X-Subject", "alice")
+		rec := httptest.NewRecorder()
+		srv.proxy.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+	}
+	if want := []string{"", "401"}; !slices.Equal(statuses, want) {
+		t.Errorf("exchange statuses = %q, want %q", statuses, want)
+	}
+	if upstreamCalls != 2 {
+		t.Errorf("upstream calls = %d, want 2 (no retries)", upstreamCalls)
+	}
+}

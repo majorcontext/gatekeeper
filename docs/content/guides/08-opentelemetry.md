@@ -58,7 +58,7 @@ Each span includes attributes:
 - `proxy.request.type` — one of `connect`, `mcp`, `relay`, `http`
 - `http.response.status_code` — response status (not set for hijacked CONNECT connections)
 
-A `request.complete` event is added to each span with detailed context: `request_id`, `duration_ms`, `credential_injected`, `injected_headers`, `grants`, `denied`, and `deny_reason`.
+A `request.complete` event is added to each span with detailed context: `request_id`, `duration_ms`, `credential_injected`, `injected_headers`, `grants`, `denied`, `deny_reason`, and, when available, `upstream_auth_code`.
 
 ## Metrics
 

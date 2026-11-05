@@ -52,6 +52,7 @@ Gatekeeper emits one wide structured log entry per request at completion. Each l
 | `http_host` | Target hostname |
 | `http_path` | Request path |
 | `http_status` | Response status code |
+| `upstream_auth_code` | Bounded `detail.code` or `error.code` identifier from an upstream 401 JSON response, when available |
 | `duration_ms` | Request duration in milliseconds |
 | `proxy_type` | Request classification (`http`, `connect`, `mcp`, `relay`, `postgres`) |
 | `credential_injected` | Whether any credential was injected |
@@ -69,6 +70,8 @@ Gatekeeper emits one wide structured log entry per request at completion. Each l
 | `application_name` | Postgres connections only: the client's `application_name` startup parameter, sanitized and length-bounded. A correlation slug the client sets, not a trusted identity — see [Postgres Data Plane](./08-postgres-data-plane.md#tracing-a-connection-to-its-origin). Omitted when the client didn't set one. |
 
 Log level is determined by outcome: `ERROR` for server errors or transport failures, `WARN` for policy denials or client errors, `INFO` for successful requests.
+
+`upstream_auth_code` is limited to lowercase identifiers of at most 64 bytes. Codes overlapping injected credentials or outbound header values, including Basic credentials decoded from any credential header, are omitted. Comparisons are case-insensitive. Header values containing `basic` in any casing suppress the code unless they are a plain two-field Basic credential, which is decoded and checked. Base64-encoded header components are also decoded and checked; other encodings are not decoded. A shared sequence of eight or more characters with a credential component also suppresses the code; credential or header values over 8 KiB suppress it without inspection. Recognized `Authorization` schemes and `Basic` on any credential header are excluded from fragment matching. All outbound headers are treated conservatively, so even a short noncredential value can cause a code to be omitted. The code is also omitted when token substitution is configured for the target or the outbound URL contains userinfo or a query string. Response bodies are captured as they stream, without read-ahead; incomplete, oversized, or non-JSON samples may have no code. The same field is included in the `request.complete` span event and exposed to custom loggers as `proxy.RequestLogData.UpstreamAuthCode`.
 
 ## Model exchange log
 
