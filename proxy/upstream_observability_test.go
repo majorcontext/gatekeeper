@@ -51,6 +51,8 @@ func TestUpstreamUnauthorizedCredentialOverlap(t *testing.T) {
 		{"custom basic partial", "bad_key_abcdef12", http.Header{"X-Custom-Key": {"Basic " + basicAuth("user", "abcdef12_more")}}, nil, ""},
 		{"mixed case nested basic", "secret_token", http.Header{"X-Custom-Key": {"bEaReR bAsIc " + basicAuth("user", "secret_token")}}, nil, ""},
 		{"nested basic with extension", "secret_token", http.Header{"X-Custom-Key": {"Bearer Basic " + basicAuth("user", "secret_token") + " extension"}}, nil, ""},
+		{"token nested basic", "secret_token", http.Header{"X-Custom-Key": {"token Basic " + basicAuth("user", "secret_token")}}, nil, ""},
+		{"arbitrary mixed case nested basic with extension", "secret_token", nil, []CredentialHeader{{Name: "X-Key", Value: "custom prefix bAsIc " + basicAuth("user", "secret_token") + " extension"}}, ""},
 		{"partial injected", "bad_key_abcdef12", nil, []CredentialHeader{{Name: "X-Key", Value: "abcdef12_more"}}, ""},
 		{"partial outbound", "bad_key_abcdef12", http.Header{"X-Key": {"abcdef12_more"}}, nil, ""},
 		{"seven shared characters", "bad_key_abcdef1", http.Header{"X-Key": {"abcdef12_more"}}, nil, "bad_key_abcdef1"},
@@ -89,12 +91,12 @@ func TestUpstreamUnauthorizedCaptureStreamsUnchanged(t *testing.T) {
 
 func TestUpstreamUnauthorizedSecretsNotLogged(t *testing.T) {
 	for _, path := range []string{"http", "connect"} {
-		for _, kind := range []string{"basic", "substitution"} {
+		for _, kind := range []string{"basic", "nested-basic", "substitution"} {
 			t.Run(path+"/"+kind, func(t *testing.T) {
 				const secret = "secret_token"
 				seen := make(chan string, 1)
 				handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if kind == "basic" {
+					if kind != "substitution" {
 						seen <- r.Header.Get("Authorization")
 					} else {
 						seen <- r.URL.Path
@@ -119,8 +121,11 @@ func TestUpstreamUnauthorizedSecretsNotLogged(t *testing.T) {
 					client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(server.URL))}}
 					request = client.Get
 				}
-				if kind == "basic" {
+				if kind != "substitution" {
 					value := "Basic " + basicAuth("user", secret)
+					if kind == "nested-basic" {
+						value = "custom bAsIc " + basicAuth("user", secret) + " extension"
+					}
 					if path == "http" {
 						p.SetInsecureCredentialWithGrant(host, "Authorization", value, "example")
 					} else {
@@ -140,6 +145,9 @@ func TestUpstreamUnauthorizedSecretsNotLogged(t *testing.T) {
 				resp.Body.Close()
 				got := <-seen
 				if kind == "basic" && got != "Basic "+basicAuth("user", secret) {
+					t.Fatalf("upstream auth = %q", got)
+				}
+				if kind == "nested-basic" && got != "custom bAsIc "+basicAuth("user", secret)+" extension" {
 					t.Fatalf("upstream auth = %q", got)
 				}
 				if kind == "substitution" && got != "/"+secret {
@@ -187,7 +195,6 @@ func TestMCPInjectedHeaderRedactsUpstreamCode(t *testing.T) {
 	for _, tc := range []struct{ name, grant, credential, code, want string }{
 		{"fragment", "mcp-test", "abcdef12_more", "bad_key_abcdef12", "abcdef12_more"},
 		{"oauth nested basic", "oauth:test", "Basic " + basicAuth("user", "secret_token"), "secret_token", "Bearer Basic " + basicAuth("user", "secret_token")},
-		{"oauth mixed case nested basic", "oauth:test", "bAsIc " + basicAuth("user", "secret_token"), "secret_token", "Bearer bAsIc " + basicAuth("user", "secret_token")},
 	} {
 		for _, path := range []string{"http", "connect"} {
 			t.Run(tc.name+"/"+path, func(t *testing.T) {

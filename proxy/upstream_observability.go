@@ -74,8 +74,10 @@ func overlapsCredential(code, value string, authorization bool) bool {
 		return true
 	}
 	parts := strings.Fields(value)
-	if len(parts) >= 3 && strings.EqualFold(parts[0], "Bearer") && strings.EqualFold(parts[1], "Basic") {
-		return true
+	for i, part := range parts {
+		if strings.EqualFold(part, "Basic") && (i != 0 || len(parts) != 2) {
+			return true
+		}
 	}
 	if len(parts) == 2 && strings.EqualFold(parts[0], "Basic") {
 		if credentialFragmentOverlap(code, parts[1]) {
