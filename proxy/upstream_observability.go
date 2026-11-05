@@ -98,14 +98,19 @@ func overlapsCredential(code, value string, authorization bool) bool {
 		if credentialFragmentOverlap(code, part) {
 			return true
 		}
-		for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
-			decoded, err := encoding.DecodeString(part)
-			if err != nil || len(decoded) == 0 {
-				continue
-			}
-			for _, fragment := range strings.Split(string(decoded), ":") {
-				if fragment != "" && credentialFragmentOverlap(code, fragment) {
-					return true
+		segments := strings.FieldsFunc(part, func(r rune) bool {
+			return !(r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '+' || r == '/' || r == '-' || r == '_')
+		})
+		for _, segment := range segments {
+			for _, encoding := range []*base64.Encoding{base64.RawStdEncoding, base64.RawURLEncoding} {
+				decoded, err := encoding.DecodeString(segment)
+				if err != nil || len(decoded) == 0 {
+					continue
+				}
+				for _, fragment := range strings.Split(string(decoded), ":") {
+					if fragment != "" && credentialFragmentOverlap(code, fragment) {
+						return true
+					}
 				}
 			}
 		}

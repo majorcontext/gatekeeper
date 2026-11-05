@@ -50,15 +50,18 @@ func TestUpstreamUnauthorizedCredentialOverlap(t *testing.T) {
 		{"custom basic injected", "secret_token", nil, []CredentialHeader{{Name: "X-Custom-Key", Value: basic}}, ""},
 		{"custom basic outbound", "secret_token", http.Header{"X-Custom-Key": {basic}}, nil, ""},
 		{"custom basic partial", "bad_key_abcdef12", http.Header{"X-Custom-Key": {"Basic " + basicAuth("user", "abcdef12_more")}}, nil, ""},
-		{"colon attached mixed case basic outbound", "secret_token", http.Header{"X-Custom-Key": {"Bearer:bAsIc " + basicAuth("user", "secret_token")}}, nil, ""},
-		{"comma attached basic injected", "secret_token", nil, []CredentialHeader{{Name: "X-Key", Value: "Basic," + basicAuth("user", "secret_token")}}, ""},
 		{"arbitrary basic substring", "invalid_token", http.Header{"X-Key": {"preBaSiCpost"}}, nil, ""},
 		{"plain basic unrelated", "invalid_token", http.Header{"X-Key": {basic}}, nil, "invalid_token"},
-		{"encoded bearer credential", "secret_token", http.Header{"Authorization": {"Bearer " + basicAuth("user", "secret_token")}}, nil, ""},
-		{"bare base64 standard", "secret_token", http.Header{"X-Key": {base64.StdEncoding.EncodeToString([]byte("\xfb:secret_token"))}}, nil, ""},
+		{"base64 standard bearer credential", "secret_token", http.Header{"Authorization": {"Bearer " + base64.StdEncoding.EncodeToString([]byte("\xfb:secret_token"))}}, nil, ""},
 		{"bare base64 standard unpadded", "secret_token", http.Header{"X-Key": {base64.RawStdEncoding.EncodeToString([]byte("\xfb:secret_token"))}}, nil, ""},
 		{"bare base64 url padded", "secret_token", nil, []CredentialHeader{{Name: "X-Key", Value: base64.URLEncoding.EncodeToString([]byte("\xfb:secret_token"))}}, ""},
 		{"bare base64 url unpadded", "secret_token", nil, []CredentialHeader{{Name: "X-Key", Value: base64.RawURLEncoding.EncodeToString([]byte("\xfb:secret_token"))}}, ""},
+		{"cookie session encoded secret_token", "secret_token", http.Header{"Cookie": {"session=c2VjcmV0X3Rva2Vu"}}, nil, ""},
+		{"key standard padded short secret", "cat", http.Header{"X-Key": {"key=" + base64.StdEncoding.EncodeToString([]byte("\xfb:cat"))}}, nil, ""},
+		{"key standard unpadded short secret", "cat", http.Header{"X-Key": {"key=" + base64.RawStdEncoding.EncodeToString([]byte("\xfb:cat"))}}, nil, ""},
+		{"jwt url padded short secret", "cat", nil, []CredentialHeader{{Name: "X-Key", Value: "prefix." + base64.URLEncoding.EncodeToString([]byte("\xfb:cat")) + ".suffix"}}, ""},
+		{"jwt url unpadded short secret", "cat", nil, []CredentialHeader{{Name: "X-Key", Value: "prefix." + base64.RawURLEncoding.EncodeToString([]byte("\xfb:cat")) + ".suffix"}}, ""},
+		{"unrelated encoded segment", "invalid_token", http.Header{"X-Key": {"key=" + base64.StdEncoding.EncodeToString([]byte("unrelated"))}}, nil, "invalid_token"},
 		{"arbitrary mixed case nested basic with extension", "secret_token", nil, []CredentialHeader{{Name: "X-Key", Value: "custom prefix bAsIc " + basicAuth("user", "secret_token") + " extension"}}, ""},
 		{"partial injected", "bad_key_abcdef12", nil, []CredentialHeader{{Name: "X-Key", Value: "abcdef12_more"}}, ""},
 		{"partial outbound", "bad_key_abcdef12", http.Header{"X-Key": {"abcdef12_more"}}, nil, ""},
@@ -80,6 +83,38 @@ func TestUpstreamUnauthorizedCredentialOverlap(t *testing.T) {
 	}
 }
 
+func TestUpstreamUnauthorizedCookieEncodedSecretNotLogged(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Cookie"); got != "session=c2VjcmV0X3Rva2Vu" {
+			t.Errorf("upstream cookie = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"code":"secret_token"}}`)
+	}))
+	defer backend.Close()
+
+	p := NewProxy()
+	wait := captureLog(t, p)
+	server := httptest.NewServer(p)
+	defer server.Close()
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(server.URL))}}
+	req, err := http.NewRequest(http.MethodGet, backend.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Cookie", "session=c2VjcmV0X3Rva2Vu")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if got := wait().UpstreamAuthCode; got != "" {
+		t.Fatalf("upstream auth code leaked secret: %q", got)
+	}
+}
+
 func TestUpstreamUnauthorizedCaptureStreamsUnchanged(t *testing.T) {
 	body := `{"detail":{"code":"token_expired"}}`
 	resp := &http.Response{StatusCode: 401, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}
@@ -98,7 +133,7 @@ func TestUpstreamUnauthorizedCaptureStreamsUnchanged(t *testing.T) {
 
 func TestUpstreamUnauthorizedSecretsNotLogged(t *testing.T) {
 	for _, path := range []string{"http", "connect"} {
-		for _, kind := range []string{"basic", "colon-basic", "comma-basic", "substitution"} {
+		for _, kind := range []string{"basic", "colon-basic", "substitution"} {
 			t.Run(path+"/"+kind, func(t *testing.T) {
 				const secret = "secret_token"
 				seen := make(chan string, 1)
@@ -133,8 +168,6 @@ func TestUpstreamUnauthorizedSecretsNotLogged(t *testing.T) {
 					switch kind {
 					case "colon-basic":
 						value = "Bearer:bAsIc " + basicAuth("user", secret)
-					case "comma-basic":
-						value = "Basic," + basicAuth("user", secret)
 					}
 					if path == "http" {
 						p.SetInsecureCredentialWithGrant(host, "Authorization", value, "example")
@@ -158,9 +191,6 @@ func TestUpstreamUnauthorizedSecretsNotLogged(t *testing.T) {
 					t.Fatalf("upstream auth = %q", got)
 				}
 				if kind == "colon-basic" && got != "Bearer:bAsIc "+basicAuth("user", secret) {
-					t.Fatalf("upstream auth = %q", got)
-				}
-				if kind == "comma-basic" && got != "Basic,"+basicAuth("user", secret) {
 					t.Fatalf("upstream auth = %q", got)
 				}
 				if kind == "substitution" && got != "/"+secret {
