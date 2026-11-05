@@ -71,7 +71,7 @@ Gatekeeper emits one wide structured log entry per request at completion. Each l
 
 Log level is determined by outcome: `ERROR` for server errors or transport failures, `WARN` for policy denials or client errors, `INFO` for successful requests.
 
-`upstream_auth_code` is limited to lowercase identifiers of at most 64 bytes. Codes overlapping outbound header values or injected credentials, including decoded Basic credentials, are omitted. The code is also omitted when token substitution is configured for the target. Response bodies are captured as they stream, without read-ahead; incomplete, oversized, or non-JSON samples may have no code. The same field is included in the `request.complete` span event and exposed to custom loggers as `proxy.RequestLogData.UpstreamAuthCode`.
+`upstream_auth_code` is limited to lowercase identifiers of at most 64 bytes. Codes overlapping injected credentials or outbound header values, including decoded Basic credentials, are omitted; ordinary `Accept-Language` values are compared as whole values rather than short substrings. The code is also omitted when token substitution is configured for the target. Response bodies are captured as they stream, without read-ahead; incomplete, oversized, or non-JSON samples may have no code. The same field is included in the `request.complete` span event and exposed to custom loggers as `proxy.RequestLogData.UpstreamAuthCode`.
 
 ## Model exchange log
 

@@ -44,26 +44,32 @@ func upstreamAuthCode(body *capturingBody, headers http.Header, injected []Crede
 		}
 	}
 	for _, cred := range injected {
-		if overlapsCredential(code, cred.Value) {
+		if overlapsCredential(code, cred.Value, strings.EqualFold(cred.Name, "Authorization")) {
 			return ""
 		}
 	}
-	for _, values := range headers {
-		for _, value := range values {
-			if overlapsCredential(code, value) {
-				return ""
+	for name, values := range headers {
+		credential := !strings.EqualFold(name, "Accept-Language")
+		for _, cred := range injected {
+			if strings.EqualFold(name, cred.Name) {
+				credential = true
+				break
 			}
-			for _, part := range strings.Fields(value) {
-				if overlapsCredential(code, part) {
+		}
+		for _, value := range values {
+			if credential {
+				if overlapsCredential(code, value, strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "Proxy-Authorization")) {
 					return ""
 				}
+			} else if strings.Contains(value, code) {
+				return ""
 			}
 		}
 	}
 	return code
 }
 
-func overlapsCredential(code, value string) bool {
+func overlapsCredential(code, value string, authorization bool) bool {
 	if value == "" {
 		return false
 	}
@@ -71,16 +77,27 @@ func overlapsCredential(code, value string) bool {
 		return true
 	}
 	parts := strings.Fields(value)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Basic") {
-		return false
+	if authorization && len(parts) == 2 {
+		scheme := parts[0]
+		if strings.EqualFold(scheme, "Basic") {
+			decoded, err := base64.StdEncoding.DecodeString(parts[1])
+			if err != nil {
+				return true
+			}
+			username, password, ok := strings.Cut(string(decoded), ":")
+			if !ok {
+				return true
+			}
+			return overlapsCredential(code, username, false) || overlapsCredential(code, password, false)
+		}
+		if strings.EqualFold(scheme, "Bearer") || strings.EqualFold(scheme, "token") {
+			parts = parts[1:]
+		}
 	}
-	decoded, err := base64.StdEncoding.DecodeString(parts[1])
-	if err != nil {
-		return true
+	for _, part := range parts {
+		if strings.Contains(part, code) || strings.Contains(code, part) {
+			return true
+		}
 	}
-	username, password, ok := strings.Cut(string(decoded), ":")
-	if !ok {
-		return true
-	}
-	return overlapsCredential(code, username) || overlapsCredential(code, password)
+	return false
 }

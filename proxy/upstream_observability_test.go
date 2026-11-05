@@ -40,6 +40,12 @@ func TestUpstreamUnauthorizedRedactsCredentialCode(t *testing.T) {
 	if got := upstreamAuthCode(body, nil, []CredentialHeader{{Value: "sec"}}, false); got != "" {
 		t.Fatalf("short credential logged: %s", got)
 	}
+	if got := upstreamAuthCode(body, http.Header{"X-Custom-Key": {"sec"}}, nil, false); got != "" {
+		t.Fatalf("custom header credential logged: %s", got)
+	}
+	if got := upstreamAuthCode(body, http.Header{"Accept-Language": {"sec"}}, []CredentialHeader{{Name: "Accept-Language", Value: "sec"}}, false); got != "" {
+		t.Fatalf("injected language header credential logged: %s", got)
+	}
 }
 
 func TestUpstreamUnauthorizedCaptureStreamsUnchanged(t *testing.T) {
@@ -141,5 +147,45 @@ func TestUpstreamUnauthorizedSecretsNotLogged(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestUpstreamUnauthorizedCodeIgnoresHeaderSyntax(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		code        string
+		headers     http.Header
+		credentials []CredentialHeader
+	}{
+		{"token scheme", "invalid_token", http.Header{"Authorization": {"token abc123"}}, []CredentialHeader{{Name: "Authorization", Value: "token abc123"}}},
+		{"accept language", "token_expired", http.Header{"Accept-Language": {"en"}}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &http.Response{StatusCode: 401, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"` + tc.code + `"}}`))}
+			body := captureUpstreamAuthCode(resp)
+			_, _ = io.Copy(io.Discard, resp.Body)
+			if got := upstreamAuthCode(body, tc.headers, tc.credentials, false); got != tc.code {
+				t.Fatalf("code = %q, want %q", got, tc.code)
+			}
+		})
+	}
+}
+
+func TestMCPUnauthorizedCodeRedactsInjectedLanguageHeader(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept-Language") != "sec" {
+			t.Errorf("upstream credential = %q", r.Header.Get("Accept-Language"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"code":"secret_token"}}`)
+	}))
+	defer backend.Close()
+	p := &Proxy{credStore: &mockCredentialStore{tokens: map[string]string{"mcp-test": "sec"}}, mcpServers: []MCPServerConfig{{Name: "test", URL: backend.URL, Auth: &MCPAuthConfig{Grant: "mcp-test", Header: "Accept-Language", AllowInsecure: true}}}}
+	var logged RequestLogData
+	p.SetLogger(func(d RequestLogData) { logged = d })
+	p.handleMCPRelay(httptest.NewRecorder(), httptest.NewRequest("POST", "/mcp/test", nil))
+	if logged.UpstreamAuthCode != "" {
+		t.Fatalf("code leaked credential: %q", logged.UpstreamAuthCode)
 	}
 }
