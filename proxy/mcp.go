@@ -485,7 +485,7 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 			p.errorPrefix(), serverName, targetURL.String(), err), http.StatusBadGateway)
 		return
 	}
-	defer func() { resp.Body.Close() }()
+	defer resp.Body.Close()
 
 	slog.Debug("MCP relay response", "server", serverName, "status", resp.StatusCode)
 
