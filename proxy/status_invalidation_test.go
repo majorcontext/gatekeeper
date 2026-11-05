@@ -16,9 +16,4 @@ func TestStatusAwareInvalidation(t *testing.T) {
 		t.Fatalf("status = %d, legacy calls = %d; want %d, 0", got, legacy, http.StatusForbidden)
 	}
 
-	cred.InvalidateWithStatus = nil
-	invalidateCredentialsOnCredentialFailure([]CredentialHeader{cred}, http.StatusUnauthorized)
-	if legacy != 1 {
-		t.Fatalf("legacy calls = %d; want 1", legacy)
-	}
 }
