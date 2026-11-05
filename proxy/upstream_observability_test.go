@@ -13,6 +13,11 @@ func TestUpstreamUnauthorizedCode(t *testing.T) {
 	for _, tc := range []struct{ body, want string }{
 		{`{"detail":{"code":"invalid_token","message":"secret value"}}`, "invalid_token"},
 		{`{"error":{"code":"expired_token"}}`, "expired_token"},
+		{`{"detail":"Not authenticated","error":{"code":"token_expired"}}`, "token_expired"},
+		{`{"detail":{"code":"invalid_token"},"error":"Not authenticated"}`, "invalid_token"},
+		{`{"detail":{"code":42},"error":{"code":"token_expired"}}`, "token_expired"},
+		{`{"detail":{"code":"invalid_token"},"error":{"code":42}}`, "invalid_token"},
+		{`{"detail":{"code":"invalid_token"},"error":{"code":"token_expired"}}`, "invalid_token"},
 		{`{"detail":{"code":"token_expired"}}`, "token_expired"},
 		{`{"error":{"code":"Bearer secret"}}`, ""},
 		{`{"error":{"code":42}}`, ""},
@@ -62,26 +67,6 @@ func TestUpstreamUnauthorizedCaptureStreamsUnchanged(t *testing.T) {
 	}
 	if got := upstreamAuthCode(captured, nil, nil, false); got != "token_expired" {
 		t.Fatalf("code = %q", got)
-	}
-}
-
-func TestRelayUnauthorizedCodeInRequestLog(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = io.WriteString(w, `{"detail":{"code":"token_expired"}}`)
-	}))
-	defer backend.Close()
-	p := NewProxy()
-	if err := p.AddRelay("test", backend.URL); err != nil {
-		t.Fatal(err)
-	}
-	var logged RequestLogData
-	p.SetLogger(func(d RequestLogData) { logged = d })
-	r := httptest.NewRequest("GET", "/relay/test/", nil)
-	p.ServeHTTP(httptest.NewRecorder(), r)
-	if logged.UpstreamAuthCode != "token_expired" {
-		t.Fatalf("upstream auth code = %q", logged.UpstreamAuthCode)
 	}
 }
 

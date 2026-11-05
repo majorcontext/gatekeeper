@@ -24,19 +24,24 @@ func upstreamAuthCode(body *capturingBody, headers http.Header, injected []Crede
 		return ""
 	}
 	var data struct {
-		Detail struct {
-			Code string `json:"code"`
-		} `json:"detail"`
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
+		Detail json.RawMessage `json:"detail"`
+		Error  json.RawMessage `json:"error"`
 	}
 	if json.Unmarshal(body.Captured(), &data) != nil {
 		return ""
 	}
-	code := data.Detail.Code
+	parseCode := func(raw json.RawMessage) string {
+		var field struct {
+			Code string `json:"code"`
+		}
+		if json.Unmarshal(raw, &field) != nil {
+			return ""
+		}
+		return field.Code
+	}
+	code := parseCode(data.Detail)
 	if code == "" {
-		code = data.Error.Code
+		code = parseCode(data.Error)
 	}
 	if len(code) == 0 || len(code) > 64 {
 		return ""
