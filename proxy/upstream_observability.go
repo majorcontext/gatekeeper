@@ -73,29 +73,45 @@ func overlapsCredential(code, value string, authorization bool) bool {
 	if value == "" {
 		return false
 	}
+	if len(value) > MaxBodySize {
+		return true
+	}
 	if strings.Contains(value, code) || strings.Contains(code, value) {
 		return true
 	}
 	parts := strings.Fields(value)
-	if authorization && len(parts) == 2 {
-		scheme := parts[0]
-		if strings.EqualFold(scheme, "Basic") {
-			decoded, err := base64.StdEncoding.DecodeString(parts[1])
-			if err != nil {
-				return true
-			}
-			username, password, ok := strings.Cut(string(decoded), ":")
-			if !ok {
-				return true
-			}
-			return overlapsCredential(code, username, false) || overlapsCredential(code, password, false)
+	if len(parts) == 2 && strings.EqualFold(parts[0], "Basic") {
+		if credentialFragmentOverlap(code, parts[1]) {
+			return true
 		}
-		if strings.EqualFold(scheme, "Bearer") || strings.EqualFold(scheme, "token") {
-			parts = parts[1:]
+		decoded, err := base64.StdEncoding.DecodeString(parts[1])
+		if err != nil {
+			return true
 		}
+		username, password, ok := strings.Cut(string(decoded), ":")
+		if !ok {
+			return true
+		}
+		return overlapsCredential(code, username, false) || overlapsCredential(code, password, false)
+	}
+	if authorization && len(parts) == 2 && (strings.EqualFold(parts[0], "Bearer") || strings.EqualFold(parts[0], "token")) {
+		parts = parts[1:]
 	}
 	for _, part := range parts {
-		if strings.Contains(part, code) || strings.Contains(code, part) {
+		if credentialFragmentOverlap(code, part) {
+			return true
+		}
+	}
+	return false
+}
+
+func credentialFragmentOverlap(code, value string) bool {
+	if strings.Contains(value, code) || strings.Contains(code, value) {
+		return true
+	}
+	const fragmentSize = 8
+	for i := 0; i+fragmentSize <= len(code); i++ {
+		if strings.Contains(value, code[i:i+fragmentSize]) {
 			return true
 		}
 	}

@@ -189,3 +189,30 @@ func TestMCPUnauthorizedCodeRedactsInjectedLanguageHeader(t *testing.T) {
 		t.Fatalf("code leaked credential: %q", logged.UpstreamAuthCode)
 	}
 }
+
+func TestUpstreamUnauthorizedPartialCredentialRedaction(t *testing.T) {
+	basic := "Basic " + basicAuth("user", "secret_token")
+	for _, tc := range []struct {
+		name, code string
+		headers    http.Header
+		injected   []CredentialHeader
+		want       string
+	}{
+		{"custom basic injected", "secret_token", nil, []CredentialHeader{{Name: "X-Custom-Key", Value: basic}}, ""},
+		{"custom basic outbound", "secret_token", http.Header{"X-Custom-Key": {basic}}, nil, ""},
+		{"custom basic partial", "bad_key_abcdef12", http.Header{"X-Custom-Key": {"Basic " + basicAuth("user", "abcdef12_more")}}, nil, ""},
+		{"partial injected", "bad_key_abcdef12", nil, []CredentialHeader{{Name: "X-Key", Value: "abcdef12_more"}}, ""},
+		{"partial outbound", "bad_key_abcdef12", http.Header{"X-Key": {"abcdef12_more"}}, nil, ""},
+		{"seven shared characters", "bad_key_abcdef1", http.Header{"X-Key": {"abcdef12_more"}}, nil, "bad_key_abcdef1"},
+		{"oversized credential", "invalid_token", http.Header{"X-Key": {strings.Repeat("z", MaxBodySize+1)}}, nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &http.Response{StatusCode: 401, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"` + tc.code + `"}}`))}
+			body := captureUpstreamAuthCode(resp)
+			_, _ = io.Copy(io.Discard, resp.Body)
+			if got := upstreamAuthCode(body, tc.headers, tc.injected, false); got != tc.want {
+				t.Fatalf("code = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
