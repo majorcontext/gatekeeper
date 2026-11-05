@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -49,9 +50,15 @@ func TestUpstreamUnauthorizedCredentialOverlap(t *testing.T) {
 		{"custom basic injected", "secret_token", nil, []CredentialHeader{{Name: "X-Custom-Key", Value: basic}}, ""},
 		{"custom basic outbound", "secret_token", http.Header{"X-Custom-Key": {basic}}, nil, ""},
 		{"custom basic partial", "bad_key_abcdef12", http.Header{"X-Custom-Key": {"Basic " + basicAuth("user", "abcdef12_more")}}, nil, ""},
-		{"mixed case nested basic", "secret_token", http.Header{"X-Custom-Key": {"bEaReR bAsIc " + basicAuth("user", "secret_token")}}, nil, ""},
-		{"nested basic with extension", "secret_token", http.Header{"X-Custom-Key": {"Bearer Basic " + basicAuth("user", "secret_token") + " extension"}}, nil, ""},
-		{"token nested basic", "secret_token", http.Header{"X-Custom-Key": {"token Basic " + basicAuth("user", "secret_token")}}, nil, ""},
+		{"colon attached mixed case basic outbound", "secret_token", http.Header{"X-Custom-Key": {"Bearer:bAsIc " + basicAuth("user", "secret_token")}}, nil, ""},
+		{"comma attached basic injected", "secret_token", nil, []CredentialHeader{{Name: "X-Key", Value: "Basic," + basicAuth("user", "secret_token")}}, ""},
+		{"arbitrary basic substring", "invalid_token", http.Header{"X-Key": {"preBaSiCpost"}}, nil, ""},
+		{"plain basic unrelated", "invalid_token", http.Header{"X-Key": {basic}}, nil, "invalid_token"},
+		{"encoded bearer credential", "secret_token", http.Header{"Authorization": {"Bearer " + basicAuth("user", "secret_token")}}, nil, ""},
+		{"bare base64 standard", "secret_token", http.Header{"X-Key": {base64.StdEncoding.EncodeToString([]byte("\xfb:secret_token"))}}, nil, ""},
+		{"bare base64 standard unpadded", "secret_token", http.Header{"X-Key": {base64.RawStdEncoding.EncodeToString([]byte("\xfb:secret_token"))}}, nil, ""},
+		{"bare base64 url padded", "secret_token", nil, []CredentialHeader{{Name: "X-Key", Value: base64.URLEncoding.EncodeToString([]byte("\xfb:secret_token"))}}, ""},
+		{"bare base64 url unpadded", "secret_token", nil, []CredentialHeader{{Name: "X-Key", Value: base64.RawURLEncoding.EncodeToString([]byte("\xfb:secret_token"))}}, ""},
 		{"arbitrary mixed case nested basic with extension", "secret_token", nil, []CredentialHeader{{Name: "X-Key", Value: "custom prefix bAsIc " + basicAuth("user", "secret_token") + " extension"}}, ""},
 		{"partial injected", "bad_key_abcdef12", nil, []CredentialHeader{{Name: "X-Key", Value: "abcdef12_more"}}, ""},
 		{"partial outbound", "bad_key_abcdef12", http.Header{"X-Key": {"abcdef12_more"}}, nil, ""},
@@ -91,7 +98,7 @@ func TestUpstreamUnauthorizedCaptureStreamsUnchanged(t *testing.T) {
 
 func TestUpstreamUnauthorizedSecretsNotLogged(t *testing.T) {
 	for _, path := range []string{"http", "connect"} {
-		for _, kind := range []string{"basic", "nested-basic", "substitution"} {
+		for _, kind := range []string{"basic", "colon-basic", "comma-basic", "substitution"} {
 			t.Run(path+"/"+kind, func(t *testing.T) {
 				const secret = "secret_token"
 				seen := make(chan string, 1)
@@ -123,8 +130,11 @@ func TestUpstreamUnauthorizedSecretsNotLogged(t *testing.T) {
 				}
 				if kind != "substitution" {
 					value := "Basic " + basicAuth("user", secret)
-					if kind == "nested-basic" {
-						value = "custom bAsIc " + basicAuth("user", secret) + " extension"
+					switch kind {
+					case "colon-basic":
+						value = "Bearer:bAsIc " + basicAuth("user", secret)
+					case "comma-basic":
+						value = "Basic," + basicAuth("user", secret)
 					}
 					if path == "http" {
 						p.SetInsecureCredentialWithGrant(host, "Authorization", value, "example")
@@ -147,7 +157,10 @@ func TestUpstreamUnauthorizedSecretsNotLogged(t *testing.T) {
 				if kind == "basic" && got != "Basic "+basicAuth("user", secret) {
 					t.Fatalf("upstream auth = %q", got)
 				}
-				if kind == "nested-basic" && got != "custom bAsIc "+basicAuth("user", secret)+" extension" {
+				if kind == "colon-basic" && got != "Bearer:bAsIc "+basicAuth("user", secret) {
+					t.Fatalf("upstream auth = %q", got)
+				}
+				if kind == "comma-basic" && got != "Basic,"+basicAuth("user", secret) {
 					t.Fatalf("upstream auth = %q", got)
 				}
 				if kind == "substitution" && got != "/"+secret {
