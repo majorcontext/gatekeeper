@@ -49,19 +49,8 @@ func upstreamAuthCode(body *capturingBody, headers http.Header, injected []Crede
 		}
 	}
 	for name, values := range headers {
-		credential := !strings.EqualFold(name, "Accept-Language")
-		for _, cred := range injected {
-			if strings.EqualFold(name, cred.Name) {
-				credential = true
-				break
-			}
-		}
 		for _, value := range values {
-			if credential {
-				if overlapsCredential(code, value, strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "Proxy-Authorization")) {
-					return ""
-				}
-			} else if strings.Contains(value, code) {
+			if overlapsCredential(code, value, strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "Proxy-Authorization")) {
 				return ""
 			}
 		}

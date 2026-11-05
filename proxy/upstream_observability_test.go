@@ -158,7 +158,6 @@ func TestUpstreamUnauthorizedCodeIgnoresHeaderSyntax(t *testing.T) {
 		credentials []CredentialHeader
 	}{
 		{"token scheme", "invalid_token", http.Header{"Authorization": {"token abc123"}}, []CredentialHeader{{Name: "Authorization", Value: "token abc123"}}},
-		{"accept language", "token_expired", http.Header{"Accept-Language": {"en"}}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := &http.Response{StatusCode: 401, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"` + tc.code + `"}}`))}
@@ -214,5 +213,84 @@ func TestUpstreamUnauthorizedPartialCredentialRedaction(t *testing.T) {
 				t.Fatalf("code = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestMCPInjectedHeaderRedactsUpstreamCode(t *testing.T) {
+	for _, path := range []string{"http", "connect"} {
+		t.Run(path, func(t *testing.T) {
+			seen := make(chan string, 1)
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seen <- r.Header.Get("Accept-Language")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = io.WriteString(w, `{"error":{"code":"bad_key_abcdef12"}}`)
+			})
+			var p *Proxy
+			var backendURL string
+			var client *http.Client
+			if path == "connect" {
+				setup := newInterceptTestSetup(t, handler)
+				p, backendURL, client = setup.Proxy, setup.Backend.URL, setup.Client
+			} else {
+				backend := httptest.NewServer(handler)
+				t.Cleanup(backend.Close)
+				p, backendURL = NewProxy(), backend.URL
+				server := httptest.NewServer(p)
+				t.Cleanup(server.Close)
+				client = &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(server.URL))}}
+			}
+			p.SetMCPServers([]MCPServerConfig{{Name: "test", URL: backendURL, Auth: &MCPAuthConfig{Grant: "mcp-test", Header: "Accept-Language", AllowInsecure: true}}})
+			p.SetCredentialStore(&mockCredentialStore{tokens: map[string]string{"mcp-test": "abcdef12_more"}})
+			wait := captureLog(t, p)
+			req, err := http.NewRequest("GET", backendURL+"/resource", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Accept-Language", "gatekeeper-stub-mcp-test")
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if got := <-seen; got != "abcdef12_more" {
+				t.Fatalf("upstream header = %q", got)
+			}
+			if data := wait(); data.UpstreamAuthCode != "" {
+				t.Fatalf("code leaked credential fragment: %q", data.UpstreamAuthCode)
+			}
+		})
+	}
+}
+
+func TestInterceptUnauthorizedCodePreservesBody(t *testing.T) {
+	const body = `{"error":{"code":"token_expired","message":"try again"}}`
+	setup := newInterceptTestSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, body)
+	}))
+	wait := captureLog(t, setup.Proxy)
+	resp, err := setup.Client.Get(setup.Backend.URL + "/resource")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || string(got) != body {
+		t.Fatalf("body = %q, err = %v", got, err)
+	}
+	if data := wait(); data.UpstreamAuthCode != "token_expired" {
+		t.Fatalf("code = %q", data.UpstreamAuthCode)
+	}
+}
+
+func TestUpstreamUnauthorizedCodeSuppressesShortHeader(t *testing.T) {
+	resp := &http.Response{StatusCode: 401, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"token_expired"}}`))}
+	body := captureUpstreamAuthCode(resp)
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if got := upstreamAuthCode(body, http.Header{"Accept-Language": {"en"}}, nil, false); got != "" {
+		t.Fatalf("code = %q, want omission for overlapping header", got)
 	}
 }
