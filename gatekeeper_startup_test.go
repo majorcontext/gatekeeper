@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -102,12 +103,12 @@ func TestLoadCredentials_StartupRetryWindowIsBounded(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		src := &flakySource{failures: -1}
 		start := time.Now()
-		_, err := loadFlakyCredential(t, retryingFlakySource{src, 30 * time.Second})
-		if err == nil {
-			t.Fatal("loadCredentials with a source that always fails = nil error, want an error")
+		srv, err := loadFlakyCredential(t, retryingFlakySource{src, 30 * time.Second})
+		if err != nil {
+			t.Fatalf("loadCredentials with a source that always fails = %v, want nil", err)
 		}
-		if !strings.Contains(err.Error(), "connection refused") {
-			t.Errorf("error = %q, want the last fetch error", err)
+		if len(srv.pendingRefreshes) != 1 || !srv.pendingRefreshes[0].failed {
+			t.Errorf("pendingRefreshes = %+v, want the failed credential queued for background retry", srv.pendingRefreshes)
 		}
 		if n := len(src.fetchTimes()); n < 2 {
 			t.Errorf("fetches = %d, want retries inside the window", n)
@@ -119,13 +120,13 @@ func TestLoadCredentials_StartupRetryWindowIsBounded(t *testing.T) {
 }
 
 // TestLoadCredentials_NoStartupRetryWithoutWindow pins the key path: a
-// source without a retry window fails startup on its first fetch error.
+// source without a retry window makes one startup fetch, then retries in the
+// background.
 func TestLoadCredentials_NoStartupRetryWithoutWindow(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		src := &flakySource{failures: 1}
-		_, err := loadFlakyCredential(t, src)
-		if err == nil {
-			t.Fatal("loadCredentials after one fetch failure = nil error, want an error")
+		if _, err := loadFlakyCredential(t, src); err != nil {
+			t.Fatalf("loadCredentials after one fetch failure = %v, want nil", err)
 		}
 		if n := len(src.fetchTimes()); n != 1 {
 			t.Errorf("fetches = %d, want 1 (no retry)", n)
@@ -181,14 +182,83 @@ func TestLoadCredentials_AmbientCredentialSourcesRetryAtStartup(t *testing.T) {
 				t.Cleanup(func() { c.Close() })
 			}
 			synctest.Test(t, func(t *testing.T) {
-				_, err := loadFlakyCredential(t, ambientFlakySource{&flakySource{failures: 1}, resolved})
-				if tt.wantRetry && err != nil {
-					t.Errorf("loadCredentials after one failed %s fetch: %v, want a retry that succeeds", tt.name, err)
+				flaky := &flakySource{failures: 1}
+				srv, err := loadFlakyCredential(t, ambientFlakySource{flaky, resolved})
+				if err != nil {
+					t.Fatalf("loadCredentials after one failed %s fetch: %v", tt.name, err)
 				}
-				if !tt.wantRetry && err == nil {
-					t.Errorf("loadCredentials after one failed %s fetch = nil error, want startup to fail with no retry", tt.name)
+				if got := len(srv.pendingRefreshes) == 0; got != tt.wantRetry {
+					t.Errorf("%s: startup retry succeeded = %v, want %v", tt.name, got, tt.wantRetry)
 				}
 			})
 		})
 	}
+}
+
+type vendorSource struct {
+	token string
+	err   atomic.Pointer[error]
+}
+
+func (s *vendorSource) Fetch(context.Context) (string, error) {
+	if e := s.err.Load(); e != nil {
+		return "", *e
+	}
+	return s.token, nil
+}
+
+func (s *vendorSource) Type() string { return "vendor" }
+
+func TestLoadCredentials_FailedFetchDoesNotBlockStartup(t *testing.T) {
+	port := startEchoBackend(t)
+	synctest.Test(t, func(t *testing.T) {
+		deleted := errors.New("secretmanager: rpc error: code = NotFound desc = secret vendor-key was deleted")
+		good := &vendorSource{token: "good-token"}
+		bad := &vendorSource{token: "vendor-token"}
+		bad.err.Store(&deleted)
+
+		srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv.resolveSource = func(sc SourceConfig) (credentialsource.CredentialSource, error) {
+			if sc.Secret == "vendor-key" {
+				return bad, nil
+			}
+			return good, nil
+		}
+		cfg := &Config{Credentials: []CredentialConfig{
+			{Host: "127.0.0.1", Grant: "good", AllowInsecure: true, Source: SourceConfig{Type: "vendor", Secret: "good-key"}},
+			{Host: "127.0.0.1", Grant: "vendor", Header: "X-Api-Key", AllowInsecure: true, Source: SourceConfig{Type: "vendor", Secret: "vendor-key"}},
+		}}
+		if err := srv.loadCredentials(context.Background(), cfg); err != nil {
+			t.Fatalf("loadCredentials with one deleted secret = %v, want nil", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		for _, pr := range srv.pendingRefreshes {
+			srv.startPending(ctx, pr)
+		}
+		defer func() {
+			cancel()
+			srv.refreshWG.Wait()
+		}()
+
+		injected := func() (authorization, apiKey string) {
+			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:"+port+"/", nil)
+			rec := httptest.NewRecorder()
+			srv.proxy.ServeHTTP(rec, req)
+			authorization, apiKey, _ = strings.Cut(rec.Body.String(), "|")
+			return authorization, apiKey
+		}
+		if a, k := injected(); a != "Bearer good-token" || k != "" {
+			t.Fatalf("with the vendor secret deleted: Authorization = %q, X-Api-Key = %q; want %q and no key", a, k, "Bearer good-token")
+		}
+
+		bad.err.Store(nil)
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+		if a, k := injected(); a != "Bearer good-token" || k != "vendor-token" {
+			t.Errorf("after the secret is restored: Authorization = %q, X-Api-Key = %q; want %q and %q", a, k, "Bearer good-token", "vendor-token")
+		}
+	})
 }

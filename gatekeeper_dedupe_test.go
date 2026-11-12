@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/majorcontext/gatekeeper/credentialsource"
 )
@@ -124,14 +124,17 @@ func mustURL(t *testing.T, raw string) *url.URL {
 	return u
 }
 
-type blockUntilCanceledSource struct{ saw chan<- error }
+type slowSource struct{}
 
-func (b blockUntilCanceledSource) Fetch(ctx context.Context) (string, error) {
-	<-ctx.Done()
-	b.saw <- ctx.Err()
-	return "", errors.New("signal: killed")
+func (slowSource) Fetch(ctx context.Context) (string, error) {
+	select {
+	case <-time.After(time.Second):
+		return "tok", nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 }
-func (b blockUntilCanceledSource) Type() string { return "block" }
+func (slowSource) Type() string { return "slow" }
 
 type failNowSource struct{ ready <-chan struct{} }
 
@@ -141,14 +144,13 @@ func (f failNowSource) Fetch(context.Context) (string, error) {
 }
 func (f failNowSource) Type() string { return "fail" }
 
-func TestLoadCredentials_FirstFetchFailureCancelsTheOtherFetches(t *testing.T) {
+func TestLoadCredentials_FetchFailureDoesNotCancelTheOtherFetches(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		srv := newBareServer(t)
-		saw := make(chan error, 1)
 		ready := make(chan struct{})
 		srv.resolveSource = func(sc SourceConfig) (credentialsource.CredentialSource, error) {
 			if sc.Secret == "a" {
-				return blockUntilCanceledSource{saw: saw}, nil
+				return slowSource{}, nil
 			}
 			return failNowSource{ready: ready}, nil
 		}
@@ -160,12 +162,11 @@ func TestLoadCredentials_FirstFetchFailureCancelsTheOtherFetches(t *testing.T) {
 		go func() { done <- srv.loadCredentials(context.Background(), cfg) }()
 		synctest.Wait()
 		close(ready)
-		err := <-done
-		if err == nil || !strings.Contains(err.Error(), "b.example.com") || !strings.Contains(err.Error(), "boom b") {
-			t.Fatalf("err = %v, want the failure of b.example.com", err)
+		if err := <-done; err != nil {
+			t.Fatalf("err = %v, want nil: a failed fetch must not fail the load", err)
 		}
-		if got := <-saw; !errors.Is(got, context.Canceled) {
-			t.Errorf("blocked fetch ended with %v, want context.Canceled (not the 10s timeout)", got)
+		if len(srv.pendingRefreshes) != 1 || !srv.pendingRefreshes[0].failed || srv.pendingRefreshes[0].creds[0].Host != "b.example.com" {
+			t.Errorf("pendingRefreshes = %+v, want only b.example.com retrying (a.example.com fetched without cancellation)", srv.pendingRefreshes)
 		}
 	})
 }

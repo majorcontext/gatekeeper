@@ -45,8 +45,9 @@ func (h *healthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // pendingRefresh captures a RefreshingSource and all credential configs that
 // share it, so a single refresh goroutine updates every host.
 type pendingRefresh struct {
-	src   credentialsource.RefreshingSource
-	creds []CredentialConfig
+	src    credentialsource.CredentialSource
+	creds  []CredentialConfig
+	failed bool // the startup fetch failed: retry until it succeeds
 }
 
 // Server is the Gate Keeper server. It manages a TLS-intercepting proxy
@@ -228,9 +229,9 @@ func (s *Server) configurePolicy(cfg *Config) error {
 // instance, one startup Fetch, one background refresh goroutine, and (for
 // token exchange) one cache. Sources are built in config order, fetched
 // concurrently (each fetch is a network round trip, and a production config
-// has about a dozen), and applied in config order. The first fetch failure
-// cancels the other fetches. Build errors come before fetch errors, and the
-// fetch error reported is the one that caused the cancellation.
+// has about a dozen), and applied in config order. A fetch failure
+// is not fatal: the credential is left unset, logged at ERROR, and retried in
+// the background until it succeeds. Only a canceled ctx fails the load.
 func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 	type pendingSource struct {
 		src   credentialsource.CredentialSource
@@ -380,46 +381,45 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 	}
 
 	const maxConcurrentFetches = 16
-	fetchCtx, cancelFetches := context.WithCancel(ctx)
-	defer cancelFetches()
+	fetchCtx := ctx
 	var wg sync.WaitGroup
-	var firstFailure sync.Once
-	var failed *pendingSource
 	slots := make(chan struct{}, maxConcurrentFetches)
 	for _, ps := range unique {
 		if !ps.fetch {
 			continue
 		}
 		slots <- struct{}{}
-		if fetchCtx.Err() != nil {
-			<-slots
-			ps.err = fetchCtx.Err()
-			continue
-		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer func() { <-slots }()
 			ps.val, ps.err = s.fetchAtStartup(fetchCtx, ps.src)
-			if ps.err != nil {
-				firstFailure.Do(func() {
-					failed = ps
-					cancelFetches()
-				})
-			}
 		}()
 	}
 	wg.Wait()
 
-	for _, e := range entries {
-		if e.source != nil && e.source.err != nil && (failed == nil || e.source == failed) {
-			return fetchError(e.cred, e.pg, e.source.err)
+	if ctx.Err() != nil {
+		for _, e := range entries {
+			if e.source != nil && e.source.err != nil {
+				return fetchError(e.cred, e.pg, e.source.err)
+			}
 		}
 	}
 
 	refreshMap := make(map[*pendingSource]*pendingRefresh)
 	var refreshOrder []*pendingSource
 	for _, e := range entries {
+		if e.source != nil && e.source.err != nil {
+			s.log().Error("credential fetch failed at startup, retrying in the background; the host gets no injected credential until it succeeds",
+				"host", e.cred.Host, "grant", e.cred.Grant, "source", e.cred.Source.Type, "postgres", e.pg, "error", e.source.err)
+			if pr, ok := refreshMap[e.source]; ok {
+				pr.creds = append(pr.creds, e.cred)
+			} else {
+				refreshMap[e.source] = &pendingRefresh{src: e.source.src, creds: []CredentialConfig{e.cred}, failed: true}
+				refreshOrder = append(refreshOrder, e.source)
+			}
+			continue
+		}
 		if e.pg {
 			var resolver proxy.PostgresCredentialResolver
 			if e.neon != nil {
@@ -616,6 +616,75 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 					"grant", cred.Grant,
 					"ttl", ttl.String())
 			}
+		}
+	}()
+}
+
+func (s *Server) startPending(ctx context.Context, pr pendingRefresh) {
+	if pr.failed {
+		s.startCredentialRetry(ctx, pr.src, pr.creds)
+		return
+	}
+	s.startCredentialRefresh(ctx, pr.src.(credentialsource.RefreshingSource), pr.creds)
+}
+
+// startCredentialRetry retries a credential whose startup fetch failed, with
+// nextBackoff, and sets it on the proxy for every host that shares src. A
+// RefreshingSource then continues with the normal refresh loop.
+func (s *Server) startCredentialRetry(ctx context.Context, src credentialsource.CredentialSource, creds []CredentialConfig) {
+	s.refreshWG.Add(1)
+	go func() {
+		defer s.refreshWG.Done()
+		backoff := nextBackoff(0)
+		for {
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			fetchCtx, cancel := context.WithTimeout(ctx, startupFetchTimeout)
+			rawVal, err := src.Fetch(fetchCtx)
+			cancel()
+			if ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				backoff = nextBackoff(backoff)
+				for _, c := range creds {
+					s.log().Warn("credential fetch failed, retrying",
+						"host", c.Host, "grant", c.Grant, "source", c.Source.Type,
+						"backoff", backoff.String(), "error", err)
+				}
+				continue
+			}
+			var refreshable []CredentialConfig
+			for _, cred := range creds {
+				if cred.Postgres != nil {
+					s.proxy.SetPostgresResolver(cred.Host, proxy.NewStaticPostgresResolver(rawVal))
+					s.log().Info("credential recovered", "host", cred.Host, "grant", cred.Grant)
+					continue
+				}
+				header := cred.Header
+				if header == "" {
+					header = "Authorization"
+				}
+				val := rawVal
+				if strings.EqualFold(header, "Authorization") {
+					val = ensureAuthScheme(val, cred.Prefix, cred.Format)
+				}
+				if err := s.setCredential(cred, header, val); err != nil {
+					s.log().Error("credential recovered but invalid", "host", cred.Host, "grant", cred.Grant, "error", err)
+					continue
+				}
+				s.log().Info("credential recovered", "host", cred.Host, "grant", cred.Grant)
+				refreshable = append(refreshable, cred)
+			}
+			if rs, ok := src.(credentialsource.RefreshingSource); ok && len(refreshable) > 0 {
+				s.startCredentialRefresh(ctx, rs, refreshable)
+			}
+			return
 		}
 	}()
 }
@@ -874,7 +943,7 @@ func (s *Server) Start(ctx context.Context) error {
 		refreshCtx, refreshCancel := context.WithCancel(context.Background())
 		s.refreshCancel = refreshCancel
 		for _, pr := range s.pendingRefreshes {
-			s.startCredentialRefresh(refreshCtx, pr.src, pr.creds)
+			s.startPending(refreshCtx, pr)
 		}
 	}
 	s.mu.Unlock()
