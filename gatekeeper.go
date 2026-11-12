@@ -449,10 +449,7 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 		// scheme prefix. In the CLI flow, providers handle this (e.g.,
 		// GitHub provider prepends "Bearer "). The gatekeeper bypasses
 		// providers, so we auto-detect the scheme from the token format.
-		val := e.source.val
-		if strings.EqualFold(e.header, "Authorization") {
-			val = ensureAuthScheme(val, e.cred.Prefix, e.cred.Format)
-		}
+		_, val := credentialValue(e.cred, e.source.val)
 		if err := s.setCredential(e.cred, e.header, val); err != nil {
 			return fmt.Errorf("credential for %s: %w", e.cred.Host, err)
 		}
@@ -604,14 +601,7 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 			backoff = 0
 			ttl := src.TTL()
 			for _, cred := range creds {
-				header := cred.Header
-				if header == "" {
-					header = "Authorization"
-				}
-				val := rawVal
-				if strings.EqualFold(header, "Authorization") {
-					val = ensureAuthScheme(val, cred.Prefix, cred.Format)
-				}
+				header, val := credentialValue(cred, rawVal)
 				if err := s.updateCredential(cred, header, val); err != nil {
 					s.log().Warn("credential refresh produced invalid policy", "host", cred.Host, "grant", cred.Grant, "error", err)
 					continue
@@ -623,6 +613,19 @@ func (s *Server) startCredentialRefresh(ctx context.Context, src credentialsourc
 			}
 		}
 	}()
+}
+
+// credentialValue returns the header name and the value to inject for cred
+// from the raw source value.
+func credentialValue(cred CredentialConfig, raw string) (header, val string) {
+	header = cred.Header
+	if header == "" {
+		header = "Authorization"
+	}
+	if strings.EqualFold(header, "Authorization") {
+		return header, ensureAuthScheme(raw, cred.Prefix, cred.Format)
+	}
+	return header, raw
 }
 
 func (s *Server) startPending(ctx context.Context, pr pendingRefresh) {
@@ -671,16 +674,9 @@ func (s *Server) startCredentialRetry(ctx context.Context, src credentialsource.
 					s.log().Info("credential recovered", "host", cred.Host, "grant", cred.Grant)
 					continue
 				}
-				header := cred.Header
-				if header == "" {
-					header = "Authorization"
-				}
-				val := rawVal
-				if strings.EqualFold(header, "Authorization") {
-					val = ensureAuthScheme(val, cred.Prefix, cred.Format)
-				}
+				header, val := credentialValue(cred, rawVal)
 				if err := s.updateCredential(cred, header, val); err != nil {
-					s.log().Error("credential recovered but invalid", "host", cred.Host, "grant", cred.Grant, "error", err)
+					s.log().Error("credential recovered but invalid; the host stays unavailable until restart", "host", cred.Host, "grant", cred.Grant, "error", err)
 					continue
 				}
 				s.log().Info("credential recovered", "host", cred.Host, "grant", cred.Grant)
