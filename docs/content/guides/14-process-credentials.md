@@ -104,7 +104,7 @@ ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 ## Failure behavior
 
-**At startup**, a failing command fails gatekeeper's startup: the credential is fetched once before the proxy begins serving, and a non-zero exit or empty output is a fatal configuration error.
+**At startup**, the credential is fetched once before the proxy begins serving. A non-zero exit or empty output does not stop gatekeeper: it logs an ERROR, refuses requests that select that credential, and retries the command in the background with exponential backoff.
 
 **On refresh**, a failing command does not take gatekeeper down or drop the previously-injected credential — the last good value stays in place while the refresh loop retries with exponential backoff (starting at 1 second, capped at 60 seconds, with jitter).
 

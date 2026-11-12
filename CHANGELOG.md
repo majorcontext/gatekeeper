@@ -6,6 +6,10 @@ Gatekeeper is pre-1.0. The configuration schema and credential source interface 
 
 ## Unreleased
 
+### Changed
+
+- **A failed credential fetch at startup no longer stops gatekeeper** (`gatekeeper.go`) — before, one credential whose source failed its first fetch (for example a deleted secret) made `New` return an error, so the process exited and every other credential and host went down with it. Now gatekeeper logs the failure once at ERROR with the host, grant, and source type, starts, and retries the fetch in the background with the existing backoff (1s to 60s). Requests that select that credential are refused with 403 until a fetch succeeds (a placeholder holds its place, so no broader rule applies), then the credential is swapped in place for every host that shares the source; a refreshing source continues with its normal refresh loop. Configuration errors (invalid config, unknown source type, bad header) still stop startup, and a canceled context still fails `New`. The first failed fetch no longer cancels the other startup fetches.
+
 ## v0.38.0 — 2026-11-05
 
 ### Added

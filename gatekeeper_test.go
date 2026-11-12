@@ -3702,34 +3702,31 @@ func TestLoadCredentials_FetchesDistinctSourcesConcurrently(t *testing.T) {
 
 type closeTrackingSource struct {
 	closed *atomic.Int32
-	fail   bool
 }
 
 func (c closeTrackingSource) Fetch(context.Context) (string, error) {
-	if c.fail {
-		return "", errors.New("boom")
-	}
 	return "tok", nil
 }
 func (c closeTrackingSource) Type() string { return "close-tracking" }
 func (c closeTrackingSource) Close() error { c.closed.Add(1); return nil }
 
-func TestLoadCredentials_ClosesEveryBuiltSourceWhenAFetchFails(t *testing.T) {
+func TestLoadCredentials_ClosesEveryBuiltSourceWhenAConfigIsInvalid(t *testing.T) {
 	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var closed atomic.Int32
 	srv.resolveSource = func(sc SourceConfig) (credentialsource.CredentialSource, error) {
-		return closeTrackingSource{closed: &closed, fail: sc.Secret == "s0"}, nil
+		return closeTrackingSource{closed: &closed}, nil
 	}
 	cfg := &Config{}
 	for i := 0; i < 5; i++ {
 		name := fmt.Sprintf("s%d", i)
 		cfg.Credentials = append(cfg.Credentials, CredentialConfig{Host: name + ".example.com", Grant: name, Source: SourceConfig{Type: "mock", Secret: name}})
 	}
+	cfg.Credentials = append(cfg.Credentials, CredentialConfig{Host: "bad.example.com", Grant: "bad", Format: "bogus", Source: SourceConfig{Type: "mock", Secret: "bad"}})
 	if err := srv.loadCredentials(context.Background(), cfg); err == nil {
-		t.Fatal("loadCredentials succeeded, want the fetch failure")
+		t.Fatal("loadCredentials succeeded, want the invalid-format error")
 	}
 	if got := closed.Load(); got != 5 {
 		t.Fatalf("closed sources = %d, want 5", got)
@@ -3782,24 +3779,24 @@ func TestLoadCredentials_BoundsConcurrentFetches(t *testing.T) {
 	})
 }
 
-func TestLoadCredentials_ClosesPostgresResolversWhenALaterFetchFails(t *testing.T) {
+func TestLoadCredentials_ClosesPostgresResolversWhenALaterConfigIsInvalid(t *testing.T) {
 	srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var closed atomic.Int32
 	srv.resolveSource = func(sc SourceConfig) (credentialsource.CredentialSource, error) {
-		return closeTrackingSource{closed: &closed, fail: sc.Secret == "bad"}, nil
+		return closeTrackingSource{closed: &closed}, nil
 	}
 	cfg := &Config{Credentials: []CredentialConfig{
 		{Host: "db.example.com", Grant: "db", Source: SourceConfig{Type: "mock", Secret: "neon"}, Postgres: &PostgresCredentialConfig{Resolver: "neon", Project: "p"}},
-		{Host: "bad.example.com", Grant: "bad", Source: SourceConfig{Type: "mock", Secret: "bad"}},
+		{Host: "bad.example.com", Grant: "bad", Format: "bogus", Source: SourceConfig{Type: "mock", Secret: "bad"}},
 	}}
 	if err := srv.loadCredentials(context.Background(), cfg); err == nil {
-		t.Fatal("loadCredentials succeeded, want the fetch failure")
+		t.Fatal("loadCredentials succeeded, want the invalid-format error")
 	}
-	if closed.Load() < 2 {
-		t.Fatalf("closed = %d, want the Postgres source and the failed source closed", closed.Load())
+	if closed.Load() != 1 {
+		t.Fatalf("closed = %d, want the Postgres source closed", closed.Load())
 	}
 	if len(srv.closers) != 0 {
 		t.Fatalf("closers left after a failed load = %d, want 0", len(srv.closers))

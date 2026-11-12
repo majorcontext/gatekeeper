@@ -25,11 +25,13 @@ Sources marked **Refresh: Yes** have credentials that expire. `process`, `github
 
 ## Startup retry
 
-Gatekeeper fetches each credential at startup, with a 10-second timeout for each attempt. Usually, a failed first fetch stops startup.
+Gatekeeper fetches each credential at startup, with a 10-second timeout for each attempt. A failed first fetch does not stop startup: the credential stays unset and gatekeeper retries it in the background (see below).
 
-Sources that authenticate with ambient cloud credentials retry a failed first fetch. These sources are `aws-secretsmanager`, `gcp-secretmanager`, and `gcp-service-account` with `secret` or `adc`. The GKE metadata server can refuse requests for the first seconds of a new Pod. Gatekeeper retries with backoff (1s, then doubled, with up to 25% jitter) for up to 30 seconds. Each retry logs `credential fetch failed at startup, retrying` at WARN. If the window ends, startup fails with the last error.
+Sources that authenticate with ambient cloud credentials retry a failed first fetch. These sources are `aws-secretsmanager`, `gcp-secretmanager`, and `gcp-service-account` with `secret` or `adc`. The GKE metadata server can refuse requests for the first seconds of a new Pod. Gatekeeper retries with backoff (1s, then doubled, with up to 25% jitter) for up to 30 seconds. Each retry logs `credential fetch failed at startup, retrying` at WARN. If the window ends, gatekeeper starts without the credential and keeps retrying in the background.
 
-Sources with a configured key do not retry: `gcp-service-account` with `private_key_path` or `private_key_env`, and `github-app`. `env`, `static`, and `process` sources do not retry.
+Sources with a configured key do not retry inside the startup window: `gcp-service-account` with `private_key_path` or `private_key_env`, and `github-app`. `env`, `static`, and `process` sources do not retry inside it either.
+
+Any other failed fetch does not stop startup. Gatekeeper logs `credential fetch failed at startup` at ERROR with the host, grant, and source type (never the value), starts without that credential, and retries in the background with the same backoff, capped at 60 seconds. A request that would inject that credential gets a 403 "credential unavailable" until a fetch succeeds; no broader rule or other credential applies to it. A request that would inject only the host's healthy credentials, for example one that names their headers, is served. Configuration errors (an invalid config, an unknown source type, a bad header) still stop startup. A source that is a refreshing source continues with its normal refresh loop after the first success.
 
 ---
 
@@ -53,7 +55,7 @@ Name of the environment variable to read.
 - **Required:** Yes
 - **Default:** —
 
-The variable must be set and non-empty at startup. If unset, gatekeeper exits with an error.
+The variable must be set and non-empty at startup. If unset, gatekeeper logs an error at startup and refuses requests that select that credential.
 
 ---
 
@@ -302,7 +304,7 @@ credentials:
 
 The token has the rule's `scopes`. Gatekeeper refreshes it at 75% of the remaining lifetime that the token reports, the same loop as the key modes. Each refresh asks ADC again and keeps no token cache of its own. The metadata server can return a token it has cached, with less than an hour left; the next refresh then comes at 75% of what is left.
 
-Gatekeeper finds ADC on the first fetch, not at config load. A failed first fetch in `adc` mode is retried at startup; see [Startup retry](#startup-retry). The `private_key_path` and `private_key_env` modes are not retried: their first fetch error stops startup.
+Gatekeeper finds ADC on the first fetch, not at config load. A failed first fetch in `adc` mode is retried at startup; see [Startup retry](#startup-retry). The `private_key_path` and `private_key_env` modes are not retried: a first fetch error is retried only by the background retry.
 
 > **Note:** On GKE, set `GCE_METADATA_HOST=169.254.169.254` in the gatekeeper container. Without it, the Google client library probes for the metadata server once per process and keeps the result. A probe that fails in the first seconds of a Pod makes every later ADC lookup fail, and the startup retry cannot recover. With the variable set, the library skips the probe.
 
