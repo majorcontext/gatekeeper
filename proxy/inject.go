@@ -292,38 +292,10 @@ type credentialInjectionResult struct {
 	Injected []CredentialHeader
 }
 
-// injectCredentials replaces credential headers in the request.
-//
-// A credential is selected in one of two ways:
-//
-//   - Placeholder selection. If the client already sent a credential's header
-//     (any non-empty value), that credential is chosen and its real value
-//     replaces what the client sent. This lets a client pick which grant to use
-//     when several target the same host.
-//   - Auto-injection. If the client sent none of the credentials' headers, all
-//     of them are injected unconditionally, for transparent auth.
-//
-// Exactly one credential is injected per header name. When several share a
-// header name the tie is broken by grant, and the two paths break it in
-// opposite directions: auto-injection prefers a non-"claude" grant, while
-// placeholder selection prefers "claude". The claude grant is Claude Code's
-// OAuth flow, so it must not be injected transparently, but a client that
-// explicitly sends the header is asking for exactly it. The winner does not
-// depend on the order credentials appear in.
-//
-// Client-sent headers are sampled once, before anything is written. Testing the
-// request as it is mutated would let a credential injected by an earlier
-// iteration look like a placeholder the client sent, selecting several
-// same-named credentials at once.
-//
-// Returns a credentialInjectionResult naming the headers injected, the
-// credentials whose values reached the wire, and their grants. Grants and
-// Injected describe only what was sent — never a credential that lost the tie.
-func injectCredentials(req *http.Request, creds []CredentialHeader, host, method, path string, reserved map[string]bool) credentialInjectionResult {
-	if len(creds) == 0 {
-		return credentialInjectionResult{}
-	}
-
+// selectCredentialWinners maps each header name to the index of the single
+// credential injectCredentials writes for it, and reports whether the choice
+// was auto-injection. See injectCredentials for the selection rules.
+func selectCredentialWinners(req *http.Request, creds []CredentialHeader, reserved map[string]bool) (map[string]int, bool) {
 	// Sample the client's headers before any injection mutates them.
 	//
 	// A reserved header belongs to a credential bundle that has already written
@@ -377,6 +349,41 @@ func injectCredentials(req *http.Request, creds []CredentialHeader, host, method
 	if autoInjected {
 		winners = selectWinners(func(key string) bool { return !reserved[key] }, false)
 	}
+	return winners, autoInjected
+}
+
+// injectCredentials replaces credential headers in the request.
+//
+// A credential is selected in one of two ways:
+//
+//   - Placeholder selection. If the client already sent a credential's header
+//     (any non-empty value), that credential is chosen and its real value
+//     replaces what the client sent. This lets a client pick which grant to use
+//     when several target the same host.
+//   - Auto-injection. If the client sent none of the credentials' headers, all
+//     of them are injected unconditionally, for transparent auth.
+//
+// Exactly one credential is injected per header name. When several share a
+// header name the tie is broken by grant, and the two paths break it in
+// opposite directions: auto-injection prefers a non-"claude" grant, while
+// placeholder selection prefers "claude". The claude grant is Claude Code's
+// OAuth flow, so it must not be injected transparently, but a client that
+// explicitly sends the header is asking for exactly it. The winner does not
+// depend on the order credentials appear in.
+//
+// Client-sent headers are sampled once, before anything is written. Testing the
+// request as it is mutated would let a credential injected by an earlier
+// iteration look like a placeholder the client sent, selecting several
+// same-named credentials at once.
+//
+// Returns a credentialInjectionResult naming the headers injected, the
+// credentials whose values reached the wire, and their grants. Grants and
+// Injected describe only what was sent — never a credential that lost the tie.
+func injectCredentials(req *http.Request, creds []CredentialHeader, host, method, path string, reserved map[string]bool) credentialInjectionResult {
+	if len(creds) == 0 {
+		return credentialInjectionResult{}
+	}
+	winners, autoInjected := selectCredentialWinners(req, creds, reserved)
 
 	injected := make(map[string]bool, len(winners))
 	grants := make([]string, 0, len(winners))
@@ -471,8 +478,9 @@ func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, p
 	if err != nil {
 		return resolved, err
 	}
-	for _, c := range resolved.creds {
-		if c.Unavailable {
+	winners, _ := selectCredentialWinners(innerReq, resolved.creds, nil)
+	for _, i := range winners {
+		if c := resolved.creds[i]; c.Unavailable {
 			return resolvedCredentials{}, &CredentialRequiredError{Grant: c.Grant, Host: host, Unavailable: true}
 		}
 	}

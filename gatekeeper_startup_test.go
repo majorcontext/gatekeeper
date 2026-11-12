@@ -215,8 +215,8 @@ func TestLoadCredentials_FailedFetchDoesNotBlockStartup(t *testing.T) {
 		bad := failingVendor()
 		srv := vendorServer(t, map[string]*vendorSource{"good-key": {token: "good-token"}, "vendor-key": bad})
 		cfg := &Config{Credentials: []CredentialConfig{
-			{Host: "127.0.0.1", Grant: "good", AllowInsecure: true, Source: SourceConfig{Type: "vendor", Secret: "good-key"}, Match: &MatchConfig{Header: "X-Route", Paths: []string{"/good"}}},
-			{Host: "127.0.0.1", Grant: "vendor", AllowInsecure: true, Source: SourceConfig{Type: "vendor", Secret: "vendor-key"}, Match: &MatchConfig{Header: "X-Route", Paths: []string{"/vendor"}}},
+			{Host: "127.0.0.1", Grant: "good", AllowInsecure: true, Source: SourceConfig{Type: "vendor", Secret: "good-key"}},
+			{Host: "127.0.0.1", Grant: "vendor", Header: "X-Api-Key", AllowInsecure: true, Source: SourceConfig{Type: "vendor", Secret: "vendor-key"}},
 		}}
 		if err := srv.loadCredentials(context.Background(), cfg); err != nil {
 			t.Fatalf("loadCredentials with one deleted secret = %v, want nil", err)
@@ -230,26 +230,30 @@ func TestLoadCredentials_FailedFetchDoesNotBlockStartup(t *testing.T) {
 			srv.refreshWG.Wait()
 		}()
 
-		get := func(path string) (int, string) {
-			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:"+port+path, nil)
-			req.Header.Set("X-Route", "x")
+		get := func(header string) (int, string, string) {
+			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:"+port+"/", nil)
+			if header != "" {
+				req.Header.Set(header, "placeholder")
+			}
 			rec := httptest.NewRecorder()
 			srv.proxy.ServeHTTP(rec, req)
-			auth, _, _ := strings.Cut(rec.Body.String(), "|")
-			return rec.Code, auth
+			auth, key, _ := strings.Cut(rec.Body.String(), "|")
+			return rec.Code, auth, key
 		}
-		if code, auth := get("/good"); code != http.StatusOK || auth != "Bearer good-token" {
-			t.Fatalf("/good with the vendor secret deleted = %d %q, want 200 with the good credential", code, auth)
+		if code, auth, _ := get("Authorization"); code != http.StatusOK || auth != "Bearer good-token" {
+			t.Fatalf("request naming the healthy credential = %d %q, want 200 with %q", code, auth, "Bearer good-token")
 		}
-		if code, _ := get("/vendor"); code != http.StatusForbidden {
-			t.Fatalf("/vendor with the secret deleted = %d, want 403", code)
+		for _, header := range []string{"X-Api-Key", ""} {
+			if code, _, _ := get(header); code != http.StatusForbidden {
+				t.Fatalf("request that would inject the unavailable credential (client header %q) = %d, want 403", header, code)
+			}
 		}
 
 		bad.err.Store(nil)
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
-		if code, auth := get("/vendor"); code != http.StatusOK || auth != "Bearer vendor-token" {
-			t.Errorf("/vendor after the secret is restored = %d %q, want 200 with the vendor credential", code, auth)
+		if code, auth, key := get(""); code != http.StatusOK || auth != "Bearer good-token" || key != "vendor-token" {
+			t.Errorf("after the secret is restored = %d %q %q, want 200 with both credentials", code, auth, key)
 		}
 	})
 }
