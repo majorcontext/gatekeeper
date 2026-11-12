@@ -200,6 +200,10 @@ type Credential struct {
 	AllowInsecure bool `yaml:"allow_insecure,omitempty"`
 	// Resolver provides a runtime credential instead of a Source value.
 	Resolver CredentialResolver `yaml:"-"`
+	// Unavailable marks a placeholder for a credential whose source has not
+	// yet produced a value. It matches like the real credential, and a
+	// request that selects it is refused.
+	Unavailable bool `yaml:"-"`
 
 	// Invalidate drops cached state that produced Value when the destination
 	// rejects the credential or reports an exhausted allowance.

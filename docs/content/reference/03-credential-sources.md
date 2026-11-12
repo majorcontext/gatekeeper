@@ -31,7 +31,7 @@ Sources that authenticate with ambient cloud credentials retry a failed first fe
 
 Sources with a configured key do not retry inside the startup window: `gcp-service-account` with `private_key_path` or `private_key_env`, and `github-app`. `env`, `static`, and `process` sources do not retry inside it either.
 
-Any other failed fetch does not stop startup. Gatekeeper logs `credential fetch failed at startup` at ERROR with the host, grant, and source type (never the value), starts without that credential, and retries in the background with the same backoff, capped at 60 seconds. Requests to that host carry no injected credential until a fetch succeeds. Configuration errors (an invalid config, an unknown source type, a bad header) still stop startup. A source that is a refreshing source continues with its normal refresh loop after the first success.
+Any other failed fetch does not stop startup. Gatekeeper logs `credential fetch failed at startup` at ERROR with the host, grant, and source type (never the value), starts without that credential, and retries in the background with the same backoff, capped at 60 seconds. Requests that select that credential get a 403 "credential unavailable" until a fetch succeeds; no broader rule or other credential applies to them. Configuration errors (an invalid config, an unknown source type, a bad header) still stop startup. A source that is a refreshing source continues with its normal refresh loop after the first success.
 
 ---
 
@@ -55,7 +55,7 @@ Name of the environment variable to read.
 - **Required:** Yes
 - **Default:** —
 
-The variable must be set and non-empty at startup. If unset, gatekeeper logs an error at startup and injects no credential for that host.
+The variable must be set and non-empty at startup. If unset, gatekeeper logs an error at startup and refuses requests that select that credential.
 
 ---
 

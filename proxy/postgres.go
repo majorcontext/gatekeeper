@@ -111,6 +111,20 @@ func (s *staticPostgresResolver) ResolvePassword(ctx context.Context, host, user
 // InvalidatePassword is a no-op: static passwords are never cached.
 func (s *staticPostgresResolver) InvalidatePassword(host, user, database string) {}
 
+type unavailablePostgresResolver struct{}
+
+func (unavailablePostgresResolver) ResolvePassword(context.Context, string, string, string) (string, error) {
+	return "", errors.New("credential unavailable")
+}
+
+func (unavailablePostgresResolver) InvalidatePassword(string, string, string) {}
+
+// NewUnavailablePostgresResolver returns a placeholder resolver that fails
+// every connection, so a broader pattern cannot serve the host.
+func NewUnavailablePostgresResolver() PostgresCredentialResolver {
+	return unavailablePostgresResolver{}
+}
+
 // SetPostgresResolver registers a proxy-level Postgres credential resolver
 // for hosts matching pattern. Calling again with the same pattern replaces
 // the previous resolver. Patterns match hostname only; a pattern with an

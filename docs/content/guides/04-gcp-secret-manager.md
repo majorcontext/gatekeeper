@@ -74,7 +74,7 @@ source:
 gatekeeper --config gatekeeper.yaml
 ```
 
-If ADC is not configured or the secret does not exist, gatekeeper logs an ERROR at startup, injects no credential for that host, and retries in the background.
+If ADC is not configured or the secret does not exist, gatekeeper logs an ERROR at startup, refuses requests that select that credential, and retries in the background.
 
 ## Verification
 

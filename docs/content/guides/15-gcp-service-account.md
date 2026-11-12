@@ -174,7 +174,7 @@ log:
 gatekeeper --config gatekeeper.yaml
 ```
 
-If the key JSON is malformed, missing required fields, or ADC is not configured for Secret Manager access, gatekeeper logs an ERROR at startup, injects no credential for that host, and retries in the background.
+If the key JSON is malformed, missing required fields, or ADC is not configured for Secret Manager access, gatekeeper logs an ERROR at startup, refuses requests that select that credential, and retries in the background.
 
 ## Verification
 

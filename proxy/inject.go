@@ -467,6 +467,19 @@ func getRunContext(r *http.Request) *RunContextData {
 // header and whose credentials do not answer that header has the header
 // removed, so the selecting placeholder never reaches upstream.
 func (p *Proxy) getCredentialsForRequest(ctxReq, innerReq *http.Request, host, path string) (resolvedCredentials, error) {
+	resolved, err := p.resolveCredentialsForRequest(ctxReq, innerReq, host, path)
+	if err != nil {
+		return resolved, err
+	}
+	for _, c := range resolved.creds {
+		if c.Unavailable {
+			return resolvedCredentials{}, &CredentialRequiredError{Grant: c.Grant, Host: host, Unavailable: true}
+		}
+	}
+	return resolved, nil
+}
+
+func (p *Proxy) resolveCredentialsForRequest(ctxReq, innerReq *http.Request, host, path string) (resolvedCredentials, error) {
 	if rc := getRunContext(ctxReq); rc != nil {
 		return p.resolveRunContextCredentials(ctxReq, innerReq, host, path, rc)
 	}

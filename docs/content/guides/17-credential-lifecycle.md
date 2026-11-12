@@ -23,7 +23,7 @@ Credentials move through several distinct lifecycle stages depending on source t
 
 ## Startup: fetch once, retry in the background
 
-Every credential in `gatekeeper.yaml` is fetched once when the server starts, with a 10-second timeout per fetch. If a `Fetch` call fails or times out, gatekeeper still starts, injects no credential for that host, and retries in the background:
+Every credential in `gatekeeper.yaml` is fetched once when the server starts, with a 10-second timeout per fetch. If a `Fetch` call fails or times out, gatekeeper still starts, refuses requests that select that credential, and retries in the background:
 
 ```yaml
 credentials:
@@ -36,7 +36,7 @@ credentials:
       private_key_path: /etc/gatekeeper/github-app.pem
 ```
 
-If the GitHub App's private key file is missing or the installation token request fails, gatekeeper logs an ERROR naming the host, grant, and source type, and starts. One failed credential never takes down the proxy or the other credentials. The host gets no injected credential, and never another host's credential, until a retry succeeds; the retry backoff starts at 1 second and is capped at 60 seconds. Invalid configuration (an unknown source type, a bad header) still stops startup. `static` and `env` sources resolve instantly; `aws-secretsmanager`, `gcp-secretmanager`, `process`, `github-app`, and `gcp-service-account` all make a network or subprocess call during this window, so a slow or unreachable backend delays startup up to the 10s timeout per credential. Sources that authenticate with ambient cloud credentials are the exception: `aws-secretsmanager`, `gcp-secretmanager`, and `gcp-service-account` with `secret` or `adc`. Gatekeeper retries a failed first fetch of these sources with backoff for up to 30 seconds, because the GKE metadata server can refuse requests for the first seconds of a Pod.
+If the GitHub App's private key file is missing or the installation token request fails, gatekeeper logs an ERROR naming the host, grant, and source type, and starts. One failed credential never takes down the proxy or the other credentials. Requests that select that credential get a 403 "credential unavailable", and no broader rule or other credential applies to them, until a retry succeeds; the retry backoff starts at 1 second and is capped at 60 seconds. Invalid configuration (an unknown source type, a bad header) still stops startup. `static` and `env` sources resolve instantly; `aws-secretsmanager`, `gcp-secretmanager`, `process`, `github-app`, and `gcp-service-account` all make a network or subprocess call during this window, so a slow or unreachable backend delays startup up to the 10s timeout per credential. Sources that authenticate with ambient cloud credentials are the exception: `aws-secretsmanager`, `gcp-secretmanager`, and `gcp-service-account` with `secret` or `adc`. Gatekeeper retries a failed first fetch of these sources with backoff for up to 30 seconds, because the GKE metadata server can refuse requests for the first seconds of a Pod.
 
 Credentials that share an identical `source` block (same type and fields) are deduplicated: one `Fetch`, applied to every host that references it. See [Source Deduplication](../concepts/03-credential-sources.md#source-deduplication).
 

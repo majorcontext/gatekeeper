@@ -212,24 +212,11 @@ func (s *vendorSource) Type() string { return "vendor" }
 func TestLoadCredentials_FailedFetchDoesNotBlockStartup(t *testing.T) {
 	port := startEchoBackend(t)
 	synctest.Test(t, func(t *testing.T) {
-		deleted := errors.New("secretmanager: rpc error: code = NotFound desc = secret vendor-key was deleted")
-		good := &vendorSource{token: "good-token"}
-		bad := &vendorSource{token: "vendor-token"}
-		bad.err.Store(&deleted)
-
-		srv, err := New(context.Background(), &Config{Proxy: ProxyConfig{Port: 0, Host: "127.0.0.1"}}, Options{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		srv.resolveSource = func(sc SourceConfig) (credentialsource.CredentialSource, error) {
-			if sc.Secret == "vendor-key" {
-				return bad, nil
-			}
-			return good, nil
-		}
+		bad := failingVendor()
+		srv := vendorServer(t, map[string]*vendorSource{"good-key": {token: "good-token"}, "vendor-key": bad})
 		cfg := &Config{Credentials: []CredentialConfig{
-			{Host: "127.0.0.1", Grant: "good", AllowInsecure: true, Source: SourceConfig{Type: "vendor", Secret: "good-key"}},
-			{Host: "127.0.0.1", Grant: "vendor", Header: "X-Api-Key", AllowInsecure: true, Source: SourceConfig{Type: "vendor", Secret: "vendor-key"}},
+			{Host: "127.0.0.1", Grant: "good", AllowInsecure: true, Source: SourceConfig{Type: "vendor", Secret: "good-key"}, Match: &MatchConfig{Header: "X-Route", Paths: []string{"/good"}}},
+			{Host: "127.0.0.1", Grant: "vendor", AllowInsecure: true, Source: SourceConfig{Type: "vendor", Secret: "vendor-key"}, Match: &MatchConfig{Header: "X-Route", Paths: []string{"/vendor"}}},
 		}}
 		if err := srv.loadCredentials(context.Background(), cfg); err != nil {
 			t.Fatalf("loadCredentials with one deleted secret = %v, want nil", err)
@@ -243,22 +230,129 @@ func TestLoadCredentials_FailedFetchDoesNotBlockStartup(t *testing.T) {
 			srv.refreshWG.Wait()
 		}()
 
-		injected := func() (authorization, apiKey string) {
-			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:"+port+"/", nil)
+		get := func(path string) (int, string) {
+			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:"+port+path, nil)
+			req.Header.Set("X-Route", "x")
 			rec := httptest.NewRecorder()
 			srv.proxy.ServeHTTP(rec, req)
-			authorization, apiKey, _ = strings.Cut(rec.Body.String(), "|")
-			return authorization, apiKey
+			auth, _, _ := strings.Cut(rec.Body.String(), "|")
+			return rec.Code, auth
 		}
-		if a, k := injected(); a != "Bearer good-token" || k != "" {
-			t.Fatalf("with the vendor secret deleted: Authorization = %q, X-Api-Key = %q; want %q and no key", a, k, "Bearer good-token")
+		if code, auth := get("/good"); code != http.StatusOK || auth != "Bearer good-token" {
+			t.Fatalf("/good with the vendor secret deleted = %d %q, want 200 with the good credential", code, auth)
+		}
+		if code, _ := get("/vendor"); code != http.StatusForbidden {
+			t.Fatalf("/vendor with the secret deleted = %d, want 403", code)
 		}
 
 		bad.err.Store(nil)
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
-		if a, k := injected(); a != "Bearer good-token" || k != "vendor-token" {
-			t.Errorf("after the secret is restored: Authorization = %q, X-Api-Key = %q; want %q and %q", a, k, "Bearer good-token", "vendor-token")
+		if code, auth := get("/vendor"); code != http.StatusOK || auth != "Bearer vendor-token" {
+			t.Errorf("/vendor after the secret is restored = %d %q, want 200 with the vendor credential", code, auth)
 		}
 	})
+}
+
+func vendorServer(t *testing.T, srcs map[string]*vendorSource) *Server {
+	t.Helper()
+	srv := newBareServer(t)
+	srv.resolveSource = func(sc SourceConfig) (credentialsource.CredentialSource, error) {
+		return srcs[sc.Secret], nil
+	}
+	return srv
+}
+
+func failingVendor() *vendorSource {
+	v := &vendorSource{token: "vendor-token"}
+	e := errors.New("secretmanager: rpc error: code = NotFound desc = secret was deleted")
+	v.err.Store(&e)
+	return v
+}
+
+func TestLoadCredentials_FailedExactHostIsNotServedByWildcard(t *testing.T) {
+	srv := vendorServer(t, map[string]*vendorSource{"wild": {token: "wildcard-token"}, "exact": failingVendor()})
+	cfg := &Config{Credentials: []CredentialConfig{
+		{Host: "api.example.com", Grant: "exact", AllowInsecure: true, Source: SourceConfig{Type: "vendor", Secret: "exact"}},
+		{Host: "*.example.com", Grant: "wild", AllowInsecure: true, Source: SourceConfig{Type: "vendor", Secret: "wild"}},
+	}}
+	if err := srv.loadCredentials(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "http://api.example.com/", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	srv.proxy.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status for the host with the deleted secret = %d, want 403 (never another credential)", rec.Code)
+	}
+}
+
+func TestLoadCredentials_NeonSharingAFailedSourceKeepsItsResolver(t *testing.T) {
+	srv := vendorServer(t, map[string]*vendorSource{"shared": failingVendor()})
+	shared := SourceConfig{Type: "vendor", Secret: "shared"}
+	cfg := &Config{Credentials: []CredentialConfig{
+		{Host: "db.example.com", Grant: "db", Source: shared, Postgres: &PostgresCredentialConfig{Resolver: "static"}},
+		{Host: "*.neon.tech", Grant: "neon", Source: shared, Postgres: &PostgresCredentialConfig{Resolver: "neon", Project: "p"}},
+	}}
+	if err := srv.loadCredentials(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(srv.pendingRefreshes) != 1 || len(srv.pendingRefreshes[0].creds) != 1 || srv.pendingRefreshes[0].creds[0].Host != "db.example.com" {
+		t.Errorf("pendingRefreshes = %+v, want only the static db.example.com queued for recovery", srv.pendingRefreshes)
+	}
+}
+
+func TestLoadCredentials_RecoveredNarrowRuleKeepsItsPrecedence(t *testing.T) {
+	port := startEchoBackend(t)
+	synctest.Test(t, func(t *testing.T) {
+		narrow := failingVendor()
+		srv := vendorServer(t, map[string]*vendorSource{"narrow": narrow, "broad": {token: "broad-token"}})
+		cfg := &Config{Credentials: []CredentialConfig{
+			{Host: "127.0.0.1", Grant: "narrow", AllowInsecure: true, Source: SourceConfig{Type: "vendor", Secret: "narrow"}, Match: &MatchConfig{Header: "X-Route", Paths: []string{"/v1/admin"}}},
+			{Host: "127.0.0.1", Grant: "broad", AllowInsecure: true, Source: SourceConfig{Type: "vendor", Secret: "broad"}, Match: &MatchConfig{Header: "X-Route", Paths: []string{"/v1"}}},
+		}}
+		if err := srv.loadCredentials(context.Background(), cfg); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		for _, pr := range srv.pendingRefreshes {
+			srv.startPending(ctx, pr)
+		}
+		defer func() {
+			cancel()
+			srv.refreshWG.Wait()
+		}()
+		get := func(path string) (int, string) {
+			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:"+port+path, nil)
+			req.Header.Set("X-Route", "x")
+			rec := httptest.NewRecorder()
+			srv.proxy.ServeHTTP(rec, req)
+			auth, _, _ := strings.Cut(rec.Body.String(), "|")
+			return rec.Code, auth
+		}
+		if code, _ := get("/v1/admin/x"); code != http.StatusForbidden {
+			t.Errorf("/v1/admin/x before recovery = %d, want 403", code)
+		}
+		narrow.err.Store(nil)
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+		if code, auth := get("/v1/admin/x"); code != http.StatusOK || auth != "Bearer vendor-token" {
+			t.Errorf("/v1/admin/x after recovery = %d %q, want 200 with the narrow credential", code, auth)
+		}
+		if code, auth := get("/v1/other"); code != http.StatusOK || auth != "Bearer broad-token" {
+			t.Errorf("/v1/other = %d %q, want 200 with the broad credential", code, auth)
+		}
+	})
+}
+
+func TestLoadCredentials_CanceledContextFailsEvenWhenEveryFetchSucceeds(t *testing.T) {
+	srv := newBareServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cfg := &Config{Credentials: []CredentialConfig{{Host: "api.example.com", Grant: "a", Source: SourceConfig{Type: "static", Value: "tok"}}}}
+	if err := srv.loadCredentials(ctx, cfg); !errors.Is(err, context.Canceled) {
+		t.Errorf("loadCredentials with a canceled context = %v, want context.Canceled", err)
+	}
 }

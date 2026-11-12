@@ -41,14 +41,19 @@ type ResolverDeclined struct {
 }
 
 // CredentialRequiredError reports a request that an explicit-only decline
-// left with no credential. The proxy answers it with 403.
+// left with no credential, or that selected an unavailable credential. The proxy answers it with 403.
 type CredentialRequiredError struct {
 	Grant  string
 	Host   string
 	Reason string
+	// Unavailable is set for a credential whose source has not produced a value.
+	Unavailable bool
 }
 
 func (e *CredentialRequiredError) Error() string {
+	if e.Unavailable {
+		return "the " + e.Grant + " credential for " + e.Host + " is unavailable"
+	}
 	msg := "no " + e.Grant + " credential for " + e.Host + ", and the request names no static credential"
 	if e.Reason != "" {
 		msg += ": " + e.Reason

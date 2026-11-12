@@ -71,7 +71,7 @@ The secret value must be a plaintext string (not binary). Gatekeeper fetches it 
 gatekeeper --config gatekeeper.yaml
 ```
 
-If AWS credentials are missing or the secret does not exist, gatekeeper logs an ERROR at startup, injects no credential for that host, and retries in the background.
+If AWS credentials are missing or the secret does not exist, gatekeeper logs an ERROR at startup, refuses requests that select that credential, and retries in the background.
 
 ## Verification
 

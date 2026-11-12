@@ -398,20 +398,25 @@ func (s *Server) loadCredentials(ctx context.Context, cfg *Config) (err error) {
 	}
 	wg.Wait()
 
-	if ctx.Err() != nil {
-		for _, e := range entries {
-			if e.source != nil && e.source.err != nil {
-				return fetchError(e.cred, e.pg, e.source.err)
-			}
-		}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("loading credentials: %w", err)
 	}
 
 	refreshMap := make(map[*pendingSource]*pendingRefresh)
 	var refreshOrder []*pendingSource
 	for _, e := range entries {
-		if e.source != nil && e.source.err != nil {
+		if e.source != nil && e.source.err != nil && e.neon == nil {
 			s.log().Error("credential fetch failed at startup, retrying in the background; the host gets no injected credential until it succeeds",
 				"host", e.cred.Host, "grant", e.cred.Grant, "source", e.cred.Source.Type, "postgres", e.pg, "error", e.source.err)
+			if e.pg {
+				s.proxy.SetPostgresResolver(e.cred.Host, proxy.NewUnavailablePostgresResolver())
+			} else {
+				placeholder := credentialHeader(e.cred, e.header, "")
+				placeholder.Unavailable = true
+				if err := s.proxy.SetCredentialEntry(placeholder); err != nil {
+					return fmt.Errorf("credential for %s: %w", e.cred.Host, err)
+				}
+			}
 			if pr, ok := refreshMap[e.source]; ok {
 				pr.creds = append(pr.creds, e.cred)
 			} else {
@@ -674,7 +679,7 @@ func (s *Server) startCredentialRetry(ctx context.Context, src credentialsource.
 				if strings.EqualFold(header, "Authorization") {
 					val = ensureAuthScheme(val, cred.Prefix, cred.Format)
 				}
-				if err := s.setCredential(cred, header, val); err != nil {
+				if err := s.updateCredential(cred, header, val); err != nil {
 					s.log().Error("credential recovered but invalid", "host", cred.Host, "grant", cred.Grant, "error", err)
 					continue
 				}
