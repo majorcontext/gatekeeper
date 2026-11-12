@@ -855,7 +855,6 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.mu.Lock()
 	s.proxyLn = ln
-	s.proxyAddr = ln.Addr().String()
 	s.mu.Unlock()
 
 	otelHandler, err := proxy.NewOTelHandler(&healthHandler{next: s.proxy}, proxy.OTelOptions{})
@@ -895,10 +894,7 @@ func (s *Server) Start(ctx context.Context) error {
 			s.abortProxyServer()
 			return fmt.Errorf("starting postgres listener: %w", err)
 		}
-		s.mu.Lock()
-		s.pgServer = pg
-		s.pgAddr = pg.Addr()
-		s.mu.Unlock()
+		s.publishAddrs(ln, pg)
 		s.log().Info("gatekeeper postgres listener", "addr", pg.Addr(), "subsystem", "proxy")
 	} else {
 		go func() { _ = s.proxyServer.Serve(ln) }()
@@ -912,6 +908,7 @@ func (s *Server) Start(ctx context.Context) error {
 				// failure doesn't leak the HTTP listener. http.Server.Shutdown
 				// closes the listener it was Serve-ing, so closing the server is
 				// sufficient — closing ln again here would race the Serve goroutine.
+				s.publishAddrs(ln, nil)
 				s.abortProxyServer()
 				return fmt.Errorf("starting postgres listener: %w", err)
 			}
@@ -927,14 +924,14 @@ func (s *Server) Start(ctx context.Context) error {
 			pg := proxy.NewPostgresServer(s.proxy)
 			if err := pg.StartListener(pgLn); err != nil {
 				_ = pgLn.Close()
+				s.publishAddrs(ln, nil)
 				s.abortProxyServer()
 				return fmt.Errorf("starting postgres listener: %w", err)
 			}
-			s.mu.Lock()
-			s.pgServer = pg
-			s.pgAddr = pg.Addr()
-			s.mu.Unlock()
+			s.publishAddrs(ln, pg)
 			s.log().Info("gatekeeper postgres listener", "addr", pg.Addr(), "subsystem", "proxy")
+		} else {
+			s.publishAddrs(ln, nil)
 		}
 	}
 
@@ -956,6 +953,18 @@ func (s *Server) Start(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return s.Stop(shutdownCtx)
+}
+
+// publishAddrs makes the proxy and Postgres addresses visible together, so a
+// caller that sees ProxyAddr also sees PostgresAddr.
+func (s *Server) publishAddrs(ln net.Listener, pg *proxy.PostgresServer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.proxyAddr = ln.Addr().String()
+	if pg != nil {
+		s.pgServer = pg
+		s.pgAddr = pg.Addr()
+	}
 }
 
 // Stop gracefully shuts down the proxy server and all background refresh
