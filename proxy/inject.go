@@ -302,13 +302,20 @@ func selectCredentialWinners(req *http.Request, creds []CredentialHeader, reserv
 	// its value here, so it is skipped entirely: the sample would read the
 	// bundle's own value as if the client had sent it, and the winner would
 	// overwrite an atomic replacement with one half of something else.
+	//
+	// An always-inject credential is never a client selection, even when the
+	// client sent its header: it is injected regardless, so it must neither
+	// pick the credentials on other headers nor suppress auto-injection.
 	clientSent := make(map[string]bool, len(creds))
+	always := make(map[string]bool)
 	for _, c := range creds {
 		key := strings.ToLower(c.Name)
 		if reserved[key] {
 			continue
 		}
-		if req.Header.Get(c.Name) != "" {
+		if c.AlwaysInject {
+			always[key] = true
+		} else if req.Header.Get(c.Name) != "" {
 			clientSent[key] = true
 		}
 	}
@@ -328,6 +335,14 @@ func selectCredentialWinners(req *http.Request, creds []CredentialHeader, reserv
 				winners[key] = i
 				continue
 			}
+			// A flagged credential outranks an unmarked one on its header,
+			// so the opt-in is never dropped by the grant tie-break.
+			if c.AlwaysInject != creds[j].AlwaysInject {
+				if c.AlwaysInject {
+					winners[key] = i
+				}
+				continue
+			}
 			incumbent := creds[j].Grant == "claude"
 			challenger := c.Grant == "claude"
 			if preferClaude && challenger && !incumbent {
@@ -339,22 +354,13 @@ func selectCredentialWinners(req *http.Request, creds []CredentialHeader, reserv
 		return winners
 	}
 
-	// Whether the client itself selected anything. Always-inject credentials
-	// are added after this check so they never count as a client request and
-	// never suppress the auto-injection fallback.
-	clientSelected := len(clientSent) > 0
-	for _, c := range creds {
-		if c.AlwaysInject {
-			clientSent[strings.ToLower(c.Name)] = true
-		}
-	}
-	winners := selectWinners(func(key string) bool { return clientSent[key] }, true)
+	winners := selectWinners(func(key string) bool { return clientSent[key] || always[key] }, true)
 	// Auto-injection is the "client asked for nothing, so give it everything"
 	// fallback. A bundle replacement is itself a placeholder the client sent,
 	// so a request that matched one did ask for something and must not trigger
 	// it — otherwise reserving the bundle's header would start auto-injecting
 	// the host's other credentials.
-	autoInjected := !clientSelected && len(reserved) == 0
+	autoInjected := len(clientSent) == 0 && len(reserved) == 0
 	if autoInjected {
 		winners = selectWinners(func(key string) bool { return !reserved[key] }, false)
 	}

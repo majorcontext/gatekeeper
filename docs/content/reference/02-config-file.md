@@ -396,7 +396,7 @@ credentials:
 - **Required:** No
 - **Default:** `false`
 
-Normally, when a client sends the header of one credential, only the credentials on headers it sent are injected. Set `always_inject: true` on companion headers, such as Cloudflare Access service-token headers, that must accompany a client-chosen `Authorization`. An always-injected credential replaces any value the client sent for its header. It does not count as a client selection, so a request that sends none of the host's other credential headers still auto-injects the rest. If an always-injected credential is unavailable, the request is refused.
+Normally, when a client sends the header of one credential, only the credentials on headers it sent are injected. Set `always_inject: true` on companion headers, such as Cloudflare Access service-token headers, that must accompany a client-chosen `Authorization`. An always-injected credential replaces any value the client sent for its header. It never counts as a client selection, even when the client sends its header, so a request that sends none of the host's other credential headers still auto-injects the rest. If another credential on the same host uses the same header name, the always-injected one wins. If an always-injected credential is unavailable, the request is refused.
 
 ### credentials[].allow_insecure
 

@@ -550,6 +550,22 @@ func contractRows() []contractRow {
 			want:  alwaysInjectWant,
 		},
 		{
+			name:    "client-sent always-inject header is replaced and does not suppress auto-injection",
+			proxy:   alwaysInjectHost,
+			headers: map[string]string{"CF-Access-Client-Id": "ph"},
+			want:    alwaysInjectWant,
+		},
+		{
+			name: "always-inject credential beats an unmarked one on the same header",
+			proxy: func(p *Proxy, k hostKeys, _ *atomic.Int32) {
+				rawCreds(p, k.h,
+					cred("CF-Access-Client-Id", "unmarked", "claude"),
+					CredentialHeader{Name: "CF-Access-Client-Id", Value: "forced", Grant: "cf", AlwaysInject: true})
+			},
+			headers: map[string]string{"CF-Access-Client-Id": "ph"},
+			want:    map[string]string{"CF-Access-Client-Id": "forced"},
+		},
+		{
 			name: "always-inject companions on another host do not leak",
 			proxy: func(p *Proxy, _ hostKeys, _ *atomic.Int32) {
 				rawCreds(p, "hatchet.example.com", alwaysInjectCreds()...)
