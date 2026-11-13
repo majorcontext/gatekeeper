@@ -198,6 +198,9 @@ type Credential struct {
 	RemoveHeaders []string `yaml:"remove_headers,omitempty"`
 	// AllowInsecure permits injection into plain HTTP requests.
 	AllowInsecure bool `yaml:"allow_insecure,omitempty"`
+	// AlwaysInject injects this credential on every matching request, even when
+	// the client's own headers select a different credential on the host.
+	AlwaysInject bool `yaml:"always_inject,omitempty"`
 	// Resolver provides a runtime credential instead of a Source value.
 	Resolver CredentialResolver `yaml:"-"`
 	// Unavailable marks a placeholder for a credential whose source has not

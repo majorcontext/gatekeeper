@@ -143,6 +143,24 @@ func resolverReturning(calls *atomic.Int32, v, grant string) CredentialResolver 
 	}
 }
 
+var alwaysInjectWant = map[string]string{
+	"Authorization":           "Bearer real-vendor-token",
+	"CF-Access-Client-Id":     "real-cf-id",
+	"CF-Access-Client-Secret": "real-cf-secret",
+}
+
+func alwaysInjectCreds() []CredentialHeader {
+	return []CredentialHeader{
+		cred("Authorization", "Bearer real-vendor-token", "vendor"),
+		{Name: "CF-Access-Client-Id", Value: "real-cf-id", Grant: "cf-id", AlwaysInject: true},
+		{Name: "CF-Access-Client-Secret", Value: "real-cf-secret", Grant: "cf-secret", AlwaysInject: true},
+	}
+}
+
+func alwaysInjectHost(p *Proxy, k hostKeys, _ *atomic.Int32) {
+	rawCreds(p, k.h, alwaysInjectCreds()...)
+}
+
 func contractRows() []contractRow {
 	return []contractRow{
 		// Per-request context credentials versus proxy-level credentials.
@@ -511,6 +529,43 @@ func contractRows() []contractRow {
 			},
 			headers: map[string]string{"X-Api-Key": "placeholder"},
 			want:    map[string]string{"X-Api-Key": "key"},
+		},
+
+		// Always-inject companion headers (Cloudflare Access beside a vendor bearer).
+		{
+			name:    "always-inject companions ride along when the client sends any Authorization",
+			proxy:   alwaysInjectHost,
+			headers: map[string]string{"Authorization": "Bearer client-supplied"},
+			want:    alwaysInjectWant,
+		},
+		{
+			name:    "always-inject companions replace client placeholders",
+			proxy:   alwaysInjectHost,
+			headers: map[string]string{"Authorization": "Bearer client-supplied", "CF-Access-Client-Id": "ph", "CF-Access-Client-Secret": "ph"},
+			want:    alwaysInjectWant,
+		},
+		{
+			name:  "always-inject companions do not suppress auto-injection without client auth",
+			proxy: alwaysInjectHost,
+			want:  alwaysInjectWant,
+		},
+		{
+			name: "always-inject companions on another host do not leak",
+			proxy: func(p *Proxy, _ hostKeys, _ *atomic.Int32) {
+				rawCreds(p, "hatchet.example.com", alwaysInjectCreds()...)
+			},
+			headers: map[string]string{"Authorization": "Bearer client-supplied"},
+			want:    map[string]string{"Authorization": "Bearer client-supplied"},
+		},
+		{
+			name: "unavailable always-inject credential fails closed",
+			proxy: func(p *Proxy, k hostKeys, _ *atomic.Int32) {
+				creds := alwaysInjectCreds()
+				creds[1].Unavailable = true
+				rawCreds(p, k.h, creds...)
+			},
+			headers:    map[string]string{"Authorization": "Bearer client-supplied"},
+			wantStatus: http.StatusForbidden,
 		},
 
 		// Extra headers.
