@@ -339,13 +339,22 @@ func selectCredentialWinners(req *http.Request, creds []CredentialHeader, reserv
 		return winners
 	}
 
+	// Whether the client itself selected anything. Always-inject credentials
+	// are added after this check so they never count as a client request and
+	// never suppress the auto-injection fallback.
+	clientSelected := len(clientSent) > 0
+	for _, c := range creds {
+		if c.AlwaysInject {
+			clientSent[strings.ToLower(c.Name)] = true
+		}
+	}
 	winners := selectWinners(func(key string) bool { return clientSent[key] }, true)
 	// Auto-injection is the "client asked for nothing, so give it everything"
 	// fallback. A bundle replacement is itself a placeholder the client sent,
 	// so a request that matched one did ask for something and must not trigger
 	// it — otherwise reserving the bundle's header would start auto-injecting
 	// the host's other credentials.
-	autoInjected := len(winners) == 0 && len(reserved) == 0
+	autoInjected := !clientSelected && len(reserved) == 0
 	if autoInjected {
 		winners = selectWinners(func(key string) bool { return !reserved[key] }, false)
 	}
@@ -362,6 +371,10 @@ func selectCredentialWinners(req *http.Request, creds []CredentialHeader, reserv
 //     when several target the same host.
 //   - Auto-injection. If the client sent none of the credentials' headers, all
 //     of them are injected unconditionally, for transparent auth.
+//
+// A credential marked AlwaysInject is added to whichever selection applies.
+// It replaces any client value for its header, never counts as a client
+// selection, and so cannot suppress auto-injection of the others.
 //
 // Exactly one credential is injected per header name. When several share a
 // header name the tie is broken by grant, and the two paths break it in

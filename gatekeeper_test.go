@@ -758,6 +758,23 @@ credentials:
 	}
 }
 
+func TestParseConfigAlwaysInject(t *testing.T) {
+	cfg, err := ParseConfig([]byte(`
+credentials:
+  - host: hatchet.example.com
+    header: CF-Access-Client-Id
+    always_inject: true
+    source: {type: static, value: x}
+`))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	c := cfg.Credentials[0]
+	if !c.AlwaysInject || !credentialHeader(c, c.Header, "x").AlwaysInject {
+		t.Errorf("credential = %+v, want always_inject carried to the proxy credential", c)
+	}
+}
+
 func TestParseConfigAllowInsecure(t *testing.T) {
 	cfg, err := ParseConfig([]byte(`
 credentials:

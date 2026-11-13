@@ -376,6 +376,28 @@ Grant names appear in the `grants` field of canonical request log lines and in O
 
 Grant names normally have no effect on which credential is injected. The one exception: when multiple credentials targeting the same host share a header name, gatekeeper breaks the tie by grant name. If the client sent a placeholder value in that header, the credential with `grant: claude` wins (letting the client explicitly opt into that grant). Otherwise, for unprompted auto-injection, a non-`claude` grant wins over `claude`, so `claude` is only injected when the client explicitly requests it via a placeholder. This tie-break only matters when two or more credentials collide on the same host and header; with no collision, `grant` is purely a logging label.
 
+### credentials[].always_inject
+
+Injects this credential on every request that matches its host, even when the client's own headers select a different credential.
+
+```yaml
+credentials:
+  - host: api.example.com
+    grant: vendor
+    source: {type: env, var: VENDOR_TOKEN}
+  - host: api.example.com
+    header: CF-Access-Client-Id
+    grant: cf-id
+    always_inject: true
+    source: {type: env, var: CF_ACCESS_ID}
+```
+
+- **Type:** `bool`
+- **Required:** No
+- **Default:** `false`
+
+Normally, when a client sends the header of one credential, only the credentials on headers it sent are injected. Set `always_inject: true` on companion headers, such as Cloudflare Access service-token headers, that must accompany a client-chosen `Authorization`. An always-injected credential replaces any value the client sent for its header. It does not count as a client selection, so a request that sends none of the host's other credential headers still auto-injects the rest. If an always-injected credential is unavailable, the request is refused.
+
 ### credentials[].allow_insecure
 
 Permits injecting the credential into a plain-HTTP request.
