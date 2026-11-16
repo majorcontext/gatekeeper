@@ -4,6 +4,19 @@ Gatekeeper is a standalone credential-injecting TLS-intercepting proxy. It trans
 
 Gatekeeper is pre-1.0. The configuration schema and credential source interface may change between minor versions.
 
+## v0.40.1 — 2026-11-16
+
+### Security
+
+- **Patched dependencies** (`go.mod`) — upgrades google.golang.org/grpc to v1.83.2, github.com/klauspost/compress to v1.20.2, OpenTelemetry Go to v1.47.0 (sdk/log v1.47.0, otlploghttp v0.23.0, otelslog v0.21.0), github.com/google/cel-go to v0.29.0, and github.com/nwaples/rardecode/v2 to v2.2.0 (with github.com/mholt/archives v0.1.5), fixing Dependabot alerts #1-#7 (#121).
+- **Go 1.27.4 and brotli v1.2.7** (`go.mod`, `cmd/gatekeeper/Dockerfile`) — builds with Go 1.27.4 (GO-2026-6859, `net/http`) and upgrades github.com/andybalholm/brotli to v1.2.7 (GO-2026-6888) (#122).
+
+## v0.40.0 — 2026-11-13
+
+### Added
+
+- **`always_inject` credential option** (`proxy/inject.go`, `gatekeeper.go`) — a credential with `always_inject: true` is injected on every request to its host, even when the client's headers select a different credential. Use it for companion headers, such as Cloudflare Access service-token headers, that must accompany a client-chosen `Authorization` (#120).
+
 ## v0.39.0 — 2026-11-12
 
 ### Changed
