@@ -12,7 +12,7 @@ Relay Model Context Protocol (MCP) requests to remote MCP servers with credentia
 
 ## Prerequisites
 
-- Go 1.27.3+
+- Go 1.27.4+
 - Familiarity with embedding gatekeeper as a library ([Go Library Usage](./09-go-library.md))
 
 ## Minimal setup
