@@ -26,7 +26,7 @@ Gatekeeper also runs an optional [Postgres data plane](#postgres-data-plane) —
 go install github.com/majorcontext/gatekeeper/cmd/gatekeeper@latest
 ```
 
-**Requires:** Go 1.27.3+
+**Requires:** Go 1.27.4+
 
 Or pull the published Docker image:
 
